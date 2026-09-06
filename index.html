@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Capture Scene Viewer</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="sidebar">
+        <div id="sidebar-scroll">
+          <h1>Capture Scene Viewer</h1>
+          <p class="subtitle">Drop a folder exported by the RenderDoc SceneExporter extension to reconstruct it here.</p>
+
+          <div class="dropzone" id="dropzone">
+            <div><strong>Drop export folder</strong> or click to browse</div>
+            <div class="hint">expects manifest.json at the top level</div>
+          </div>
+          <input type="file" id="folder-input" webkitdirectory multiple />
+
+          <div id="pass-section" style="display: none">
+            <div class="section-label">Detected passes</div>
+            <div class="pass-list" id="pass-list"></div>
+
+            <div class="toggle-row">
+              <div>
+                <div class="lbl">Use posed meshes</div>
+                <span class="sub">Off = bind pose (no world placement)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="posed-toggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div id="pose-warning" class="warning" style="display: none"></div>
+
+            <button class="primary" id="reconstruct-btn">Reconstruct scene</button>
+            <button class="ghost" id="reset-cam-btn" style="width: 100%; margin-top: 8px">Reset camera</button>
+          </div>
+        </div>
+        <div id="status-bar">Waiting for a folder&hellip;</div>
+      </div>
+
+      <div id="viewport">
+        <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
+        <div id="hud" style="display: none"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
