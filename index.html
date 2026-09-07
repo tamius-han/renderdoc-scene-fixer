@@ -3,48 +3,93 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body { background-color: #000; color: #aaa; }
+
+      .hide-on-initial-load { display: none; }
+    </style>
     <title>Capture Scene Viewer</title>
   </head>
   <body>
-    <div id="app">
-      <div id="sidebar">
-        <div id="sidebar-scroll">
-          <h1>Capture Scene Viewer</h1>
-          <p class="subtitle">Drop a folder exported by the RenderDoc SceneExporter extension to reconstruct it here.</p>
-
-          <div class="dropzone" id="dropzone">
-            <div><strong>Drop export folder</strong> or click to browse</div>
-            <div class="hint">expects manifest.json at the top level</div>
-          </div>
-          <input type="file" id="folder-input" webkitdirectory multiple />
-
-          <div id="pass-section" style="display: none">
-            <div class="section-label">Detected passes</div>
-            <div class="pass-list" id="pass-list"></div>
-
-            <div class="toggle-row">
-              <div>
-                <div class="lbl">Use posed meshes</div>
-                <span class="sub">Off = bind pose (no world placement)</span>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="posed-toggle" checked />
-                <span class="slider"></span>
-              </label>
-            </div>
-
-            <div id="pose-warning" class="warning" style="display: none"></div>
-
-            <button class="primary" id="reconstruct-btn">Reconstruct scene</button>
-            <button class="ghost" id="reset-cam-btn" style="width: 100%; margin-top: 8px">Reset camera</button>
-          </div>
-        </div>
-        <div id="status-bar">Waiting for a folder&hellip;</div>
+    <div class="show-on-initial-load">Loading ...</div>
+    <div id="app" class="hide-on-initial-load flex flex-col h-full w-full">
+      <div id="topbar" class="flex flex-row gap-4 p-2 bg-mist-900">
+        <div class="text-amber-200">RenderDoc Capture Fixer</div>
+        <div>Import scene</div>
+        <div>Filter objects</div>
+        <div>Calibration options</div>
+        <div>Control options</div>
+        <div>Fix & export</div>
       </div>
 
-      <div id="viewport">
-        <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
-        <div id="hud" style="display: none"></div>
+      <div class="flex flex-row">
+        <div id="sidebar">
+          <div id="sidebar-scroll">
+            <h1>Capture Scene Viewer</h1>
+            <p class="subtitle">Drop a folder exported by the RenderDoc SceneExporter extension to reconstruct it here.</p>
+
+            <div class="dropzone" id="dropzone">
+              <div><strong>Drop export folder</strong> or click to browse</div>
+              <div class="hint">expects manifest.json at the top level</div>
+            </div>
+            <input type="file" id="folder-input" webkitdirectory multiple />
+
+            <div id="pass-section" style="display: none">
+              <div class="section-label">Detected passes</div>
+              <div class="pass-list" id="pass-list"></div>
+
+              <div class="toggle-row">
+                <div>
+                  <div class="lbl">Use posed meshes</div>
+                  <span class="sub">Off = bind pose (no world placement)</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="posed-toggle" checked />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div id="pose-warning" class="warning" style="display: none"></div>
+
+              <button class="primary" id="reconstruct-btn">Reconstruct scene</button>
+              <button class="ghost" id="reset-cam-btn" style="width: 100%; margin-top: 8px">Reset camera</button>
+            </div>
+          </div>
+          <div id="status-bar">Waiting for a folder&hellip;</div>
+        </div>
+
+        <div id="sidebar-object-list" class="p-4">
+          <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
+
+          <div>Order by: <button>draw order</button>, <button>size</button></div>
+
+          <div class="flex flex-col gap-2" id="object-list">
+
+          </div>
+        </div>
+
+        <div id="viewport">
+          <div id="object-filter-menu" class="menu">
+            <div class="field">
+              <div class="label">Hide largest % of objects:</div>
+              <div class="combined-slider-value">
+                <input type="range" id="object-filter-size-slider" min="0" max="100" value="0" />
+                <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="0" />
+              </div>
+            </div>
+          </div>
+          <div id="control-options-menu">
+            <div class="field">
+              Camera control:
+                Fly cam — orbit/pan
+            </div>
+            <div class="field">
+              Control scheme: ESDF - WASD
+            </div>
+          </div>
+          <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
+          <div id="hud" style="display: none"></div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

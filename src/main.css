@@ -1,3 +1,28 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Source Code Pro";
+  src: url("../res/fonts/scpro/SourceCodePro.ttf")
+    format("truetype");
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Source Code Pro";
+  src: url("../res/fonts/scpro/SourceCodePro-Italic.ttf")
+    format("truetype");
+  font-style: italic;
+  font-weight: 200 900;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Source Code Pro", monospace;
+  --font-mono: "Source Code Pro", monospace;
+}
+
 :root {
   --bg-deep: #0b0e13;
   --bg-panel: #12161e;
@@ -9,15 +34,51 @@
   --accent: #6ee7c8;
   --accent-dim: #3f7d6c;
   --warn: #e8b04b;
-  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, monospace;
-  --sans: -apple-system, "Segoe UI", Inter, Arial, sans-serif;
+  --mono: "Source Code Pro", monospace;
+  --sans: "Source Code Pro", monospace;
+  /* --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, monospace; */
+  /* --sans: -apple-system, "Segoe UI", Inter, Arial, sans-serif; */
 }
 * { box-sizing: border-box; }
 html, body {
-  margin: 0; height: 100%; background: var(--bg-deep); color: var(--text);
+  @apply bg-mist-950 text-mist-200 font-sans;
+  margin: 0; height: 100%;
+  /* background: var(--bg-deep); color: var(--text); */
   font-family: var(--sans); overflow: hidden;
 }
-#app { display: flex; height: 100%; }
+
+.hide-on-initial-load {
+  @apply w-full h-full;
+  display: unset;
+}
+.show-on-initial-load { display: none; }
+
+.menu {
+  @apply w-[420px] max-w-[75%] bg-mist-950/80 backdrop-blur-md border border-mist-800 rounded-lg p-4;
+}
+
+.field {
+  @apply flex flex-col gap-2 my-2 w-full;
+
+  .combined-slider-value {
+    @apply flex flex-row items-center gap-2 w-full;
+
+    input {
+
+      &.input-percent {
+        @apply !w-12 text-right pr-4 relative;
+
+        &::after {
+          content: "%";
+          @apply absolute right-2 top-1/2 -translate-y-1/2 text-mist-400;
+
+        }
+      }
+    }
+  }
+
+
+}
 
 #sidebar {
   width: 340px; min-width: 340px; background: var(--bg-panel);

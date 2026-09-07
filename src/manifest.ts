@@ -7,6 +7,11 @@ export interface LoadedManifests {
   rootPrefix: string;
   root: RootManifest;
   passManifests: Record<string, PassManifest>;
+  /** Pass folders whose own manifest.json couldn't be found/parsed - kept
+   * separate from a hard failure since the top-level manifest still loaded
+   * fine, but reconstructing these passes will silently do nothing unless
+   * this is surfaced somewhere. */
+  failedPassFolders: string[];
 }
 
 /** Finds the top-level manifest.json (the shallowest one in the tree - a
@@ -35,17 +40,26 @@ export async function loadManifests(vfs: VirtualFileSystem): Promise<LoadedManif
   }
 
   const passManifests: Record<string, PassManifest> = {};
+  const failedPassFolders: string[] = [];
   for (const pass of root.passes) {
     const pmPath = joinPath(rootPrefix, pass.folder, "manifest.json");
     const pmText = await vfs.readText(pmPath);
-    if (!pmText) continue;
+    if (!pmText) {
+      console.error(
+        `[manifest] Could not find ${pmPath} in the dropped files for pass "${pass.folder}". ` +
+          `A few sample paths that WERE found: ${Array.from(vfs.keys()).slice(0, 5).join(", ")}`,
+      );
+      failedPassFolders.push(pass.folder);
+      continue;
+    }
     try {
       passManifests[pass.folder] = JSON.parse(pmText) as PassManifest;
     } catch (e) {
-      console.warn(`Failed to parse ${pmPath}`, e);
+      console.error(`[manifest] Failed to parse ${pmPath}`, e);
+      failedPassFolders.push(pass.folder);
     }
   }
 
-  return { rootPrefix, root, passManifests };
+  return { rootPrefix, root, passManifests, failedPassFolders };
 }
 

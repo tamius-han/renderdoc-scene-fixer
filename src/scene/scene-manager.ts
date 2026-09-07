@@ -2,6 +2,30 @@ import * as THREE from "three";
 
 export type ContextLossHandler = (lost: boolean) => void;
 
+export interface SceneExtent {
+  /** Bounding box size of the content as originally loaded, before any
+   * normalization scale was applied. */
+  rawSize: THREE.Vector3;
+  /** Uniform scale factor applied to fit rawSize into [MIN_SPAN, MAX_SPAN]
+   * on its largest axis. 1 if no scaling was needed. */
+  scale: number;
+  /** rawSize * scale - the extent actually visible in the scene. */
+  scaledSize: THREE.Vector3;
+}
+
+// If the camera's fixed near/far planes (see the PerspectiveCamera below)
+// don't roughly match the scene's actual coordinate magnitude, everything
+// ends up clipped - the canvas renders (GPU stays busy) but shows nothing,
+// with no error of any kind. Exported coordinates can come out at very
+// different absolute scales depending on the capture (this is especially
+// true for reconstructed posed meshes, which carry an unknown-but-uniform
+// scale factor - see the RenderDoc extension's own README), so rather than
+// widen the clip planes indefinitely (which just trades the problem for
+// depth-precision/z-fighting issues instead), addContent() below normalizes
+// whatever comes in in to a known-good range up front.
+const MIN_SPAN = 10;
+const MAX_SPAN = 10000;
+
 /** Owns the renderer/scene/camera and a hand-rolled orbit camera (drag to
  * rotate, scroll to zoom) - no external controls library, since Three.js's
  * example add-ons aren't part of the core npm package. */
@@ -97,6 +121,34 @@ export class SceneManager {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Wraps the given meshes in a single Group, measures their combined
+   * bounding box, and applies a uniform scale so the largest axis lands
+   * within [MIN_SPAN, MAX_SPAN] - keeping the scene within a range the
+   * camera's fixed near/far planes can actually see, regardless of the
+   * absolute coordinate magnitude the source data came in at. Returns the
+   * measured extent (both before and after scaling) so the caller can
+   * display it. */
+  addContent(meshes: THREE.Mesh[]): SceneExtent {
+    const group = new THREE.Group();
+    for (const mesh of meshes) group.add(mesh);
+
+    let rawSize = new THREE.Vector3();
+    let scale = 1;
+
+    const box = new THREE.Box3().setFromObject(group);
+    if (!box.isEmpty()) {
+      rawSize = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z);
+      if (maxDim > MAX_SPAN) scale = MAX_SPAN / maxDim;
+      else if (maxDim > 0 && maxDim < MIN_SPAN) scale = MIN_SPAN / maxDim;
+    }
+
+    group.scale.setScalar(scale);
+    this.scene.add(group);
+
+    return { rawSize, scale, scaledSize: rawSize.clone().multiplyScalar(scale) };
+  }
+
   frameOnScene(): void {
     const box = new THREE.Box3().setFromObject(this.scene);
     if (box.isEmpty()) return;
@@ -112,11 +164,16 @@ export class SceneManager {
     for (let i = this.scene.children.length - 1; i >= 0; i--) {
       const obj = this.scene.children[i];
       this.scene.remove(obj);
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
-        else obj.material.dispose();
-      }
+      // Recursive traverse rather than checking `obj` itself: addContent()
+      // wraps meshes in a Group, so the direct scene child usually isn't a
+      // Mesh itself.
+      obj.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+          else child.material.dispose();
+        }
+      });
     }
   }
 

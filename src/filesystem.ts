@@ -50,28 +50,17 @@ export class VirtualFileSystem {
   }
 }
 
-/** Minimal shape of the non-standard (but widely supported) FileSystemEntry
- * API used for drag-and-drop folder reading. Not in lib.dom.d.ts, hence the
- * local interface instead of the real DOM type. */
-interface DroppedEntry {
-  isFile: boolean;
-  isDirectory: boolean;
-  name: string;
-  file(callback: (file: File) => void): void;
-  createReader(): {
-    readEntries(callback: (entries: DroppedEntry[]) => void): void;
-  };
-}
-
-async function readEntry(entry: DroppedEntry, path: string): Promise<{ path: string; file: File }[]> {
+async function readEntry(entry: FileSystemEntry, path: string): Promise<{ path: string; file: File }[]> {
   if (entry.isFile) {
-    const file = await new Promise<File>((resolve) => entry.file(resolve));
+    const fileEntry = entry as FileSystemFileEntry;
+    const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
     return [{ path: path + entry.name, file }];
   }
   if (entry.isDirectory) {
-    const reader = entry.createReader();
-    const allEntries: DroppedEntry[] = [];
-    await new Promise<void>((resolve) => {
+    const dirEntry = entry as FileSystemDirectoryEntry;
+    const reader = dirEntry.createReader();
+    const allEntries: FileSystemEntry[] = [];
+    await new Promise<void>((resolve, reject) => {
       const readBatch = (): void => {
         reader.readEntries((batch) => {
           if (batch.length === 0) {
@@ -80,7 +69,7 @@ async function readEntry(entry: DroppedEntry, path: string): Promise<{ path: str
           }
           allEntries.push(...batch);
           readBatch();
-        });
+        }, reject);
       };
       readBatch();
     });
@@ -94,8 +83,7 @@ export async function collectFromDrop(dataTransfer: DataTransfer): Promise<{ pat
   const items = dataTransfer.items;
   const jobs: Promise<{ path: string; file: File }[]>[] = [];
   for (let i = 0; i < items.length; i++) {
-    const item = items[i] as DataTransferItem & { webkitGetAsEntry?: () => DroppedEntry | null };
-    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+    const entry = items[i].webkitGetAsEntry();
     if (entry) jobs.push(readEntry(entry, ""));
   }
   const results = await Promise.all(jobs);

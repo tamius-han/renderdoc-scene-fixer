@@ -88,7 +88,10 @@ export class SceneViewerApp {
 
     this.loaded = loaded;
     this.renderPassList();
-    this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.`);
+    const failedNote = loaded.failedPassFolders.length
+      ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
+      : "";
+    this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.${failedNote}`);
   }
 
   private renderPassList(): void {
@@ -196,18 +199,19 @@ export class SceneViewerApp {
     draw: DrawEntry,
     passDir: string,
     usePosed: boolean,
-  ): Promise<void> {
+  ): Promise<"added" | "no-mesh-path" | "mesh-not-found"> {
     const meshRel = usePosed && draw.posedMesh ? draw.posedMesh : draw.mesh;
-    if (!meshRel) return;
+    if (!meshRel) return "no-mesh-path";
 
     const objPath = joinPath(passDir, meshRel);
     const objText = await this.vfs.readText(objPath);
-    if (!objText) return;
+    if (!objText) return "mesh-not-found";
 
     const obj = parseOBJ(objText);
     const geometryData = objToGeometryArrays(obj);
     const { key, material } = await this.resolveMaterial(objPath, obj.mtllib, obj.usemtl);
     builder.addDraw(key, material, geometryData);
+    return "added";
   }
 
   private async reconstructScene(): Promise<void> {
@@ -221,48 +225,86 @@ export class SceneViewerApp {
     this.reconstructBtn.disabled = true;
     this.emptyHint.style.display = "none";
     this.hud.style.display = "block";
-    this.sceneManager.clear();
-    this.materialCache.clear();
-    this.untexturedMaterial = null;
-    this.textures.disposeAll();
+    this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
-    const usePosed = this.posedToggle.checked;
-    const builder = new SceneMeshBuilder();
-    let drawCount = 0;
-    let errorCount = 0;
-    let processed = 0;
+    try {
+      this.sceneManager.clear();
+      this.materialCache.clear();
+      this.untexturedMaterial = null;
+      this.textures.disposeAll();
 
-    for (const folder of selected) {
-      const manifest = this.loaded.passManifests[folder];
-      if (!manifest) continue;
-      const passDir = joinPath(this.loaded.rootPrefix, folder);
+      const usePosed = this.posedToggle.checked;
+      const builder = new SceneMeshBuilder();
+      let addedCount = 0;
+      let noMeshPathCount = 0;
+      let meshNotFoundCount = 0;
+      let exceptionCount = 0;
+      let processed = 0;
+      let loggedMissingManifest = false;
+      let loggedMissingMesh = false;
 
-      for (const draw of manifest.draws) {
-        processed++;
-        try {
-          await this.addDrawToBuilder(builder, draw, passDir, usePosed);
-          drawCount++;
-        } catch (e) {
-          errorCount++;
-          console.warn("Failed to load draw", draw, e);
+      for (const folder of selected) {
+        const manifest = this.loaded.passManifests[folder];
+        if (!manifest) {
+          if (!loggedMissingManifest) {
+            console.error(
+              `[reconstruct] No manifest data for pass "${folder}" - it either failed to load ` +
+                `(check the warning when the folder was dropped) or was never fetched.`,
+            );
+            loggedMissingManifest = true;
+          }
+          continue;
         }
-        if (processed % 50 === 0) {
-          this.setStatus(`Loading... ${processed} draw(s) processed, ${builder.groupCount} material group(s) so far`);
-          await new Promise((resolve) => setTimeout(resolve, 0));
+        const passDir = joinPath(this.loaded.rootPrefix, folder);
+
+        for (const draw of manifest.draws) {
+          processed++;
+          try {
+            const outcome = await this.addDrawToBuilder(builder, draw, passDir, usePosed);
+            if (outcome === "added") addedCount++;
+            else if (outcome === "no-mesh-path") noMeshPathCount++;
+            else {
+              meshNotFoundCount++;
+              if (!loggedMissingMesh) {
+                const meshRel = usePosed && draw.posedMesh ? draw.posedMesh : draw.mesh;
+                console.error(
+                  `[reconstruct] Mesh file not found for eid${draw.eventId}: tried "${joinPath(passDir, meshRel ?? "")}". ` +
+                    `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
+                );
+                loggedMissingMesh = true;
+              }
+            }
+          } catch (e) {
+            exceptionCount++;
+            console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
+          }
+          if (processed % 50 === 0) {
+            this.setStatus(`Loading... ${processed} draw(s) processed, ${builder.groupCount} material group(s) so far`);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
         }
       }
+
+      const meshes = builder.buildAll();
+      for (const mesh of meshes) this.sceneManager.scene.add(mesh);
+      this.sceneManager.frameOnScene();
+
+      const triCount = Math.round(builder.totalVertexCount / 3);
+      const problems: string[] = [];
+      if (meshNotFoundCount) problems.push(`${meshNotFoundCount} mesh file(s) not found`);
+      if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
+      if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
+      const problemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
+
+      this.setStatus(
+        `${addedCount}/${processed} draw(s) merged into ${meshes.length} mesh(es) \u00b7 ~${triCount.toLocaleString()} triangles${problemNote}`,
+      );
+      this.hud.textContent = `${meshes.length} draw calls \u00b7 ${triCount.toLocaleString()} tris \u00b7 drag to orbit \u00b7 scroll to zoom`;
+    } catch (e) {
+      console.error("[reconstruct] Reconstruction failed", e);
+      this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
+    } finally {
+      this.reconstructBtn.disabled = false;
     }
-
-    const meshes = builder.buildAll();
-    for (const mesh of meshes) this.sceneManager.scene.add(mesh);
-    this.sceneManager.frameOnScene();
-
-    this.reconstructBtn.disabled = false;
-    const triCount = Math.round(builder.totalVertexCount / 3);
-    this.setStatus(
-      `${drawCount} draw(s) merged into ${meshes.length} mesh(es) \u00b7 ~${triCount.toLocaleString()} triangles` +
-        (errorCount ? ` \u00b7 ${errorCount} failed to load` : ""),
-    );
-    this.hud.textContent = `${meshes.length} draw calls \u00b7 ${triCount.toLocaleString()} tris \u00b7 drag to orbit \u00b7 scroll to zoom`;
   }
 }
