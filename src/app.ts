@@ -71,7 +71,8 @@ export class SceneViewerApp {
   private flyModeLabel = this.el("fly-mode-label");
   private flySpeedIndicator = this.el("fly-speed-indicator");
 
-  private objectList = this.el<HTMLDivElement>("object-list");
+  private controlSchemeToggle = this.el<HTMLInputElement>("control-scheme-toggle");
+  private controlSchemeLabel = this.el("control-scheme-label");
 
   constructor(viewportEl: HTMLElement) {
     this.sceneManager = new SceneManager(viewportEl);
@@ -90,8 +91,12 @@ export class SceneViewerApp {
       this.flySpeedIndicator.style.display = flying ? "block" : "none";
       this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
     });
+    this.sceneManager.onControlSchemeChange((scheme) => {
+      this.controlSchemeToggle.checked = scheme === "wasd";
+      this.controlSchemeLabel.textContent =
+        scheme === "wasd" ? "WASD - movement; F: toggle fly mode" : "ESDF - movement; A: toggle fly mode";
+    });
     this.wireEvents();
-
   }
 
   private formatFlySpeed(speed: number): string {
@@ -130,7 +135,11 @@ export class SceneViewerApp {
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    this.posedToggle.addEventListener("change", () => this.updatePoseWarning());
     this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
+    this.controlSchemeToggle.addEventListener("change", () =>
+      this.sceneManager.setControlScheme(this.controlSchemeToggle.checked ? "wasd" : "esdf"),
+    );
 
     // Both filter control pairs (import screen + post-reconstruct viewport
     // menu) drive the same underlying value and stay in sync with each

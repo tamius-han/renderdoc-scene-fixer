@@ -58,7 +58,7 @@
         <div id="sidebar-object-list" class="p-4">
           <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
 
-          <div>Order by: <button>draw order</button>, <button>size</button>, <button>face count</button></div>
+          <div>Order by: <button>draw order</button>, <button>size</button></div>
 
           <div class="flex flex-col gap-2" id="object-list">
 
@@ -90,7 +90,16 @@
               <div class="sub" id="fly-speed-indicator" style="display: none"></div>
             </div>
             <div class="field">
-              Control scheme: ESDF - WASD
+              <div class="toggle-row">
+                <div>
+                  <div class="lbl">Control scheme</div>
+                  <span class="sub" id="control-scheme-label">ESDF - movement; A: toggle fly mode</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="control-scheme-toggle" />
+                  <span class="slider"></span>
+                </label>
+              </div>
             </div>
           </div>
           <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
