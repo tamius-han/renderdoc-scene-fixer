@@ -7,6 +7,43 @@ export interface GeometryArrays {
   normals: number[];
 }
 
+export interface Bounds {
+  min: THREE.Vector3;
+  max: THREE.Vector3;
+}
+
+/** Computes a bounding box directly from a flat position array (no Three.js
+ * geometry/mesh needed) - used per-draw for the size filter, where creating
+ * a throwaway THREE.Mesh just to measure it would be wasteful across
+ * thousands of draws. */
+export function computeBounds(positions: number[]): Bounds {
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
+    if (x < min.x) min.x = x;
+    if (y < min.y) min.y = y;
+    if (z < min.z) min.z = z;
+    if (x > max.x) max.x = x;
+    if (y > max.y) max.y = y;
+    if (z > max.z) max.z = z;
+  }
+  return { min, max };
+}
+
+export function boundsDiagonal(b: Bounds): number {
+  return b.max.clone().sub(b.min).length();
+}
+
+export function unionBounds(a: Bounds, b: Bounds): Bounds {
+  return {
+    min: new THREE.Vector3(Math.min(a.min.x, b.min.x), Math.min(a.min.y, b.min.y), Math.min(a.min.z, b.min.z)),
+    max: new THREE.Vector3(Math.max(a.max.x, b.max.x), Math.max(a.max.y, b.max.y), Math.max(a.max.z, b.max.z)),
+  };
+}
+
 /** Expands an OBJ's face list into flat per-corner attribute arrays (one
  * vertex per face corner, all attributes aligned to the same index) - what a
  * non-indexed THREE.BufferGeometry needs, rather than OBJ's independent

@@ -3,10 +3,29 @@ import { collectFromDrop, collectFromInput, dirname, joinPath, VirtualFileSystem
 import { loadManifests, type LoadedManifests } from "./manifest";
 import { parseMTL } from "./parsers/mtl";
 import { parseOBJ } from "./parsers/obj";
-import { objToGeometryArrays, SceneMeshBuilder } from "./scene/mesh-builder";
-import { SceneManager } from "./scene/scene-manager";
+import {
+  boundsDiagonal,
+  computeBounds,
+  objToGeometryArrays,
+  SceneMeshBuilder,
+  unionBounds,
+  type Bounds,
+  type GeometryArrays,
+} from "./scene/mesh-builder";
+import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
+
+/** One draw's fully-parsed geometry/material/bounds, cached in memory so the
+ * "hide largest % of objects" filter can rebuild the visible scene instantly
+ * without re-reading or re-parsing any files. */
+interface LoadedDraw {
+  key: string;
+  material: THREE.Material;
+  geometryData: GeometryArrays;
+  bounds: Bounds;
+  diagonal: number;
+}
 
 export class SceneViewerApp {
   private vfs = new VirtualFileSystem();
@@ -17,17 +36,42 @@ export class SceneViewerApp {
   private materialCache = new Map<string, THREE.Material>();
   private untexturedMaterial: THREE.Material | null = null;
 
+  /** Everything loaded by the last reconstruct, kept around so the size
+   * filter can rebuild without re-parsing. Cleared at the start of each
+   * fresh "Reconstruct scene" click. */
+  private loadedDraws: LoadedDraw[] = [];
+  /** Computed once per reconstruct from ALL loaded draws (see
+   * computeNormalizationScale) - stays fixed as the filter slider moves, so
+   * hidden objects still count for scale even though they're excluded from
+   * the rendered scene and from camera framing. */
+  private fixedScale = 1;
+  /** 0-100. How much of the largest-by-diagonal objects to exclude from the
+   * rendered scene. Kept in sync across the import-screen and viewport
+   * filter controls. */
+  private hidePercent = 0;
+  private lastProblemNote = "";
+
   private dropzone = this.el("dropzone");
   private folderInput = this.el<HTMLInputElement>("folder-input");
   private passSection = this.el("pass-section");
   private passList = this.el("pass-list");
-  private posedToggle = this.el<HTMLInputElement>("posed-toggle");
   private poseWarning = this.el("pose-warning");
   private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
   private resetCamBtn = this.el("reset-cam-btn");
   private statusBar = this.el("status-bar");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
+
+  private importFilterSlider = this.el<HTMLInputElement>("import-filter-size-slider");
+  private importFilterValue = this.el<HTMLInputElement>("import-filter-size-value");
+  private viewportFilterSlider = this.el<HTMLInputElement>("object-filter-size-slider");
+  private viewportFilterValue = this.el<HTMLInputElement>("object-filter-size-value");
+
+  private flyModeToggle = this.el<HTMLInputElement>("fly-mode-toggle");
+  private flyModeLabel = this.el("fly-mode-label");
+  private flySpeedIndicator = this.el("fly-speed-indicator");
+
+  private objectList = this.el<HTMLDivElement>("object-list");
 
   constructor(viewportEl: HTMLElement) {
     this.sceneManager = new SceneManager(viewportEl);
@@ -38,7 +82,22 @@ export class SceneViewerApp {
         );
       }
     });
+    // Keeps the UI toggle/label/speed indicator in sync regardless of
+    // whether fly mode was triggered from this checkbox or the 'A' key.
+    this.sceneManager.onFlyStateChange((flying, speed) => {
+      this.flyModeToggle.checked = flying;
+      this.flyModeLabel.textContent = flying ? "Fly cam (first-person)" : "Orbit / pan";
+      this.flySpeedIndicator.style.display = flying ? "block" : "none";
+      this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
+    });
     this.wireEvents();
+
+  }
+
+  private formatFlySpeed(speed: number): string {
+    if (speed >= 100) return `${speed.toFixed(0)} units/s`;
+    if (speed >= 1) return `${speed.toFixed(1)} units/s`;
+    return `${speed.toFixed(3)} units/s`;
   }
 
   private el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -71,7 +130,27 @@ export class SceneViewerApp {
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    this.posedToggle.addEventListener("change", () => this.updatePoseWarning());
+    this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
+
+    // Both filter control pairs (import screen + post-reconstruct viewport
+    // menu) drive the same underlying value and stay in sync with each
+    // other - see setHidePercent().
+    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
+      slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
+    }
+    for (const text of [this.importFilterValue, this.viewportFilterValue]) {
+      text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
+    }
+
+    this.setupObjectList();
+  }
+
+  private setHidePercent(value: number): void {
+    const clamped = Math.min(100, Math.max(0, Math.round(Number.isFinite(value) ? value : 0)));
+    this.hidePercent = clamped;
+    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) slider.value = String(clamped);
+    for (const text of [this.importFilterValue, this.viewportFilterValue]) text.value = String(clamped);
+    if (this.loadedDraws.length > 0) this.rebuildVisibleScene();
   }
 
   private async handleFiles(entries: { path: string; file: File }[]): Promise<void> {
@@ -131,14 +210,9 @@ export class SceneViewerApp {
   private updatePoseWarning(): void {
     if (!this.loaded) return;
     const selected = this.getSelectedFolders();
-    const usePosed = this.posedToggle.checked;
     const anyPosed = selected.some((f) => (this.loaded!.passManifests[f]?.draws ?? []).some((d) => d.posedMesh));
 
-    if (!usePosed) {
-      this.showWarning(
-        "Bind-pose mode: meshes have no world transform applied and will pile up near the origin, not laid out as a scene. Turn on \u201cUse posed meshes\u201d for spatial reconstruction.",
-      );
-    } else if (!anyPosed) {
+    if (!anyPosed) {
       this.showWarning(
         "None of the selected passes have posed mesh data (this export may have been done without \u201cwith posed meshes\u201d) - falling back to bind pose, piled near the origin.",
       );
@@ -194,13 +268,14 @@ export class SceneViewerApp {
     return { key: texPath, material: threeMaterial };
   }
 
-  private async addDrawToBuilder(
-    builder: SceneMeshBuilder,
+  /** Parses one draw's OBJ/MTL/texture and appends it to this.loadedDraws -
+   * this is the expensive, I/O-bound step, done once per reconstruct. Scene
+   * *building* (merging + filtering) is separate, see rebuildVisibleScene(). */
+  private async loadDraw(
     draw: DrawEntry,
     passDir: string,
-    usePosed: boolean,
   ): Promise<"added" | "no-mesh-path" | "mesh-not-found"> {
-    const meshRel = usePosed && draw.posedMesh ? draw.posedMesh : draw.mesh;
+    const meshRel = draw.posedMesh ? draw.posedMesh : draw.mesh;
     if (!meshRel) return "no-mesh-path";
 
     const objPath = joinPath(passDir, meshRel);
@@ -209,9 +284,31 @@ export class SceneViewerApp {
 
     const obj = parseOBJ(objText);
     const geometryData = objToGeometryArrays(obj);
+    const bounds = computeBounds(geometryData.positions);
     const { key, material } = await this.resolveMaterial(objPath, obj.mtllib, obj.usemtl);
-    builder.addDraw(key, material, geometryData);
+
+    this.loadedDraws.push({ key, material, geometryData, bounds, diagonal: boundsDiagonal(bounds) });
+
     return "added";
+  }
+
+  private getVisibilityStatus(draw: DrawEntry) {
+
+  }
+
+  private createDrawItem(draw: DrawEntry, drawIndex: number) {
+    const div = document.createElement('div');
+    div.innerHTML = `
+      <div>
+        <b>Draw #${drawIndex}</b>
+        &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}> </button>
+        %nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}>[ ]</button>
+        &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}"> </button>
+        <small>v: f: size: </small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+      </div>
+    `;
+
+    return div;
   }
 
   private async reconstructScene(): Promise<void> {
@@ -229,13 +326,18 @@ export class SceneViewerApp {
 
     try {
       this.sceneManager.clear();
+      // Full reload: previous draws/materials/textures are genuinely done
+      // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
+      // which reuses all of this.
+      for (const material of this.materialCache.values()) material.dispose();
       this.materialCache.clear();
-      this.untexturedMaterial = null;
+      if (this.untexturedMaterial) {
+        this.untexturedMaterial.dispose();
+        this.untexturedMaterial = null;
+      }
       this.textures.disposeAll();
+      this.loadedDraws = [];
 
-      const usePosed = this.posedToggle.checked;
-      const builder = new SceneMeshBuilder();
-      let addedCount = 0;
       let noMeshPathCount = 0;
       let meshNotFoundCount = 0;
       let exceptionCount = 0;
@@ -257,54 +359,154 @@ export class SceneViewerApp {
         }
         const passDir = joinPath(this.loaded.rootPrefix, folder);
 
-        for (const draw of manifest.draws) {
+        for (const [index, draw] of manifest.draws.entries()) {
           processed++;
           try {
-            const outcome = await this.addDrawToBuilder(builder, draw, passDir, usePosed);
-            if (outcome === "added") addedCount++;
-            else if (outcome === "no-mesh-path") noMeshPathCount++;
-            else {
+            const outcome = await this.loadDraw(draw, passDir);
+            if (outcome === "no-mesh-path") {
+              noMeshPathCount++;
+            } else if (outcome === "mesh-not-found") {
               meshNotFoundCount++;
               if (!loggedMissingMesh) {
-                const meshRel = usePosed && draw.posedMesh ? draw.posedMesh : draw.mesh;
+                const meshRel = draw.posedMesh ? draw.posedMesh : draw.mesh;
                 console.error(
                   `[reconstruct] Mesh file not found for eid${draw.eventId}: tried "${joinPath(passDir, meshRel ?? "")}". ` +
                     `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
                 );
                 loggedMissingMesh = true;
               }
+            } else {
+              this.objectList.appendChild(this.createDrawItem(draw, index));
             }
           } catch (e) {
             exceptionCount++;
             console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
           }
           if (processed % 50 === 0) {
-            this.setStatus(`Loading... ${processed} draw(s) processed, ${builder.groupCount} material group(s) so far`);
+            this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         }
       }
 
-      const meshes = builder.buildAll();
-      for (const mesh of meshes) this.sceneManager.scene.add(mesh);
-      this.sceneManager.frameOnScene();
+      // Normalization scale is computed ONCE here, from every loaded draw
+      // regardless of the size filter, and then held fixed - see
+      // computeNormalizationScale() and rebuildVisibleScene().
+      this.fixedScale = 1;
+      if (this.loadedDraws.length > 0) {
+        let overall: Bounds = this.loadedDraws[0].bounds;
+        for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+        const size = overall.max.clone().sub(overall.min);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        this.fixedScale = computeNormalizationScale(maxDim);
+        console.log("[reconstruct] scene bounds", { min: overall.min, max: overall.max, size, scale: this.fixedScale });
+      }
 
-      const triCount = Math.round(builder.totalVertexCount / 3);
       const problems: string[] = [];
       if (meshNotFoundCount) problems.push(`${meshNotFoundCount} mesh file(s) not found`);
       if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
-      const problemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
+      this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
-      this.setStatus(
-        `${addedCount}/${processed} draw(s) merged into ${meshes.length} mesh(es) \u00b7 ~${triCount.toLocaleString()} triangles${problemNote}`,
-      );
-      this.hud.textContent = `${meshes.length} draw calls \u00b7 ${triCount.toLocaleString()} tris \u00b7 drag to orbit \u00b7 scroll to zoom`;
+      this.rebuildVisibleScene();
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
       this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
     } finally {
       this.reconstructBtn.disabled = false;
     }
+  }
+
+  /** Rebuilds the rendered scene from this.loadedDraws according to the
+   * current "hide largest %" filter, WITHOUT re-reading or re-parsing any
+   * files - this is what makes dragging the filter slider instant. Hidden
+   * objects were already counted in this.fixedScale (computed once from
+   * every loaded draw in reconstructScene()) but are excluded here, so
+   * frameOnScene() - which measures whatever's actually in the scene -
+   * naturally only frames the camera on what's currently visible. */
+  private rebuildVisibleScene(): void {
+    if (this.loadedDraws.length === 0) return;
+
+    // "Hide largest % of objects" = hide that fraction of objects BY COUNT,
+    // ranked by size (bounding-box diagonal) - the simplest, most
+    // predictable reading of a 0-100% slider.
+    const sorted = [...this.loadedDraws].sort((a, b) => b.diagonal - a.diagonal);
+    const hideCount = Math.round((this.hidePercent / 100) * sorted.length);
+    const hidden = new Set(sorted.slice(0, hideCount));
+
+    const builder = new SceneMeshBuilder();
+    for (const draw of this.loadedDraws) {
+      if (hidden.has(draw)) continue;
+      builder.addDraw(draw.key, draw.material, draw.geometryData);
+    }
+    const meshes = builder.buildAll();
+
+    this.sceneManager.clear();
+    this.sceneManager.addContent(meshes, this.fixedScale);
+    this.sceneManager.frameOnScene();
+
+    const visibleCount = this.loadedDraws.length - hidden.size;
+    const triCount = Math.round(builder.totalVertexCount / 3);
+
+    this.setStatus(
+      `${visibleCount}/${this.loadedDraws.length} object(s) shown (${this.hidePercent}% of largest hidden) \u00b7 ` +
+        `${meshes.length} mesh(es) \u00b7 ~${triCount.toLocaleString()} triangles${this.lastProblemNote}`,
+    );
+    this.hud.textContent =
+      `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
+      `${triCount.toLocaleString()} tris \u00b7 scale \u00d7${this.fixedScale.toExponential(2)} \u00b7 MMB drag to orbit, Shift+MMB to pan, scroll to zoom, A for fly mode`;
+  }
+
+  toggleDrawVisibility(index) {
+    this.manifest.dra
+  }
+
+  toggleDrawSelection(index) {
+
+  }
+
+  setLandmark(index) {
+
+  }
+
+  showResources(index) {
+
+  }
+
+  setupObjectList() {
+    const objectList = document.getElementById('object-list')!;
+
+    objectList.addEventListener('click', (event) => {
+      const target = event.target;
+
+      if (!(target instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      const action = target.dataset.action;
+      const index = Number(target.dataset.index);
+
+      if (!Number.isInteger(index)) {
+        return;
+      }
+
+      switch (action) {
+        case 'visibility':
+          this.toggleDrawVisibility(index);
+          break;
+
+        case 'selection':
+          this.toggleDrawSelection(index);
+          break;
+
+        case 'landmark':
+          this.setLandmark(index);
+          break;
+
+        case 'resources':
+          this.showResources(index);
+          break;
+      }
+    });
   }
 }

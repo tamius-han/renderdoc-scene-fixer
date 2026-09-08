@@ -57,6 +57,22 @@ html, body {
   @apply w-[420px] max-w-[75%] bg-mist-950/80 backdrop-blur-md border border-mist-800 rounded-lg p-4;
 }
 
+button {
+  @apply cursor-pointer;
+
+  &.tab {
+    @apply grow border-b-1 border-mist-500 pb-[1px] text-mist-500;
+
+    &.active {
+      @apply border-b-2 border-amber-300 text-amber-100;
+    }
+  }
+}
+
+p {
+  @apply mt-2 indent-8;
+}
+
 .field {
   @apply flex flex-col gap-2 my-2 w-full;
 
@@ -80,6 +96,57 @@ html, body {
 
 }
 
+h1, h2, h3, h4, h5, h6 {
+  @apply font-bold;
+}
+h1 {
+  @apply text-[2rem] text-amber-200 mb-2 mt-6;
+}
+h2 {
+  @apply text-[1.5rem] text-amber-200 mt-4 mb-2;
+}
+h3 {
+  @apply text-[1.25rem] text-amber-200 mt-2 mb-2;
+}
+
+a {
+  @apply text-amber-400 hover:text-amber-200;
+}
+
+ul, ol {
+  @apply list-outside pl-16 py-2;
+
+}
+ul {
+  @apply list-disc;
+}
+ol {
+  @apply list-decimal;
+}
+
+code {
+  @apply bg-mist-800 text-slate-400 px-2 border border-slate-500 rounded-sm;
+}
+
+
+.warning-box {
+  @apply my-4 bg-amber-300/10 p-4 rounded-sm border border-amber-300 text-amber-500;
+
+  &:before {
+    content: "⚠️";
+    @apply mr-2;
+  }
+}
+
+.info-box {
+  @apply my-4 bg-blue-300/10 p-4 rounded-sm border border-blue-300 text-blue-300;
+
+  &:before {
+    content: "ⓘ";
+    @apply mr-2 bg-blue-700 text-white rounded-full w-4 h-4;
+  }
+}
+
 #sidebar {
   width: 340px; min-width: 340px; background: var(--bg-panel);
   border-right: 1px solid var(--line); display: flex; flex-direction: column;
@@ -87,7 +154,6 @@ html, body {
 }
 #sidebar-scroll { overflow-y: auto; padding: 18px 16px 16px; flex: 1; }
 
-h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.01em; margin: 0 0 3px; }
 .subtitle { font-size: 12px; color: var(--text-dim); margin: 0 0 18px; line-height: 1.5; }
 
 .dropzone {
