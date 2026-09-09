@@ -20,11 +20,15 @@ import type { DrawEntry, PassIndexEntry } from "./types";
  * "hide largest % of objects" filter can rebuild the visible scene instantly
  * without re-reading or re-parsing any files. */
 interface LoadedDraw {
+  draw: DrawEntry;
   key: string;
   material: THREE.Material;
   geometryData: GeometryArrays;
+  previewGeometryData: GeometryArrays;
   bounds: Bounds;
   diagonal: number;
+  meshPath: string | null;
+  previewPath: string | null;
 }
 
 export class SceneViewerApp {
@@ -48,7 +52,7 @@ export class SceneViewerApp {
   /** 0-100. How much of the largest-by-diagonal objects to exclude from the
    * rendered scene. Kept in sync across the import-screen and viewport
    * filter controls. */
-  private hidePercent = 0;
+  private hidePercent = 10;
   private lastProblemNote = "";
 
   /** Indices into loadedDraws currently excluded by the "hide largest %"
@@ -56,6 +60,13 @@ export class SceneViewerApp {
    * changes, and the single source of truth for "is this object
    * selectable/visible in the list" (see isObjectHidden()). */
   private hiddenDrawIndices = new Set<number>();
+  /** Indices manually hidden via the object list's own visibility button -
+   * independent of and layered with hiddenDrawIndices (the "hide largest %"
+   * filter). An object filtered by the size slider always shows 'f' and its
+   * manual state is irrelevant to rendering either way; otherwise it shows
+   * 'v' (visible, default) or 'h' (manually hidden) - see
+   * getVisibilityState(). */
+  private manuallyHiddenIndices = new Set<number>();
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
   /** Anchor point for shift-click range selection - the last index selected
@@ -75,6 +86,9 @@ export class SceneViewerApp {
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
   private objectList = this.el('object-list');
+  private viewport = this.el<HTMLElement>("viewport");
+  private resourcePanelMinSize = { width: 360, height: 420 };
+  private resourcePanelSize = { ...this.resourcePanelMinSize };
 
   private importFilterSlider = this.el<HTMLInputElement>("import-filter-size-slider");
   private importFilterValue = this.el<HTMLInputElement>("import-filter-size-value");
@@ -298,6 +312,7 @@ export class SceneViewerApp {
     passDir: string,
   ): Promise<"added" | "no-mesh-path" | "mesh-not-found"> {
     const meshRel = draw.posedMesh ? draw.posedMesh : draw.mesh;
+    const previewRel = draw.mesh ?? draw.posedMesh ?? null;
     if (!meshRel) return "no-mesh-path";
 
     const objPath = joinPath(passDir, meshRel);
@@ -309,12 +324,36 @@ export class SceneViewerApp {
     const bounds = computeBounds(geometryData.positions);
     const { key, material } = await this.resolveMaterial(objPath, obj.mtllib, obj.usemtl);
 
-    this.loadedDraws.push({ key, material, geometryData, bounds, diagonal: boundsDiagonal(bounds) });
+    let previewGeometryData = geometryData;
+    if (previewRel && previewRel !== meshRel) {
+      const previewPath = joinPath(passDir, previewRel);
+      const previewText = await this.vfs.readText(previewPath);
+      if (previewText) {
+        const previewObj = parseOBJ(previewText);
+        previewGeometryData = objToGeometryArrays(previewObj);
+      }
+    }
+
+    this.loadedDraws.push({
+      draw,
+      key,
+      material,
+      geometryData,
+      previewGeometryData,
+      bounds,
+      diagonal: boundsDiagonal(bounds),
+      meshPath: meshRel,
+      previewPath: previewRel,
+    });
 
     return "added";
   }
 
   private createDrawItem(draw: DrawEntry, drawIndex: number): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "draw-row-wrap";
+    wrap.dataset.index = String(drawIndex);
+
     const div = document.createElement("div");
     div.className = "draw-item";
     div.dataset.index = String(drawIndex);
@@ -326,7 +365,8 @@ export class SceneViewerApp {
       <small>v: f: size: </small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
     `;
 
-    return div;
+    wrap.appendChild(div);
+    return wrap;
   }
 
   private async reconstructScene(): Promise<void> {
@@ -358,6 +398,7 @@ export class SceneViewerApp {
       this.objectList.innerHTML = "";
       this.selectedIndices.clear();
       this.hiddenDrawIndices.clear();
+      this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
 
       let noMeshPathCount = 0;
@@ -444,9 +485,10 @@ export class SceneViewerApp {
     }
   }
 
-  /** Rebuilds the rendered scene from this.loadedDraws according to the
-   * current "hide largest %" filter, WITHOUT re-reading or re-parsing any
-   * files - this is what makes dragging the filter slider instant. Hidden
+  /** Rebuilds the rendered scene from this.loadedDraws according to both
+   * the "hide largest %" filter AND per-object manual visibility, WITHOUT
+   * re-reading or re-parsing any files - this is what makes dragging the
+   * filter slider (and toggling an object's own visibility) instant. Hidden
    * objects were already counted in this.fixedScale (computed once from
    * every loaded draw in reconstructScene()) but are excluded here, so
    * frameOnScene() - which measures whatever's actually in the scene -
@@ -472,8 +514,12 @@ export class SceneViewerApp {
     }
 
     const builder = new SceneMeshBuilder();
+    let excludedCount = 0;
     this.loadedDraws.forEach((draw, index) => {
-      if (this.hiddenDrawIndices.has(index)) return;
+      if (this.hiddenDrawIndices.has(index) || this.manuallyHiddenIndices.has(index)) {
+        excludedCount++;
+        return;
+      }
       builder.addDraw(draw.key, draw.material, draw.geometryData);
     });
     const meshes = builder.buildAll();
@@ -482,12 +528,13 @@ export class SceneViewerApp {
     this.sceneManager.addContent(meshes, this.fixedScale);
     this.sceneManager.frameOnScene();
 
-    const visibleCount = this.loadedDraws.length - this.hiddenDrawIndices.size;
+    const visibleCount = this.loadedDraws.length - excludedCount;
     const triCount = Math.round(builder.totalVertexCount / 3);
 
     this.setStatus(
-      `${visibleCount}/${this.loadedDraws.length} object(s) shown (${this.hidePercent}% of largest hidden) \u00b7 ` +
-        `${meshes.length} mesh(es) \u00b7 ~${triCount.toLocaleString()} triangles${this.lastProblemNote}`,
+      `${visibleCount}/${this.loadedDraws.length} object(s) shown (${this.hidePercent}% of largest hidden by filter, ` +
+        `${this.manuallyHiddenIndices.size} manually hidden) \u00b7 ${meshes.length} mesh(es) \u00b7 ` +
+        `~${triCount.toLocaleString()} triangles${this.lastProblemNote}`,
     );
     this.hud.textContent =
       `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
@@ -496,12 +543,30 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Not yet specified beyond "the size filter controls visibility" - left
-   * as a safe no-op for now rather than guessing unrequested behavior, so
-   * clicking the button doesn't throw. */
-  private toggleDrawVisibility(_index: number): void {
-    // TODO: intentionally unimplemented - visibility is currently driven
-    // entirely by the "hide largest %" filter (see rebuildVisibleScene).
+  /** Toggles manual per-object visibility (independent of the "hide
+   * largest %" filter - see manuallyHiddenIndices). If the clicked object
+   * isn't part of the current selection, only it is toggled. If it IS
+   * selected, every selected object is set to the opposite of the clicked
+   * object's CURRENT state (Blender's own convention for toggling
+   * visibility with a multi-selection active). No-ops on filtered ('f')
+   * objects - their visibility button is disabled anyway, but this guards
+   * against it regardless. */
+  private toggleDrawVisibility(index: number): void {
+    if (this.isObjectHidden(index)) return;
+
+    if (this.selectedIndices.has(index)) {
+      const makeHidden = !this.manuallyHiddenIndices.has(index);
+      for (const i of this.selectedIndices) {
+        if (makeHidden) this.manuallyHiddenIndices.add(i);
+        else this.manuallyHiddenIndices.delete(i);
+      }
+    } else if (this.manuallyHiddenIndices.has(index)) {
+      this.manuallyHiddenIndices.delete(index);
+    } else {
+      this.manuallyHiddenIndices.add(index);
+    }
+
+    this.rebuildVisibleScene();
   }
 
   /** Adds the object to the selection if it isn't selected, removes it if
@@ -521,13 +586,313 @@ export class SceneViewerApp {
     // TODO: intentionally unimplemented.
   }
 
-  /** Not yet specified - left as a safe no-op for now. */
-  private showResources(_index: number): void {
-    // TODO: intentionally unimplemented.
+  private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {
+    const haystack = `${binding.bindPoint} ${binding.name ?? ""} ${binding.textureFile ?? ""}`.toLowerCase();
+    if (/normal|bump|height|detail/.test(haystack)) return "normal map";
+    if (/metal|rough|gloss|spec|reflect/.test(haystack)) return "metalness / roughness";
+    if (/albedo|basecolor|diffuse|color|albedo|base_color/.test(haystack)) return "albedo / diffuse";
+    if (/emissive|light|illum/.test(haystack)) return "emissive";
+    if (/ao|ambient|occlusion/.test(haystack)) return "AO / ambient";
+    if (/mask|opacity|alpha/.test(haystack)) return "mask / opacity";
+    if (binding.bindPoint === 0) return "albedo / diffuse";
+    if (binding.bindPoint === 1) return "normal map";
+    if (binding.bindPoint === 2) return "metalness / roughness";
+    if (binding.bindPoint === 3) return "emissive";
+    return `bind ${binding.bindPoint}`;
+  }
+
+  private attachMeshPreview(container: HTMLElement, draw: LoadedDraw): void {
+    const previewCanvas = document.createElement("canvas");
+    previewCanvas.className = "resource-preview-canvas";
+    container.appendChild(previewCanvas);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: previewCanvas, antialias: true, alpha: true });
+    renderer.setClearColor(0x000000, 0);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 1000);
+
+    const geometry = new THREE.BufferGeometry();
+    const sourceData = draw.previewGeometryData ?? draw.geometryData;
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(sourceData.positions, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(sourceData.uvs, 2));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(sourceData.normals, 3));
+    geometry.computeVertexNormals();
+
+    const material = draw.material.clone();
+    material.side = THREE.DoubleSide;
+    material.needsUpdate = true;
+
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    const bounds = draw.bounds;
+    const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
+    const size = bounds.max.clone().sub(bounds.min);
+    const radius = Math.max(size.length() * 0.5, 0.25);
+    const fitDistance = (radius / Math.tan((camera.fov * Math.PI) / 360)) * 1.5;
+
+    mesh.position.sub(center);
+    mesh.rotation.x = -0.65;
+    mesh.rotation.y = 0.85;
+
+    camera.position.set(0, 0, fitDistance);
+    camera.lookAt(0, 0, 0);
+
+    const light = new THREE.DirectionalLight(0xffffff, 1.3);
+    light.position.set(1.5, 2.2, 2.5);
+    scene.add(light);
+
+    const fill = new THREE.HemisphereLight(0xb8d7ff, 0x1c2430, 0.75);
+    scene.add(fill);
+
+    let pointerDown = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      pointerDown = true;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      previewCanvas.setPointerCapture(event.pointerId);
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!pointerDown) return;
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      mesh.rotation.y += dx * 0.01;
+      mesh.rotation.x += dy * 0.01;
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      pointerDown = false;
+      previewCanvas.releasePointerCapture(event.pointerId);
+    };
+
+    previewCanvas.addEventListener("pointerdown", handlePointerDown);
+    previewCanvas.addEventListener("pointermove", handlePointerMove);
+    previewCanvas.addEventListener("pointerup", handlePointerUp);
+    previewCanvas.addEventListener("pointerleave", () => {
+      pointerDown = false;
+    });
+
+    const resize = () => {
+      const sizePx = Math.max(200, Math.min(container.clientWidth, container.clientHeight));
+      renderer.setSize(sizePx, sizePx, false);
+      camera.aspect = 1;
+      camera.updateProjectionMatrix();
+    };
+
+    const onResize = () => resize();
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(container);
+
+    const tick = () => {
+      if (!container.isConnected) {
+        renderer.dispose();
+        resizeObserver.disconnect();
+        return;
+      }
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    resize();
+  }
+
+  private syncResourcePanelPosition(): void {
+    const panel = this.viewport.querySelector<HTMLElement>(".resource-panel");
+    if (!panel) return;
+
+    const index = Number(panel.dataset.index);
+    if (!Number.isInteger(index)) return;
+
+    const row = this.objectList.querySelector<HTMLElement>(`.draw-row-wrap[data-index="${index}"] .draw-item`);
+    if (!row) return;
+
+    const viewportRect = this.viewport.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const minWidth = this.resourcePanelMinSize.width;
+    const minHeight = this.resourcePanelMinSize.height;
+    const panelWidth = Math.max(minWidth, Math.min(this.resourcePanelSize.width, viewportRect.width - 24));
+    const panelHeight = Math.max(minHeight, Math.min(this.resourcePanelSize.height, viewportRect.height - 24));
+    panel.style.width = `${panelWidth}px`;
+    panel.style.height = `${panelHeight}px`;
+
+    const left = Math.min(rowRect.right - viewportRect.left + 12, viewportRect.width - panelWidth - 12);
+    const top = Math.min(rowRect.top - viewportRect.top, viewportRect.height - panelHeight - 12);
+
+    panel.style.left = `${Math.max(12, left)}px`;
+    panel.style.top = `${Math.max(12, top)}px`;
+  }
+
+  private applyResourcePanelSizing(panel: HTMLElement): void {
+    const panelWidth = panel.offsetWidth;
+    const panelHeight = panel.offsetHeight;
+    const previewWidth = Math.min(Math.max(panelWidth - 28, 240), 420);
+    const previewHeight = Math.min(Math.max(panelHeight * 0.45, 220), 320);
+    const preview = panel.querySelector<HTMLElement>(".resource-preview");
+    if (preview) {
+      preview.style.width = `${previewWidth}px`;
+      preview.style.height = `${previewHeight}px`;
+    }
+
+    const thumbHeight = Math.min(Math.max(panelHeight * 0.12, 60), 96);
+    panel.querySelectorAll<HTMLElement>(".resource-texture-thumb").forEach((thumb) => {
+      thumb.style.height = `${thumbHeight}px`;
+    });
+  }
+
+  private startResourceResize(panel: HTMLElement, corner: HTMLElement, event: PointerEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const origin = {
+      x: event.clientX,
+      y: event.clientY,
+      width: panel.offsetWidth,
+      height: panel.offsetHeight,
+      left: panel.offsetLeft,
+      top: panel.offsetTop,
+    };
+    const cornerName = corner.dataset.corner;
+
+    const onMove = (moveEvent: PointerEvent): void => {
+      const dx = moveEvent.clientX - origin.x;
+      const dy = moveEvent.clientY - origin.y;
+      const viewRect = this.viewport.getBoundingClientRect();
+      const minWidth = this.resourcePanelMinSize.width;
+      const minHeight = this.resourcePanelMinSize.height;
+      const maxWidth = Math.max(minWidth, viewRect.width - 24);
+      const maxHeight = Math.max(minHeight, viewRect.height - 24);
+
+      let nextWidth = origin.width;
+      let nextHeight = origin.height;
+      let nextTop = origin.top;
+      let nextLeft = origin.left;
+
+      if (cornerName === "upper-right") {
+        nextWidth = Math.min(Math.max(origin.width + dx, minWidth), maxWidth);
+        nextHeight = Math.min(Math.max(origin.height - dy, minHeight), maxHeight);
+        nextTop = Math.min(Math.max(origin.top + dy, 12), viewRect.height - nextHeight - 12);
+      } else {
+        nextWidth = Math.min(Math.max(origin.width + dx, minWidth), maxWidth);
+        nextHeight = Math.min(Math.max(origin.height + dy, minHeight), maxHeight);
+      }
+
+      this.resourcePanelSize = { width: nextWidth, height: nextHeight };
+      panel.style.width = `${nextWidth}px`;
+      panel.style.height = `${nextHeight}px`;
+      panel.style.left = `${Math.min(Math.max(nextLeft, 12), viewRect.width - nextWidth - 12)}px`;
+      panel.style.top = `${Math.min(Math.max(nextTop, 12), viewRect.height - nextHeight - 12)}px`;
+      this.applyResourcePanelSizing(panel);
+    };
+
+    const onUp = (): void => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
+  private resolveTexturePath(draw: LoadedDraw, textureFile: string | null): string | null {
+    if (!textureFile) return null;
+    const meshPath = draw.meshPath ?? "";
+    const meshDir = dirname(meshPath);
+    const candidate = joinPath(meshDir, textureFile);
+    const direct = this.vfs.get(candidate) ? candidate : this.vfs.get(textureFile) ? textureFile : candidate;
+    return direct ?? null;
+  }
+
+  private showResources(index: number): void {
+    const existing = this.viewport.querySelector<HTMLElement>(".resource-panel");
+    if (existing) {
+      if (existing.dataset.index === String(index)) {
+        existing.remove();
+        return;
+      }
+      existing.remove();
+    }
+
+    const draw = this.loadedDraws[index];
+    if (!draw) return;
+
+    const panel = document.createElement("aside");
+    panel.className = "resource-panel";
+    panel.dataset.index = String(index);
+
+    const textureItems = draw.draw.textures.length
+      ? draw.draw.textures
+          .map((binding) => {
+            const fileName = binding.textureFile || binding.name || "unnamed texture";
+            const kind = this.describeTextureType(binding);
+            const resolvedPath = this.resolveTexturePath(draw, binding.textureFile);
+            const imageMarkup = resolvedPath
+              ? `<img class="resource-texture-thumb" data-texture-path="${resolvedPath}" alt="${fileName}" />`
+              : "<div class=\"resource-texture-thumb resource-texture-thumb--missing\">No image</div>";
+            return `
+              <li data-texture-path="${resolvedPath ?? ""}">
+                ${imageMarkup}
+                <span class="resource-texture-kind">${kind}</span>
+                <span class="resource-texture-file">${fileName}</span>
+              </li>`;
+          })
+          .join("")
+      : "<li class=\"empty\">No textures bound to this draw.</li>";
+
+    const previewText = draw.previewPath ? `Previewing ${draw.previewPath}` : "Preview mesh";
+    panel.innerHTML = `
+      <div class="resource-header">${previewText}</div>
+      <div class="resource-preview"></div>
+      <div class="resource-subhead">Textures</div>
+      <ul class="resource-texture-list">${textureItems}</ul>
+      <div class="resource-corner resource-corner--upper-right" data-corner="upper-right" aria-label="Resize preview"></div>
+      <div class="resource-corner resource-corner--lower-right" data-corner="lower-right" aria-label="Resize preview"></div>
+    `;
+
+    const previewHost = panel.querySelector<HTMLElement>(".resource-preview");
+    if (previewHost) this.attachMeshPreview(previewHost, draw);
+
+    panel.querySelectorAll<HTMLElement>(".resource-corner").forEach((handle) => {
+      handle.addEventListener("pointerdown", (event) => this.startResourceResize(panel, handle, event as PointerEvent));
+    });
+
+    panel.querySelectorAll<HTMLImageElement>(".resource-texture-thumb[data-texture-path]").forEach((img) => {
+      const filePath = img.dataset.texturePath;
+      if (!filePath) return;
+      const file = this.vfs.get(filePath);
+      if (!file) return;
+      if (file.type.startsWith("image/")) {
+        img.src = URL.createObjectURL(file);
+      } else {
+        img.replaceWith(Object.assign(document.createElement("div"), {
+          className: "resource-texture-thumb resource-texture-thumb--missing",
+          textContent: "No image",
+        }));
+      }
+    });
+
+    this.viewport.appendChild(panel);
+    this.syncResourcePanelPosition();
+    this.applyResourcePanelSizing(panel);
   }
 
   private isObjectHidden(index: number): boolean {
     return this.hiddenDrawIndices.has(index);
+  }
+
+  /** 'f' (filtered - excluded by the size slider, takes priority and the
+   * vis button is disabled), 'h' (manually hidden), or 'v' (visible,
+   * default). */
+  private getVisibilityState(index: number): "f" | "h" | "v" {
+    if (this.isObjectHidden(index)) return "f";
+    return this.manuallyHiddenIndices.has(index) ? "h" : "v";
   }
 
   /** Replaces the selection with exactly this one object. The plain-click
@@ -592,10 +957,22 @@ export class SceneViewerApp {
         selectionBtn.disabled = hidden;
         selectionBtn.classList.toggle("active", selected);
       }
+
+      const visBtn = item.querySelector<HTMLButtonElement>('button[data-action="visibility"]');
+      if (visBtn) {
+        const state = this.getVisibilityState(index);
+        visBtn.textContent = state;
+        visBtn.disabled = state === "f";
+        visBtn.classList.toggle("state-hidden", state === "h");
+      }
     }
   }
 
   private setupObjectList(): void {
+    this.objectList.addEventListener("scroll", () => {
+      this.syncResourcePanelPosition();
+    });
+
     this.objectList.addEventListener("click", (event) => {
       const target = event.target as HTMLElement;
       const itemEl = target.closest<HTMLElement>("[data-index]");

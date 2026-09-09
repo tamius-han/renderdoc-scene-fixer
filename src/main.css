@@ -185,19 +185,134 @@ code {
 .pass-row .role { font-size: 11.5px; color: var(--accent); margin-top: 1px; }
 .pass-row .stats { font-size: 11px; color: var(--text-dim); margin-top: 2px; font-family: var(--mono); }
 
+.draw-row-wrap {
+  display: flex; align-items: flex-start; gap: 12px;
+  position: relative;
+}
+
 .draw-item {
   background: var(--bg-card); border: 1px solid var(--line); border-radius: 6px;
   padding: 6px 8px; cursor: pointer; font-size: 12px; user-select: none;
+  flex: 1 1 auto; min-width: 0;
 }
 .draw-item:hover { background: var(--bg-card-hover); }
 .draw-item.is-selected { border-color: var(--accent); background: rgba(110, 231, 200, 0.08); }
 .draw-item.is-hidden-by-filter { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+.resource-panel {
+  position: absolute;
+  width: min(300px, 38vw);
+  background: rgba(16, 20, 29, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 10px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  z-index: 20;
+  margin-left: 4px;
+  pointer-events: auto;
+}
+
+.resource-header {
+  font-size: 11px; color: var(--accent); margin-bottom: 8px; word-break: break-word;
+}
+
+.resource-corner {
+  position: absolute;
+  width: 0; height: 0;
+  pointer-events: auto;
+  opacity: 0.9;
+}
+
+.resource-corner--upper-right {
+  right: 0; top: 0;
+  border-left: 12px solid transparent;
+  border-bottom: 12px solid rgba(110, 231, 200, 0.9);
+  cursor: nesw-resize;
+  transform: rotate(-90deg);
+}
+
+.resource-corner--lower-right {
+  right: 0; bottom: 0;
+  border-top: 12px solid rgba(110, 231, 200, 0.9);
+  border-left: 12px solid transparent;
+  cursor: nwse-resize;
+  transform: rotate(90deg);
+}
+
+.resource-preview {
+  width: min(25dvh, 320px);
+  height: min(25dvh, 320px);
+  min-width: 240px;
+  min-height: 240px;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0 auto 8px;
+}
+
+.resource-preview-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.resource-subhead {
+  margin-top: 8px; margin-bottom: 6px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim);
+}
+
+.resource-texture-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: row; gap: 8px;
+  max-width: 100%; overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 4px;
+  white-space: nowrap;
+}
+
+.resource-texture-list li {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 0 0 120px; width: 120px;
+  border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,0.02);
+  padding: 6px 8px; font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+}
+
+.resource-texture-thumb {
+  width: 100%; height: 80px; object-fit: contain; border-radius: 4px;
+  background: rgba(255,255,255,0.03); border: 1px solid var(--line);
+  display: block;
+}
+
+.resource-texture-thumb--missing {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--text-dim); text-align: center; background: rgba(255,255,255,0.02);
+}
+
+.resource-texture-kind {
+  color: var(--accent);
+}
+
+.resource-texture-file {
+  color: var(--text);
+  word-break: break-word; overflow-wrap: anywhere; white-space: normal;
+}
+
+.resource-texture-list li.empty {
+  color: var(--text-dim); font-style: italic; border-style: dashed;
+}
 
 .check-like {
   font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 4px;
   border: 1px solid var(--line); background: var(--bg-panel); color: var(--text-dim);
 }
 .check-like.active { border-color: var(--accent); color: var(--accent); background: rgba(110, 231, 200, 0.12); }
+.check-like.state-hidden { border-color: var(--warn); color: var(--warn); background: rgba(232, 176, 75, 0.12); }
 .check-like:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; padding: 8px 2px; }
