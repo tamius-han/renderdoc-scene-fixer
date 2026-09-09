@@ -314,20 +314,16 @@ export class SceneViewerApp {
     return "added";
   }
 
-  private getVisibilityStatus(draw: DrawEntry) {
-
-  }
-
-  private createDrawItem(draw: DrawEntry, drawIndex: number) {
-    const div = document.createElement('div');
+  private createDrawItem(draw: DrawEntry, drawIndex: number): HTMLElement {
+    const div = document.createElement("div");
+    div.className = "draw-item";
+    div.dataset.index = String(drawIndex);
     div.innerHTML = `
-      <div>
-        <b>Draw #${drawIndex}</b>
-        &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}> </button>
-        %nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}>[ ]</button>
-        &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}"> </button>
-        <small>v: f: size: </small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
-      </div>
+      <b>Draw #${drawIndex}</b> <small>(eid ${draw.eventId})</small>
+      &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}"> </button>
+      &nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button>
+      &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}"> </button>
+      <small>v: f: size: </small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
     `;
 
     return div;
@@ -500,56 +496,139 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  toggleDrawVisibility(index) {
-    // this.manifest.dra
+  /** Not yet specified beyond "the size filter controls visibility" - left
+   * as a safe no-op for now rather than guessing unrequested behavior, so
+   * clicking the button doesn't throw. */
+  private toggleDrawVisibility(_index: number): void {
+    // TODO: intentionally unimplemented - visibility is currently driven
+    // entirely by the "hide largest %" filter (see rebuildVisibleScene).
   }
 
-  toggleDrawSelection(index) {
-
+  /** Adds the object to the selection if it isn't selected, removes it if
+   * it is. Used both for ctrl-clicks and as the effective behavior of a
+   * plain click on the dedicated "selection" button - see
+   * handleObjectClick(). */
+  private toggleDrawSelection(index: number): void {
+    if (this.isObjectHidden(index)) return;
+    if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
+    else this.selectedIndices.add(index);
+    this.lastClickedIndex = index;
+    this.renderObjectListState();
   }
 
-  setLandmark(index) {
-
+  /** Not yet specified - left as a safe no-op for now. */
+  private setLandmark(_index: number): void {
+    // TODO: intentionally unimplemented.
   }
 
-  showResources(index) {
-
+  /** Not yet specified - left as a safe no-op for now. */
+  private showResources(_index: number): void {
+    // TODO: intentionally unimplemented.
   }
 
-  setupObjectList() {
-    const objectList = document.getElementById('object-list')!;
+  private isObjectHidden(index: number): boolean {
+    return this.hiddenDrawIndices.has(index);
+  }
 
-    objectList.addEventListener('click', (event) => {
-      const target = event.target;
+  /** Replaces the selection with exactly this one object. The plain-click
+   * (no modifiers) behavior. */
+  private selectOnly(index: number): void {
+    if (this.isObjectHidden(index)) return;
+    this.selectedIndices.clear();
+    this.selectedIndices.add(index);
+    this.lastClickedIndex = index;
+    this.renderObjectListState();
+  }
 
-      if (!(target instanceof HTMLButtonElement)) {
+  /** Replaces the selection with every VISIBLE object between the anchor
+   * (this.lastClickedIndex) and index, inclusive - hidden objects within
+   * that range are skipped rather than selected. The shift-click behavior.
+   * Falls back to a plain select if there's no prior anchor (e.g. the very
+   * first click on the list is a shift-click). */
+  private selectRangeTo(index: number): void {
+    if (this.isObjectHidden(index)) return;
+    const anchor = this.lastClickedIndex ?? index;
+    const lo = Math.min(anchor, index);
+    const hi = Math.max(anchor, index);
+    this.selectedIndices.clear();
+    for (let i = lo; i <= hi; i++) {
+      if (!this.isObjectHidden(i)) this.selectedIndices.add(i);
+    }
+    // Anchor intentionally left unchanged - see lastClickedIndex's doc comment.
+    this.renderObjectListState();
+  }
+
+  /** Central dispatch for anything that affects selection: a plain click on
+   * a row, a ctrl/shift-click on a row, or a click on the "selection"
+   * button (which the caller maps onto this the same way, per spec: a
+   * plain click on that button behaves like a ctrl-click on the row, while
+   * an actually-modified click on it behaves exactly like the same
+   * modifier on the row). Hidden objects (excluded by the size filter)
+   * can't be selected at all. */
+  private handleObjectClick(index: number, shiftKey: boolean, ctrlKey: boolean): void {
+    if (this.isObjectHidden(index)) return;
+    if (shiftKey) this.selectRangeTo(index);
+    else if (ctrlKey) this.toggleDrawSelection(index);
+    else this.selectOnly(index);
+  }
+
+  /** Refreshes the object list's DOM to reflect current selection/hidden
+   * state - called after any selection change and after rebuildVisibleScene
+   * (since the hidden set can change independently, via the size filter). */
+  private renderObjectListState(): void {
+    for (const item of this.objectList.querySelectorAll<HTMLElement>(".draw-item")) {
+      const index = Number(item.dataset.index);
+      if (!Number.isInteger(index)) continue;
+
+      const hidden = this.isObjectHidden(index);
+      const selected = this.selectedIndices.has(index) && !hidden;
+
+      item.classList.toggle("is-hidden-by-filter", hidden);
+      item.classList.toggle("is-selected", selected);
+
+      const selectionBtn = item.querySelector<HTMLButtonElement>('button[data-action="selection"]');
+      if (selectionBtn) {
+        selectionBtn.textContent = selected ? "[x]" : "[ ]";
+        selectionBtn.disabled = hidden;
+        selectionBtn.classList.toggle("active", selected);
+      }
+    }
+  }
+
+  private setupObjectList(): void {
+    this.objectList.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      const itemEl = target.closest<HTMLElement>("[data-index]");
+      if (!itemEl) return;
+
+      const index = Number(itemEl.dataset.index);
+      if (!Number.isInteger(index)) return;
+
+      const actionButton = target.closest<HTMLButtonElement>("button[data-action]");
+      const action = actionButton?.dataset.action;
+
+      if (action === "visibility") {
+        this.toggleDrawVisibility(index);
+        return;
+      }
+      if (action === "landmark") {
+        this.setLandmark(index);
+        return;
+      }
+      if (action === "resources") {
+        this.showResources(index);
         return;
       }
 
-      const action = target.dataset.action;
-      const index = Number(target.dataset.index);
-
-      if (!Number.isInteger(index)) {
-        return;
-      }
-
-      switch (action) {
-        case 'visibility':
-          this.toggleDrawVisibility(index);
-          break;
-
-        case 'selection':
-          this.toggleDrawSelection(index);
-          break;
-
-        case 'landmark':
-          this.setLandmark(index);
-          break;
-
-        case 'resources':
-          this.showResources(index);
-          break;
-      }
+      // Either the dedicated "selection" button, or a plain click anywhere
+      // else on the row - both drive selection. A plain (unmodified) click
+      // on the selection button is treated as a ctrl-click on the row; an
+      // actually-modified click on it (ctrl or shift) behaves exactly like
+      // that same modifier on the row itself.
+      const isSelectionButton = action === "selection";
+      const shiftKey = event.shiftKey;
+      const ctrlKey = event.ctrlKey || event.metaKey || (isSelectionButton && !shiftKey);
+      this.handleObjectClick(index, shiftKey, ctrlKey);
     });
   }
 }
