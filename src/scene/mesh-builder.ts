@@ -44,6 +44,10 @@ export function unionBounds(a: Bounds, b: Bounds): Bounds {
   };
 }
 
+export function boundsCenter(b: Bounds): THREE.Vector3 {
+  return new THREE.Vector3((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2);
+}
+
 /** Expands an OBJ's face list into flat per-corner attribute arrays (one
  * vertex per face corner, all attributes aligned to the same index) - what a
  * non-indexed THREE.BufferGeometry needs, rather than OBJ's independent

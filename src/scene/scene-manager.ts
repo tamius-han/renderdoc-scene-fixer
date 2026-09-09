@@ -31,6 +31,7 @@ export class SceneManager {
   readonly renderer: THREE.WebGLRenderer;
 
   private target = new THREE.Vector3(0, 0, 0);
+  private contentGroup: THREE.Group | null = null;
   private distance = 10;
   private theta = Math.PI * 0.25;
   private phi = Math.PI * 0.35;
@@ -323,12 +324,25 @@ export class SceneManager {
    * not just whatever's passed in here - when the "hide largest %" filter
    * is active, meshes will only be a subset of everything that was loaded,
    * and measuring scale from just the visible subset would make the scene
-   * rescale (and camera jump) every time the filter slider moves. */
-  addContent(meshes: THREE.Mesh[], scale: number): void {
+   * rescale (and camera jump) every time the filter slider moves. Returns
+   * the group so the caller can attach additional objects (e.g. selection
+   * highlight overlays) that need to live in the same transform space -
+   * see getContentGroup(). */
+  addContent(meshes: THREE.Mesh[], scale: number): THREE.Group {
     const group = new THREE.Group();
     for (const mesh of meshes) group.add(mesh);
     group.scale.setScalar(scale);
     this.scene.add(group);
+    this.contentGroup = group;
+    return group;
+  }
+
+  /** The group created by the most recent addContent() call, or null if
+   * clear() has been called since (or addContent() was never called). Used
+   * by the caller to attach objects that need the same scale/position space
+   * as the loaded content, without re-deriving the normalization scale. */
+  getContentGroup(): THREE.Group | null {
+    return this.contentGroup;
   }
 
   frameOnScene(): void {
@@ -351,6 +365,7 @@ export class SceneManager {
         if (child instanceof THREE.Mesh) child.geometry.dispose();
       });
     }
+    this.contentGroup = null;
   }
 
   private animate = (): void => {

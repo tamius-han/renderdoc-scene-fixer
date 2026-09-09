@@ -4,6 +4,7 @@ import { loadManifests, type LoadedManifests } from "./manifest";
 import { parseMTL } from "./parsers/mtl";
 import { parseOBJ } from "./parsers/obj";
 import {
+  boundsCenter,
   boundsDiagonal,
   computeBounds,
   objToGeometryArrays,
@@ -15,6 +16,12 @@ import {
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
+
+// Selection outline is extruded outward along each vertex's own normal by
+// this fraction of the OBJECT'S OWN bounding-box diagonal (not a fixed
+// world-unit width), so the outline reads as proportionally similar
+// thickness whether the selected object is tiny or huge.
+const SELECTION_OUTLINE_WIDTH_RATIO = 0.01;
 
 /** One draw's fully-parsed geometry/material/bounds, cached in memory so the
  * "hide largest % of objects" filter can rebuild the visible scene instantly
@@ -52,7 +59,7 @@ export class SceneViewerApp {
   /** 0-100. How much of the largest-by-diagonal objects to exclude from the
    * rendered scene. Kept in sync across the import-screen and viewport
    * filter controls. */
-  private hidePercent = 10;
+  private hidePercent = 0;
   private lastProblemNote = "";
 
   /** Indices into loadedDraws currently excluded by the "hide largest %"
@@ -74,6 +81,13 @@ export class SceneViewerApp {
    * repeated shift-clicks all extend/shrink from the same anchor - standard
    * list multi-select convention). */
   private lastClickedIndex: number | null = null;
+
+  /** Every Object3D currently added to the content group for the selection
+   * highlight (silhouette outline mesh + the two dot-marker Points pairs) -
+   * tracked here so they can be cleanly removed/disposed on the next
+   * selection or scene rebuild, independent of the main content meshes'
+   * own lifecycle (see clearSelectionVisuals()). */
+  private selectionVisuals: THREE.Object3D[] = [];
 
   private dropzone = this.el("dropzone");
   private folderInput = this.el<HTMLInputElement>("folder-input");
@@ -383,6 +397,7 @@ export class SceneViewerApp {
     this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
     try {
+      this.clearSelectionVisuals();
       this.sceneManager.clear();
       // Full reload: previous draws/materials/textures are genuinely done
       // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
@@ -524,9 +539,15 @@ export class SceneViewerApp {
     });
     const meshes = builder.buildAll();
 
+    // Must clear our own overlay objects BEFORE sceneManager.clear() runs -
+    // they live inside the content group that's about to be torn down and
+    // rebuilt, and sceneManager.clear() only disposes the Mesh objects it
+    // owns directly, not these app-level Points markers.
+    this.clearSelectionVisuals();
     this.sceneManager.clear();
     this.sceneManager.addContent(meshes, this.fixedScale);
     this.sceneManager.frameOnScene();
+    this.updateSelectionVisuals();
 
     const visibleCount = this.loadedDraws.length - excludedCount;
     const triCount = Math.round(builder.totalVertexCount / 3);
@@ -578,6 +599,7 @@ export class SceneViewerApp {
     if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
     else this.selectedIndices.add(index);
     this.lastClickedIndex = index;
+    this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
 
@@ -902,6 +924,7 @@ export class SceneViewerApp {
     this.selectedIndices.clear();
     this.selectedIndices.add(index);
     this.lastClickedIndex = index;
+    this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
 
@@ -920,6 +943,7 @@ export class SceneViewerApp {
       if (!this.isObjectHidden(i)) this.selectedIndices.add(i);
     }
     // Anchor intentionally left unchanged - see lastClickedIndex's doc comment.
+    this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
 
@@ -935,6 +959,150 @@ export class SceneViewerApp {
     if (shiftKey) this.selectRangeTo(index);
     else if (ctrlKey) this.toggleDrawSelection(index);
     else this.selectOnly(index);
+  }
+
+  /** Rebuilds the selection highlight (outline + dot markers) from scratch -
+   * cheap enough to call on every selection change since it only touches
+   * the small selected subset, not the full merged scene. */
+  private refreshSelectionVisuals(): void {
+    this.clearSelectionVisuals();
+    this.updateSelectionVisuals();
+  }
+
+  /** Removes and disposes every currently-tracked selection visual. Safe to
+   * call with an empty list. Must run BEFORE sceneManager.clear()/a fresh
+   * addContent() call, since these objects live inside the content group
+   * that gets torn down and rebuilt - sceneManager.clear() only knows how
+   * to dispose the Mesh objects it owns directly, not app-level overlay
+   * objects like these Points markers. */
+  private clearSelectionVisuals(): void {
+    const group = this.sceneManager.getContentGroup();
+    const disposedGeometries = new Set<THREE.BufferGeometry>();
+    for (const obj of this.selectionVisuals) {
+      group?.remove(obj);
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.Points) {
+        // The two dot markers in a pair (outline + fill) intentionally
+        // share one BufferGeometry - guard against disposing it twice.
+        if (!disposedGeometries.has(obj.geometry)) {
+          obj.geometry.dispose();
+          disposedGeometries.add(obj.geometry);
+        }
+        const material = obj.material;
+        if (Array.isArray(material)) material.forEach((m) => m.dispose());
+        else material.dispose();
+      }
+    }
+    this.selectionVisuals = [];
+  }
+
+  /** Builds the silhouette outline (extruded backface mesh) and both dot
+   * marker pairs for the currently-selected, currently-rendered objects,
+   * and adds them to the content group. No-ops if nothing is selected, or
+   * if there's no content group yet (nothing reconstructed). Selected
+   * objects that are filtered or manually hidden right now are excluded -
+   * there's nothing to outline/mark if they're not actually being drawn. */
+  private updateSelectionVisuals(): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    const activeSelected = Array.from(this.selectedIndices).filter(
+      (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
+    );
+    if (activeSelected.length === 0) return;
+
+    const outlineGeometry = this.buildOutlineGeometry(activeSelected);
+    if (outlineGeometry) {
+      const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffaa66, side: THREE.BackSide });
+      const outlineMesh = new THREE.Mesh(outlineGeometry, outlineMaterial);
+      group.add(outlineMesh);
+      this.selectionVisuals.push(outlineMesh);
+    }
+
+    const perObjectCenters: number[] = [];
+    let unionBoundsAcc: Bounds | null = null;
+    for (const index of activeSelected) {
+      const bounds = this.loadedDraws[index].bounds;
+      const center = boundsCenter(bounds);
+      perObjectCenters.push(center.x, center.y, center.z);
+      unionBoundsAcc = unionBoundsAcc ? unionBounds(unionBoundsAcc, bounds) : bounds;
+    }
+    // #f82 - one dot per selected object, at its own bounding-box center.
+    this.addDotPair(group, perObjectCenters, 0xff8822);
+
+    if (unionBoundsAcc) {
+      const center = boundsCenter(unionBoundsAcc);
+      // #fa6 - one dot at the center of the whole selection (the bounding
+      // box that contains every selected object's bounding box).
+      this.addDotPair(group, [center.x, center.y, center.z], 0xffaa66);
+    }
+  }
+
+  /** Concatenates every given draw's geometry, with each vertex pushed
+   * outward along its own normal by a fraction of THAT draw's own diagonal
+   * (see SELECTION_OUTLINE_WIDTH_RATIO). Rendered back-face-only with a
+   * solid color, this is the classic dependency-free "silhouette outline"
+   * trick - no post-processing pipeline needed. Uses a pre-sized
+   * Float32Array rather than array spreading/pushing, since spreading a
+   * large per-vertex array as call arguments can hit the JS engine's
+   * argument-count limit on big meshes. */
+  private buildOutlineGeometry(indices: number[]): THREE.BufferGeometry | null {
+    let totalLength = 0;
+    for (const i of indices) totalLength += this.loadedDraws[i].geometryData.positions.length;
+    if (totalLength === 0) return null;
+
+    const positions = new Float32Array(totalLength);
+    let offset = 0;
+    for (const i of indices) {
+      const draw = this.loadedDraws[i];
+      const { positions: srcPositions, normals } = draw.geometryData;
+      const width = draw.diagonal * SELECTION_OUTLINE_WIDTH_RATIO;
+      for (let j = 0; j < srcPositions.length; j += 3) {
+        positions[offset + j] = srcPositions[j] + normals[j] * width;
+        positions[offset + j + 1] = srcPositions[j + 1] + normals[j + 1] * width;
+        positions[offset + j + 2] = srcPositions[j + 2] + normals[j + 2] * width;
+      }
+      offset += srcPositions.length;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    return geometry;
+  }
+
+  /** Adds one dot-marker pair (a black 1px-wider outline dot underneath, a
+   * colored 3px dot on top) at each given xyz position. Both use
+   * depthTest:false so they stay visible through occluding geometry, and
+   * sizeAttenuation:false so the pixel sizes are literal screen-space
+   * pixels rather than shrinking with distance. The pair shares one
+   * BufferGeometry (see clearSelectionVisuals() for the matching
+   * dispose-once handling). */
+  private addDotPair(group: THREE.Group, positions: number[], fillColor: number): void {
+    if (positions.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+
+    const outlineMaterial = new THREE.PointsMaterial({
+      color: 0x000000,
+      size: 5, // 3px dot + 1px outline on each side
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const fillMaterial = new THREE.PointsMaterial({
+      color: fillColor,
+      size: 3,
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    const outline = new THREE.Points(geometry, outlineMaterial);
+    const fill = new THREE.Points(geometry, fillMaterial);
+    outline.renderOrder = 998; // black underneath
+    fill.renderOrder = 999; // colored dot on top
+
+    group.add(outline, fill);
+    this.selectionVisuals.push(outline, fill);
   }
 
   /** Refreshes the object list's DOM to reflect current selection/hidden
