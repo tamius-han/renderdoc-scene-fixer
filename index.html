@@ -12,7 +12,7 @@
   </head>
   <body>
     <div class="show-on-initial-load">Loading ...</div>
-    <div id="app" class="hide-on-initial-load flex flex-col h-full w-full">
+    <div id="app" class="hide-on-initial-load flex flex-col !h-[100dvh] !w-[100vw]">
       <div id="topbar" class="flex flex-row gap-4 p-2 bg-mist-900">
         <div class="text-amber-200">RenderDoc Capture Fixer</div>
         <div>Import scene</div>
@@ -22,10 +22,10 @@
         <div>Fix & export</div>
       </div>
 
-      <div class="flex flex-row">
-        <div id="sidebar">
-          <div id="sidebar-scroll">
-            <h1>Capture Scene Viewer</h1>
+      <div class="flex flex-row grow shrink overflow-hidden">
+        <div id="sidebar" class="h-full">
+          <div id="sidebar-scroll" class="h-full">
+            <h2>Import scene</h2>
             <p class="subtitle">Drop a folder exported by the RenderDoc SceneExporter extension to reconstruct it here.</p>
 
             <div class="dropzone" id="dropzone">
@@ -55,52 +55,76 @@
           <div id="status-bar">Waiting for a folder&hellip;</div>
         </div>
 
-        <div id="sidebar-object-list" class="p-4">
+        <div id="sidebar-object-list" class="p-4 h-full overflow-hidden flex flex-col">
           <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
 
-          <div>Order by: <button>draw order</button>, <button>size</button></div>
+          <div>Select region:
+            <button title="Select within radius">O</button>
+            <button title="Select within cube">[]</button>
+          </div>
 
-          <div class="flex flex-col gap-2" id="object-list">
+
+          <b class="mt-8 text-white">Object list:</b>
+          <div>Order by: <button>draw order</button>, <button>size</button>, <button>faces</button></div>
+          <div class="grow shrink flex flex-col gap-2 overflow-auto" id="object-list">
 
           </div>
         </div>
 
-        <div id="viewport">
-          <div id="object-filter-menu" class="menu">
-            <div class="field">
-              <div class="label">Hide largest % of objects:</div>
-              <div class="combined-slider-value">
-                <input type="range" id="object-filter-size-slider" min="0" max="100" value="0" />
-                <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="0" />
-              </div>
-            </div>
-          </div>
-          <div id="control-options-menu">
-            <div class="field">
-              <div class="toggle-row">
-                <div>
-                  <div class="lbl">Camera control:</div>
-                  <span class="sub" id="fly-mode-label">Orbit / pan</span>
+        <div id="viewport" class="h-full w-full relative">
+          <div class="absolute right-4 top-4">
+            <div id="object-filter-menu" class="menu">
+              <div class="field">
+                <div class="label">Hide largest % of objects:</div>
+                <div class="combined-slider-value">
+                  <input type="range" id="object-filter-size-slider" min="0" max="100" value="0" />
+                  <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="0" />
                 </div>
-                <label class="switch">
-                  <input type="checkbox" id="fly-mode-toggle" />
-                  <span class="slider"></span>
-                </label>
               </div>
-              <div class="sub" id="fly-speed-indicator" style="display: none"></div>
             </div>
-            <div class="field">
-              <div class="toggle-row">
-                <div>
-                  <div class="lbl">Control scheme</div>
-                  <span class="sub" id="control-scheme-label">ESDF - movement; A: toggle fly mode</span>
+            <div id="control-options-menu">
+              <div class="field">
+                <div class="toggle-row">
+                  <div>
+                    <div class="lbl">Camera control:</div>
+                    <span class="sub" id="fly-mode-label">Orbit / pan</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="fly-mode-toggle" />
+                    <span class="slider"></span>
+                  </label>
                 </div>
-                <label class="switch">
-                  <input type="checkbox" id="control-scheme-toggle" />
-                  <span class="slider"></span>
-                </label>
+                <div class="sub" id="fly-speed-indicator" style="display: none"></div>
+              </div>
+              <div class="field">
+                <div class="toggle-row">
+                  <div>
+                    <div class="flex flex-row space-between gap-4">
+                      <div>Control scheme</div>
+                      <select value="esdf" class="text-blue-300" id="control-scheme-dropdown">
+                        <option value="esdf">ESDF</option>
+                        <option value="wasd">WASD</option>
+                      </select>
+                    </div>
+                    <span class="sub leading-[1.25rem]">
+                      <code id="control-scheme-label-movement">ESDF</code> — movement (fly mode)<br/>
+                      <code id="control-scheme-label-toggle-fly">A</code> — toggle fly mode<br/>
+                      <span  id="control-scheme-label">ESDF - movement; A: toggle fly mode</span><br/>
+                      <code>Space</code> — up; <code>Ctrl</code> — down<br/>
+                      <code>Num 1</code>, <code>Num 3</code>, <code>Num 7</code> — front/side/top view<br/>
+                      <code>Num 9</code> — flip view; <code>Num 5</code> — toggle ortographic
+                    </span>
+
+
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="control-scheme-toggle" />
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
             </div>
+            <div id="select-options-menu"></div>
           </div>
           <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
           <div id="hud" style="display: none"></div>

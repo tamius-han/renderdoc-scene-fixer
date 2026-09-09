@@ -12,12 +12,12 @@
   </head>
   <body class="!h-[100vh] w-full overflow-hidden flex flex-col">
     <div class="show-on-initial-load">Loading ...</div>
-    <div id="app" class="hide-on-initial-load flex flex-col h-full w-full overflow-hidden">
+    <div id="app" class="hide-on-initial-load flex flex-col h-[100dvh] w-[100vw] overflow-hidden">
       <div id="topbar" class="flex flex-row gap-4 p-2 bg-mist-900">
         <div class="text-amber-200">RenderDoc Capture Fixer</div>
       </div>
-      <div class="shrink h-full flex flex-row w-full items-center justify-center pb-12 ">
-        <div class="max-w-[960px] h-full overflow-auto -mr-4 pr-4">
+      <div class="grow shrink flex flex-row w-full items-center justify-center pb-12 overflow-hidden py-4">
+        <div class="max-w-[960px] h-full overflow-auto -mr-6 pr-6">
           <div class="warning-box">
             Using Renderdoc to capture game scenes <b>WILL</b> result in game bans from online games that make use of anti-cheat software.<br/>
             Follow these instructions at your own risk.
@@ -38,6 +38,19 @@
           </ol>
 
           <p>After installing Renderdoc and Renderdoc Scene Exporter addon, you can start capturing.</p>
+
+          <div class="info-box">
+            By default, Renderdoc saves your game captures to:
+            <ul>
+              <li>
+                <code>%TEMP%</code> on Windows, and
+              </li>
+              <li>
+                <code>/tmp/RenderDoc</code> on Linux.
+              </li>
+            </ul>
+            <p>Note that on Linux, <code>/tmp</code> directory usually exists in your RAM. You might want to change capture directory in Renderdoc settings to a folder on your disk.</p>
+          </div>
 
           <h2>Capturing the game</h2>
 
@@ -65,7 +78,10 @@
                 If trying to capture a steam game (or a game from a different store), launch the game from the store's launcher.
               </li>
               <li>
-                If you see this, everything is set up for capturing game scene.
+                If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
+                <div class="flex flex-row justify-center p-2">
+                  <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+                </div>
               </li>
               <li>
                 Capture the scene whenever you want.
@@ -81,7 +97,9 @@
                 <p>
                   Tools like Renderdoc (and Intel GPA, and NinjaRipper) touch the game's rendering pipeline. Some games are a bit sensitive to that, and will crash or even refuse to launch.
                 </p>
-                <p class="text-center py-8 text-amber-200"><b>TW:</b> while you're probably aware you're in the <i>Nerd</i>erlands right now, the border with <i>Geek</i>enstein is fast approaching. Take care.</p>
+                <p class="text-center py-8 text-amber-200"><b>
+                  TW:</b> while you're probably aware you're in the Bel<i>geek</i> right now, the border with <i>Nerd</i>erlands is fast approaching. Take care.
+                </p>
                 <p>
                   Sometimes, you can work around that by moving your capture spot outside of the game's rendering pipeline. There are two options that allow you to do that (though neither is guaranteed to work for every game):
                 </p>
@@ -116,14 +134,25 @@
               <li><b>Make sure game isn't running via Wayland.</b> At the time of writing this, games won't launch at all under Wayland. Make sure you didn't put <code>PROTON_ENABLE_WAYLAND=1</code> into the launch options.</li>
               <li>Exit steam</li>
               <li>Open a terminal (KDE: <code>konsole</code>, other DEs: why don't you use a DE that isn't shit?, WMs: you already know what to do)</li>
-              <li>Use the following command to launch Steam: <code>ENABLE_VULKAN_RENDERDOC_CAPTURE=1 steam</code> (this works on CachyOS; other distros may vary)</li>
+              <li>
+                Run the following command:<br/>
+                <code>sudo renderdoccmd vulkanlayer --register --system</code><br/>
+                <small class="opacity-50">Unless you run Linux from live USB, you only ever need to run this command once per install. This registers renderdoc's vulkan capture system wide, and makes enabling renderdoc capture slightly easier.</small>
+              <li>
+                Use the following command to launch Steam:<br/>
+                <code>ENABLE_VULKAN_RENDERDOC_CAPTURE=1 steam</code><br/>
+                <small class="opacity-50">(this works on CachyOS; other distros may vary)</small>
+              </li>
               <li>Launch your game via Steam.</li>
               <li>
                 If the game refuses to launch, right click on the game, go to <code>Preferences -> Compatibility</code> and check the "force use of a specific Steam Play compatibility tool" checkbox. Play around with the option.
                 If you're fresh to Linux, consult with Linux advertisement in the windows tab as I won't repeat it here.
               </li>
               <li>
-                If you see this, everything is set up for capturing game scene.
+                If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
+                <div class="flex flex-row justify-center p-2">
+                  <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+                </div>
               </li>
               <li>
                 Capture the scene whenever you want.
@@ -131,6 +160,26 @@
             </ol>
           </div>
 
+          <h2>After capture</h2>
+          <ol>
+            <li>
+              <small class="opacity-50">If using Linux:</small> Open Renderdoc.
+            </li>
+            <li>
+              <code>File > Open Capture</code>. Navigate to your capture directory and open the capture.<br/>
+            </li>
+            <li>Make sure <code>Renderdoc Scene Exporter</code> extension is enabled.</li>
+            <li>
+              Click <code>Tools > Export scene</code> and do the needful™. Create a new folder and export the scene into said folder.
+            </li>
+            <li>
+              Drag the folder into this app.
+            </li>
+          </ol>
+
+          <h2>Using this tool</h2>
+          <p>If you're reading this, the standard FAFO approach (that is: messing around the program in order to find out) probably doesn't work for you.</p>
+          <p>Not to worry. I have a documentation.</p>
         </div>
       </div>
     </div>

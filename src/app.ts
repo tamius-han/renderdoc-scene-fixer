@@ -51,6 +51,19 @@ export class SceneViewerApp {
   private hidePercent = 0;
   private lastProblemNote = "";
 
+  /** Indices into loadedDraws currently excluded by the "hide largest %"
+   * filter - recomputed by rebuildVisibleScene() whenever the filter
+   * changes, and the single source of truth for "is this object
+   * selectable/visible in the list" (see isObjectHidden()). */
+  private hiddenDrawIndices = new Set<number>();
+  /** Indices into loadedDraws currently selected in the object list. */
+  private selectedIndices = new Set<number>();
+  /** Anchor point for shift-click range selection - the last index selected
+   * via a plain or ctrl click (NOT updated by shift-clicks themselves, so
+   * repeated shift-clicks all extend/shrink from the same anchor - standard
+   * list multi-select convention). */
+  private lastClickedIndex: number | null = null;
+
   private dropzone = this.el("dropzone");
   private folderInput = this.el<HTMLInputElement>("folder-input");
   private passSection = this.el("pass-section");
@@ -61,6 +74,7 @@ export class SceneViewerApp {
   private statusBar = this.el("status-bar");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
+  private objectList = this.el('object-list');
 
   private importFilterSlider = this.el<HTMLInputElement>("import-filter-size-slider");
   private importFilterValue = this.el<HTMLInputElement>("import-filter-size-value");
@@ -135,7 +149,6 @@ export class SceneViewerApp {
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    this.posedToggle.addEventListener("change", () => this.updatePoseWarning());
     this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
     this.controlSchemeToggle.addEventListener("change", () =>
       this.sceneManager.setControlScheme(this.controlSchemeToggle.checked ? "wasd" : "esdf"),
@@ -346,6 +359,10 @@ export class SceneViewerApp {
       }
       this.textures.disposeAll();
       this.loadedDraws = [];
+      this.objectList.innerHTML = "";
+      this.selectedIndices.clear();
+      this.hiddenDrawIndices.clear();
+      this.lastClickedIndex = null;
 
       let noMeshPathCount = 0;
       let meshNotFoundCount = 0;
@@ -368,7 +385,7 @@ export class SceneViewerApp {
         }
         const passDir = joinPath(this.loaded.rootPrefix, folder);
 
-        for (const [index, draw] of manifest.draws.entries()) {
+        for (const draw of manifest.draws) {
           processed++;
           try {
             const outcome = await this.loadDraw(draw, passDir);
@@ -385,7 +402,12 @@ export class SceneViewerApp {
                 loggedMissingMesh = true;
               }
             } else {
-              this.objectList.appendChild(this.createDrawItem(draw, index));
+              // Global index into loadedDraws (loadDraw() just pushed this
+              // draw onto it) - NOT the per-pass manifest index, which
+              // would collide across multiple selected passes since each
+              // pass's manifest.draws restarts at 0.
+              const globalIndex = this.loadedDraws.length - 1;
+              this.objectList.appendChild(this.createDrawItem(draw, globalIndex));
             }
           } catch (e) {
             exceptionCount++;
@@ -432,29 +454,39 @@ export class SceneViewerApp {
    * objects were already counted in this.fixedScale (computed once from
    * every loaded draw in reconstructScene()) but are excluded here, so
    * frameOnScene() - which measures whatever's actually in the scene -
-   * naturally only frames the camera on what's currently visible. */
+   * naturally only frames the camera on what's currently visible. Also
+   * recomputes hiddenDrawIndices, which the object list uses to gray out /
+   * disable selection on anything the filter is currently excluding. */
   private rebuildVisibleScene(): void {
     if (this.loadedDraws.length === 0) return;
 
     // "Hide largest % of objects" = hide that fraction of objects BY COUNT,
     // ranked by size (bounding-box diagonal) - the simplest, most
     // predictable reading of a 0-100% slider.
-    const sorted = [...this.loadedDraws].sort((a, b) => b.diagonal - a.diagonal);
+    const sorted = this.loadedDraws
+      .map((draw, index) => ({ draw, index }))
+      .sort((a, b) => b.draw.diagonal - a.draw.diagonal);
     const hideCount = Math.round((this.hidePercent / 100) * sorted.length);
-    const hidden = new Set(sorted.slice(0, hideCount));
+    this.hiddenDrawIndices = new Set(sorted.slice(0, hideCount).map((entry) => entry.index));
+
+    // Anything that just became hidden can't stay selected - "objects must
+    // be selectable, unless hidden by the size filter".
+    for (const index of this.selectedIndices) {
+      if (this.hiddenDrawIndices.has(index)) this.selectedIndices.delete(index);
+    }
 
     const builder = new SceneMeshBuilder();
-    for (const draw of this.loadedDraws) {
-      if (hidden.has(draw)) continue;
+    this.loadedDraws.forEach((draw, index) => {
+      if (this.hiddenDrawIndices.has(index)) return;
       builder.addDraw(draw.key, draw.material, draw.geometryData);
-    }
+    });
     const meshes = builder.buildAll();
 
     this.sceneManager.clear();
     this.sceneManager.addContent(meshes, this.fixedScale);
     this.sceneManager.frameOnScene();
 
-    const visibleCount = this.loadedDraws.length - hidden.size;
+    const visibleCount = this.loadedDraws.length - this.hiddenDrawIndices.size;
     const triCount = Math.round(builder.totalVertexCount / 3);
 
     this.setStatus(
@@ -464,10 +496,12 @@ export class SceneViewerApp {
     this.hud.textContent =
       `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
       `${triCount.toLocaleString()} tris \u00b7 scale \u00d7${this.fixedScale.toExponential(2)} \u00b7 MMB drag to orbit, Shift+MMB to pan, scroll to zoom, A for fly mode`;
+
+    this.renderObjectListState();
   }
 
   toggleDrawVisibility(index) {
-    this.manifest.dra
+    // this.manifest.dra
   }
 
   toggleDrawSelection(index) {
