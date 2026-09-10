@@ -201,7 +201,9 @@ code {
 
 .resource-panel {
   position: absolute;
-  width: min(300px, 38vw);
+  display: flex;
+  flex-direction: column;
+  min-width: calc(25vh + 20px); /* 20px = panel's own left+right padding, so the 25vh preview never overflows it */
   background: rgba(16, 20, 29, 0.96);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -210,9 +212,11 @@ code {
   z-index: 20;
   margin-left: 4px;
   pointer-events: auto;
+  overflow: hidden; /* no scrollbars/overflow on the panel itself - only the texture row scrolls, deliberately */
 }
 
 .resource-header {
+  flex: 0 0 auto;
   font-size: 11px; color: var(--accent); margin-bottom: 8px; word-break: break-word;
 }
 
@@ -240,11 +244,10 @@ code {
 }
 
 .resource-preview {
-  width: min(25dvh, 320px);
-  height: min(25dvh, 320px);
-  min-width: 240px;
-  min-height: 240px;
-  max-width: 100%;
+  flex: 1 1 auto; /* grows to fill whatever space the panel resize leaves for it */
+  min-width: 25vh;
+  min-height: 25vh;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -252,7 +255,7 @@ code {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
-  margin: 0 auto 8px;
+  margin: 0 0 8px;
 }
 
 .resource-preview-canvas {
@@ -264,6 +267,7 @@ code {
 }
 
 .resource-subhead {
+  flex: 0 0 auto;
   margin-top: 8px; margin-bottom: 6px; font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--text-dim);
 }
@@ -271,7 +275,10 @@ code {
 .resource-texture-list {
   list-style: none; margin: 0; padding: 0;
   display: flex; flex-direction: row; gap: 8px;
-  max-width: 100%; overflow-x: auto; overflow-y: hidden;
+  flex: 0 0 auto; /* fixed-height row, doesn't grow/shrink when the panel is resized */
+  width: 100%;
+  height: calc(12.5vh + 48px); /* thumb + label lines + padding - fixed so content can never force it taller */
+  overflow-x: auto; overflow-y: hidden;
   padding-bottom: 4px;
   white-space: nowrap;
 }
@@ -279,7 +286,9 @@ code {
 .resource-texture-list li {
   display: flex; flex-direction: column; gap: 4px;
   flex: 0 0 calc(12.5vh + 16px); width: calc(12.5vh + 16px); max-width: calc(12.5vh + 16px);
+  height: 100%;
   box-sizing: border-box;
+  overflow: hidden;
   border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,0.02);
   padding: 6px 8px; font-family: var(--mono); font-size: 11px; color: var(--text-dim);
 }
@@ -299,11 +308,12 @@ code {
 
 .resource-texture-kind {
   color: var(--accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 .resource-texture-file {
   color: var(--text);
-  word-break: break-word; overflow-wrap: anywhere; white-space: normal;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 .resource-texture-list li.empty {

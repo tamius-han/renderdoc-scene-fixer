@@ -101,6 +101,9 @@ export class SceneViewerApp {
   private hud = this.el("hud");
   private objectList = this.el('object-list');
   private viewport = this.el<HTMLElement>("viewport");
+  // Placeholder values - recomputed from the actual viewport height and the
+  // panel's real rendered content every time a resource panel is opened,
+  // see computeResourcePanelMinSize() and showResources().
   private resourcePanelMinSize = { width: 360, height: 420 };
   private resourcePanelSize = { ...this.resourcePanelMinSize };
 
@@ -665,7 +668,22 @@ export class SceneViewerApp {
     const size = bounds.max.clone().sub(bounds.min);
     const radius = Math.max(size.length() * 0.5, 0.25);
     const targetFill = 0.875;
-    const fitDistance = (radius / (targetFill * Math.tan((camera.fov * Math.PI) / 360))) * 1.1;
+
+    // Aspect-aware: as the panel is resized non-uniformly, the container
+    // (and therefore the canvas - see resize() below, which now fills it
+    // fully rather than a centered square) can end up wider or taller than
+    // square. camera.fov is the VERTICAL fov, so for a portrait-ish aspect
+    // the horizontal fov is the tighter constraint instead - use whichever
+    // is smaller so the model stays approximately fully covering the
+    // canvas regardless of its current shape.
+    const computeFitDistance = (aspect: number): number => {
+      const vFov = (camera.fov * Math.PI) / 180;
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const limitingFov = Math.min(vFov, hFov);
+      return (radius / (targetFill * Math.tan(limitingFov / 2))) * 1.1;
+    };
+
+    let fitDistance = computeFitDistance(1);
 
     const modelRoot = new THREE.Group();
     mesh.position.sub(center);
@@ -688,10 +706,18 @@ export class SceneViewerApp {
     let pointerDown = false;
     let lastX = 0;
     let lastY = 0;
+    // currentDistance = fitDistance * zoomRatio - keeping the user's zoom as
+    // a RATIO (rather than an absolute distance) means resizing the panel
+    // (which changes fitDistance, see resize() below) preserves how far
+    // they'd zoomed in/out instead of resetting it.
+    let zoomRatio = 1;
     let currentDistance = fitDistance;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (event.button !== 0 && event.button !== 1) return;
+      // Middle mouse button only, matching the main viewport's Blender-
+      // style scheme (left/other buttons intentionally do nothing).
+      if (event.button !== 1) return;
+      event.preventDefault(); // stops the browser's middle-click autoscroll icon
       pointerDown = true;
       lastX = event.clientX;
       lastY = event.clientY;
@@ -712,10 +738,9 @@ export class SceneViewerApp {
     };
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const zoomFactor = Math.exp((-event.deltaY * 0.0015));
-      const minDistance = fitDistance * 0.2;
-      const maxDistance = fitDistance * 6;
-      currentDistance = THREE.MathUtils.clamp(currentDistance * zoomFactor, minDistance, maxDistance);
+      const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+      zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
+      currentDistance = fitDistance * zoomRatio;
       camera.position.set(0, 0, currentDistance);
       camera.lookAt(0, 0, 0);
     };
@@ -729,9 +754,18 @@ export class SceneViewerApp {
     previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
 
     const resize = () => {
-      const sizePx = Math.max(200, Math.min(container.clientWidth, container.clientHeight));
-      renderer.setSize(sizePx, sizePx, false);
-      camera.aspect = 1;
+      // Fill the container's actual (possibly non-square) size, rather
+      // than a centered square inscribed within it - "canvas should grow
+      // to fill the available space" as the panel is resized.
+      const width = Math.max(1, container.clientWidth);
+      const height = Math.max(1, container.clientHeight);
+      renderer.setSize(width, height, false);
+      const aspect = width / height;
+      camera.aspect = aspect;
+      fitDistance = computeFitDistance(aspect);
+      currentDistance = fitDistance * zoomRatio;
+      camera.position.set(0, 0, currentDistance);
+      camera.lookAt(0, 0, 0);
       camera.updateProjectionMatrix();
     };
 
@@ -779,24 +813,35 @@ export class SceneViewerApp {
     panel.style.top = `${Math.max(12, top)}px`;
   }
 
-  private applyResourcePanelSizing(panel: HTMLElement): void {
-    const panelWidth = panel.offsetWidth;
-    const panelHeight = panel.offsetHeight;
-    const previewWidth = Math.min(Math.max(panelWidth - 28, 240), 420);
-    const previewHeight = Math.min(Math.max(panelHeight * 0.45, 220), 320);
-    const preview = panel.querySelector<HTMLElement>(".resource-preview");
-    if (preview) {
-      preview.style.width = `${previewWidth}px`;
-      preview.style.height = `${previewHeight}px`;
-    }
+  /** The panel's minimum no-overflow size, computed from the ACTUAL current
+   * viewport height (25vh preview + the fixed 12.5vh+48px texture row +
+   * measured header/subhead heights + padding) - matches the CSS rules on
+   * .resource-preview/.resource-texture-list exactly, so the panel's
+   * initial size never needs a scrollbar or clips anything (other than the
+   * texture row's own deliberate horizontal scroll). Must be called AFTER
+   * the panel (with its real header/subhead text already in place) is in
+   * the DOM, since it measures their actual rendered heights rather than
+   * guessing - a header can wrap to more than one line depending on the
+   * object's name length, for instance. */
+  private computeResourcePanelMinSize(panel: HTMLElement): { width: number; height: number } {
+    const vh = window.innerHeight / 100;
+    const previewSize = 25 * vh;
+    const textureRowHeight = 12.5 * vh + 48; // matches .resource-texture-list's fixed CSS height
 
-    const thumbSize = Math.min(Math.max(panelHeight * 0.12, 60), 96);
-    panel.querySelectorAll<HTMLElement>(".resource-texture-thumb").forEach((thumb) => {
-      thumb.style.width = `${thumbSize}px`;
-      thumb.style.height = `${thumbSize}px`;
-      thumb.style.maxWidth = `${thumbSize}px`;
-      thumb.style.maxHeight = `${thumbSize}px`;
-    });
+    const header = panel.querySelector<HTMLElement>(".resource-header");
+    const subhead = panel.querySelector<HTMLElement>(".resource-subhead");
+    const panelStyle = getComputedStyle(panel);
+    const paddingX = parseFloat(panelStyle.paddingLeft || "0") + parseFloat(panelStyle.paddingRight || "0");
+    const paddingY = parseFloat(panelStyle.paddingTop || "0") + parseFloat(panelStyle.paddingBottom || "0");
+
+    const headerHeight = header?.offsetHeight ?? 20;
+    const subheadHeight = subhead?.offsetHeight ?? 18;
+    const previewMarginBottom = 8; // matches .resource-preview's margin-bottom in CSS
+
+    return {
+      width: Math.ceil(previewSize + paddingX),
+      height: Math.ceil(headerHeight + previewSize + previewMarginBottom + subheadHeight + textureRowHeight + paddingY),
+    };
   }
 
   private startResourceResize(panel: HTMLElement, corner: HTMLElement, event: PointerEvent): void {
@@ -841,7 +886,6 @@ export class SceneViewerApp {
       panel.style.height = `${nextHeight}px`;
       panel.style.left = `${Math.min(Math.max(nextLeft, 12), viewRect.width - nextWidth - 12)}px`;
       panel.style.top = `${Math.min(Math.max(nextTop, 12), viewRect.height - nextHeight - 12)}px`;
-      this.applyResourcePanelSizing(panel);
     };
 
     const onUp = (): void => {
@@ -977,8 +1021,19 @@ export class SceneViewerApp {
     });
 
     this.viewport.appendChild(panel);
+
+    // Recompute the minimum size from the panel's actual rendered content
+    // and the CURRENT viewport height (25vh/12.5vh are relative to it) -
+    // done every time a panel is opened so it stays correct even if the
+    // browser window was resized since the last time one was shown. Any
+    // larger size the user had previously dragged to is preserved.
+    const minSize = this.computeResourcePanelMinSize(panel);
+    this.resourcePanelMinSize = minSize;
+    this.resourcePanelSize = {
+      width: Math.max(this.resourcePanelSize.width, minSize.width),
+      height: Math.max(this.resourcePanelSize.height, minSize.height),
+    };
     this.syncResourcePanelPosition();
-    this.applyResourcePanelSizing(panel);
   }
 
   private isObjectHidden(index: number): boolean {
@@ -1049,27 +1104,15 @@ export class SceneViewerApp {
     raycaster.setFromCamera(mouse, this.sceneManager.camera);
     const contentGroup = this.sceneManager.getContentGroup();
     const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
-    const hits = raycaster.intersectObjects(roots, true)
-      .filter((hit) => !hit.object.userData.isSelectionVisual)
-      .filter((hit) => {
-        const drawIndices = hit.object.userData.drawIndices;
-        if (!Array.isArray(drawIndices) || drawIndices.length === 0) return false;
-        return drawIndices.some((index) => {
-          const drawIndex = Number(index);
-          return Number.isFinite(drawIndex) && !this.isObjectHidden(drawIndex) && !this.manuallyHiddenIndices.has(drawIndex);
-        });
-      })
-      .sort((a, b) => (a.distanceToRay ?? Number.POSITIVE_INFINITY) - (b.distanceToRay ?? Number.POSITIVE_INFINITY));
+    const hits = raycaster.intersectObjects(roots, true).filter((hit) => !hit.object.userData.isSelectionVisual);
+    const hit = hits.find((entry) => {
+      const drawIndices = entry.object.userData.drawIndices;
+      return Array.isArray(drawIndices) && drawIndices.length > 0;
+    });
+    if (!hit) return null;
 
-    for (const hit of hits) {
-      const drawIndices = hit.object.userData.drawIndices;
-      if (!Array.isArray(drawIndices) || drawIndices.length === 0) continue;
-      const drawIndex = drawIndices
-        .map((index) => Number(index))
-        .find((index) => Number.isFinite(index) && !this.isObjectHidden(index) && !this.manuallyHiddenIndices.has(index));
-      if (drawIndex !== undefined) return drawIndex;
-    }
-
+    const drawIndices = hit.object.userData.drawIndices;
+    if (Array.isArray(drawIndices) && drawIndices.length > 0) return Number(drawIndices[0]);
     return null;
   }
 
