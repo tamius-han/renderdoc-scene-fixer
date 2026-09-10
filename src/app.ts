@@ -1049,15 +1049,27 @@ export class SceneViewerApp {
     raycaster.setFromCamera(mouse, this.sceneManager.camera);
     const contentGroup = this.sceneManager.getContentGroup();
     const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
-    const hits = raycaster.intersectObjects(roots, true).filter((hit) => !hit.object.userData.isSelectionVisual);
-    const hit = hits.find((entry) => {
-      const drawIndices = entry.object.userData.drawIndices;
-      return Array.isArray(drawIndices) && drawIndices.length > 0;
-    });
-    if (!hit) return null;
+    const hits = raycaster.intersectObjects(roots, true)
+      .filter((hit) => !hit.object.userData.isSelectionVisual)
+      .filter((hit) => {
+        const drawIndices = hit.object.userData.drawIndices;
+        if (!Array.isArray(drawIndices) || drawIndices.length === 0) return false;
+        return drawIndices.some((index) => {
+          const drawIndex = Number(index);
+          return Number.isFinite(drawIndex) && !this.isObjectHidden(drawIndex) && !this.manuallyHiddenIndices.has(drawIndex);
+        });
+      })
+      .sort((a, b) => (a.distanceToRay ?? Number.POSITIVE_INFINITY) - (b.distanceToRay ?? Number.POSITIVE_INFINITY));
 
-    const drawIndices = hit.object.userData.drawIndices;
-    if (Array.isArray(drawIndices) && drawIndices.length > 0) return Number(drawIndices[0]);
+    for (const hit of hits) {
+      const drawIndices = hit.object.userData.drawIndices;
+      if (!Array.isArray(drawIndices) || drawIndices.length === 0) continue;
+      const drawIndex = drawIndices
+        .map((index) => Number(index))
+        .find((index) => Number.isFinite(index) && !this.isObjectHidden(index) && !this.manuallyHiddenIndices.has(index));
+      if (drawIndex !== undefined) return drawIndex;
+    }
+
     return null;
   }
 

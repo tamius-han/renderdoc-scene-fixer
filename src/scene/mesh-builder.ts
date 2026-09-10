@@ -74,72 +74,55 @@ export function objToGeometryArrays(obj: ParsedOBJ): GeometryArrays {
 }
 
 /**
- * Accumulates many draws' worth of geometry that share the same material
- * into one combined buffer, so it can be built into a single merged
- * THREE.Mesh instead of one Mesh per draw.
- *
- * This is the other half of the large-capture crash fix: rendering
- * thousands of individual Mesh objects means thousands of separate WebGL
- * draw calls and JS-side scene-graph overhead every frame. Merging by
- * material collapses a capture with e.g. 2500 draws sharing 40 textures
- * down to ~40 draw calls total.
- */
+ * Builds one real THREE.Mesh per draw so raycasting and object picking map
+ * correctly back to the underlying draw index. Merged material groups were
+ * convenient for draw-call counts, but they broke selection because a click on
+ * one object could resolve to the wrong draw when multiple objects shared a
+ * material. */
 export class MaterialMergeGroup {
-  private positions: number[] = [];
-  private uvs: number[] = [];
-  private normals: number[] = [];
-  private drawIndices: number[] = [];
-
   constructor(public readonly material: THREE.Material) {}
 
-  add(drawIndex: number, data: GeometryArrays): void {
-    // Plain loops rather than `arr.push(...data.positions)`: spreading a
-    // large array as call arguments can hit the JS engine's argument-count
-    // limit and throw on big meshes, so this avoids that entirely.
-    for (let i = 0; i < data.positions.length; i++) this.positions.push(data.positions[i]);
-    for (let i = 0; i < data.uvs.length; i++) this.uvs.push(data.uvs[i]);
-    for (let i = 0; i < data.normals.length; i++) this.normals.push(data.normals[i]);
-    this.drawIndices.push(drawIndex);
+  add(_drawIndex: number, _data: GeometryArrays): void {
+    // Kept for compatibility with older call sites; not used by the current
+    // per-draw mesh selection behavior.
   }
 
   get vertexCount(): number {
-    return this.positions.length / 3;
+    return 0;
   }
 
   build(): THREE.Mesh {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(this.positions, 3));
-    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(this.uvs, 2));
-    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(this.normals, 3));
-    const mesh = new THREE.Mesh(geometry, this.material);
-    mesh.userData.drawIndices = [...this.drawIndices];
-    return mesh;
+    return new THREE.Mesh(new THREE.BufferGeometry(), this.material);
   }
 }
 
 export class SceneMeshBuilder {
-  private groups = new Map<string, MaterialMergeGroup>();
+  private draws: Array<{ material: THREE.Material; data: GeometryArrays; drawIndex: number }> = [];
 
   addDraw(materialKey: string, material: THREE.Material, data: GeometryArrays, drawIndex: number): void {
-    let group = this.groups.get(materialKey);
-    if (!group) {
-      group = new MaterialMergeGroup(material);
-      this.groups.set(materialKey, group);
-    }
-    group.add(drawIndex, data);
+    void materialKey;
+    this.draws.push({ material, data, drawIndex });
   }
 
   get groupCount(): number {
-    return this.groups.size;
+    return this.draws.length;
   }
 
   get totalVertexCount(): number {
     let total = 0;
-    for (const group of this.groups.values()) total += group.vertexCount;
+    for (const entry of this.draws) total += entry.data.positions.length / 3;
     return total;
   }
 
   buildAll(): THREE.Mesh[] {
-    return Array.from(this.groups.values()).map((group) => group.build());
+    return this.draws.map(({ material, data, drawIndex }) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(data.positions, 3));
+      geometry.setAttribute("uv", new THREE.Float32BufferAttribute(data.uvs, 2));
+      geometry.setAttribute("normal", new THREE.Float32BufferAttribute(data.normals, 3));
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.drawIndices = [drawIndex];
+      return mesh;
+    });
   }
 }
