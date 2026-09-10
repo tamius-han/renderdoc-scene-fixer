@@ -127,6 +127,14 @@ export class SceneManager {
     for (const handler of this.controlSchemeHandlers) handler(this.scheme);
   }
 
+  setTarget(point: THREE.Vector3): void {
+    // Intentionally left as a no-op: changing the orbit pivot should not
+    // recenter the camera or move the scene. The camera pose remains fixed
+    // while the interaction continues; the hit point is only used for the
+    // current drag's pivot intent, not as a world-space camera target.
+    void point;
+  }
+
   private movementCodes(): string[] {
     const b = this.bindings;
     return [b.forward, b.back, b.left, b.right, b.up, ...b.down];
@@ -352,7 +360,7 @@ export class SceneManager {
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     this.target.copy(center);
-    this.distance = maxDim * 1.6;
+    this.distance = maxDim * 1.2;
     this.updateCamera();
   }
 

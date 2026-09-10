@@ -17,11 +17,9 @@ import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
 
-// Selection outline is extruded outward along each vertex's own normal by
-// this fraction of the OBJECT'S OWN bounding-box diagonal (not a fixed
-// world-unit width), so the outline reads as proportionally similar
-// thickness whether the selected object is tiny or huge.
-const SELECTION_OUTLINE_WIDTH_RATIO = 0.01;
+// Selection outlines are rendered as a backface shell displaced in clip
+// space so the visible thickness stays at a literal 3 screen pixels.
+const SELECTION_OUTLINE_COLOR = new THREE.Color(0xffaa66);
 
 /** One draw's fully-parsed geometry/material/bounds, cached in memory so the
  * "hide largest % of objects" filter can rebuild the visible scene instantly
@@ -83,7 +81,8 @@ export class SceneViewerApp {
   private lastClickedIndex: number | null = null;
 
   /** Every Object3D currently added to the content group for the selection
-   * highlight (silhouette outline mesh + the two dot-marker Points pairs) -
+   * highlight (screen-space outline meshes + the two dot-marker Points
+   * pairs) -
    * tracked here so they can be cleanly removed/disposed on the next
    * selection or scene rebuild, independent of the main content meshes'
    * own lifecycle (see clearSelectionVisuals()). */
@@ -96,6 +95,7 @@ export class SceneViewerApp {
   private poseWarning = this.el("pose-warning");
   private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
   private resetCamBtn = this.el("reset-cam-btn");
+  private recenterCamBtn = this.el("recenter-camera-btn");
   private statusBar = this.el("status-bar");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
@@ -113,7 +113,7 @@ export class SceneViewerApp {
   private flyModeLabel = this.el("fly-mode-label");
   private flySpeedIndicator = this.el("fly-speed-indicator");
 
-  private controlSchemeToggle = this.el<HTMLInputElement>("control-scheme-toggle");
+  private controlSchemeDropdown = this.el<HTMLSelectElement>("control-scheme-dropdown");
   private controlSchemeLabel = this.el("control-scheme-label");
 
   constructor(viewportEl: HTMLElement) {
@@ -134,7 +134,7 @@ export class SceneViewerApp {
       this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
     });
     this.sceneManager.onControlSchemeChange((scheme) => {
-      this.controlSchemeToggle.checked = scheme === "wasd";
+      this.controlSchemeDropdown.value = scheme;
       this.controlSchemeLabel.textContent =
         scheme === "wasd" ? "WASD - movement; F: toggle fly mode" : "ESDF - movement; A: toggle fly mode";
     });
@@ -177,10 +177,12 @@ export class SceneViewerApp {
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
-    this.controlSchemeToggle.addEventListener("change", () =>
-      this.sceneManager.setControlScheme(this.controlSchemeToggle.checked ? "wasd" : "esdf"),
-    );
+    this.controlSchemeDropdown.addEventListener("change", () => {
+      const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
+      this.sceneManager.setControlScheme(scheme);
+    });
 
     // Both filter control pairs (import screen + post-reconstruct viewport
     // menu) drive the same underlying value and stay in sync with each
@@ -363,20 +365,24 @@ export class SceneViewerApp {
     return "added";
   }
 
-  private createDrawItem(draw: DrawEntry, drawIndex: number): HTMLElement {
+  private createDrawItem(draw: DrawEntry, drawIndex: number, stats?: { vertices: number; faces: number; size: number }): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "draw-row-wrap";
     wrap.dataset.index = String(drawIndex);
+
+    const vertices = stats?.vertices ?? 0;
+    const faces = stats?.faces ?? 0;
+    const size = stats?.size ?? 0;
 
     const div = document.createElement("div");
     div.className = "draw-item";
     div.dataset.index = String(drawIndex);
     div.innerHTML = `
       <b>Draw #${drawIndex}</b> <small>(eid ${draw.eventId})</small>
-      &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}"> </button>
+      &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}">[ ]</button>
       &nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button>
-      &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}"> </button>
-      <small>v: f: size: </small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+      &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}">[ ]</button>
+      <small>v: ${vertices}, f: ${faces}, size: ${size.toFixed(2)}</small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
     `;
 
     wrap.appendChild(div);
@@ -459,7 +465,13 @@ export class SceneViewerApp {
               // would collide across multiple selected passes since each
               // pass's manifest.draws restarts at 0.
               const globalIndex = this.loadedDraws.length - 1;
-              this.objectList.appendChild(this.createDrawItem(draw, globalIndex));
+              const loadedDraw = this.loadedDraws[globalIndex];
+              const stats = {
+                vertices: Math.max(0, loadedDraw.geometryData.positions.length / 3),
+                faces: Math.max(0, loadedDraw.geometryData.positions.length / 9),
+                size: loadedDraw.diagonal,
+              };
+              this.objectList.appendChild(this.createDrawItem(draw, globalIndex, stats));
             }
           } catch (e) {
             exceptionCount++;
@@ -535,7 +547,7 @@ export class SceneViewerApp {
         excludedCount++;
         return;
       }
-      builder.addDraw(draw.key, draw.material, draw.geometryData);
+      builder.addDraw(draw.key, draw.material, draw.geometryData, index);
     });
     const meshes = builder.buildAll();
 
@@ -546,7 +558,6 @@ export class SceneViewerApp {
     this.clearSelectionVisuals();
     this.sceneManager.clear();
     this.sceneManager.addContent(meshes, this.fixedScale);
-    this.sceneManager.frameOnScene();
     this.updateSelectionVisuals();
 
     const visibleCount = this.loadedDraws.length - excludedCount;
@@ -653,11 +664,16 @@ export class SceneViewerApp {
     const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
     const size = bounds.max.clone().sub(bounds.min);
     const radius = Math.max(size.length() * 0.5, 0.25);
-    const fitDistance = (radius / Math.tan((camera.fov * Math.PI) / 360)) * 1.5;
+    const targetFill = 0.875;
+    const fitDistance = (radius / (targetFill * Math.tan((camera.fov * Math.PI) / 360))) * 1.1;
 
+    const modelRoot = new THREE.Group();
     mesh.position.sub(center);
-    mesh.rotation.x = -0.65;
-    mesh.rotation.y = 0.85;
+    modelRoot.add(mesh);
+    scene.add(modelRoot);
+
+    modelRoot.rotation.x = -0.65;
+    modelRoot.rotation.y = 0.85;
 
     camera.position.set(0, 0, fitDistance);
     camera.lookAt(0, 0, 0);
@@ -672,6 +688,7 @@ export class SceneViewerApp {
     let pointerDown = false;
     let lastX = 0;
     let lastY = 0;
+    let currentDistance = fitDistance;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (event.button !== 0 && event.button !== 1) return;
@@ -686,12 +703,21 @@ export class SceneViewerApp {
       const dy = event.clientY - lastY;
       lastX = event.clientX;
       lastY = event.clientY;
-      mesh.rotation.y += dx * 0.01;
-      mesh.rotation.x += dy * 0.01;
+      modelRoot.rotation.y += dx * 0.01;
+      modelRoot.rotation.x += dy * 0.01;
     };
     const handlePointerUp = (event: PointerEvent) => {
       pointerDown = false;
       previewCanvas.releasePointerCapture(event.pointerId);
+    };
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const zoomFactor = Math.exp((-event.deltaY * 0.0015));
+      const minDistance = fitDistance * 0.2;
+      const maxDistance = fitDistance * 6;
+      currentDistance = THREE.MathUtils.clamp(currentDistance * zoomFactor, minDistance, maxDistance);
+      camera.position.set(0, 0, currentDistance);
+      camera.lookAt(0, 0, 0);
     };
 
     previewCanvas.addEventListener("pointerdown", handlePointerDown);
@@ -700,6 +726,7 @@ export class SceneViewerApp {
     previewCanvas.addEventListener("pointerleave", () => {
       pointerDown = false;
     });
+    previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
 
     const resize = () => {
       const sizePx = Math.max(200, Math.min(container.clientWidth, container.clientHeight));
@@ -763,9 +790,12 @@ export class SceneViewerApp {
       preview.style.height = `${previewHeight}px`;
     }
 
-    const thumbHeight = Math.min(Math.max(panelHeight * 0.12, 60), 96);
+    const thumbSize = Math.min(Math.max(panelHeight * 0.12, 60), 96);
     panel.querySelectorAll<HTMLElement>(".resource-texture-thumb").forEach((thumb) => {
-      thumb.style.height = `${thumbHeight}px`;
+      thumb.style.width = `${thumbSize}px`;
+      thumb.style.height = `${thumbSize}px`;
+      thumb.style.maxWidth = `${thumbSize}px`;
+      thumb.style.maxHeight = `${thumbSize}px`;
     });
   }
 
@@ -825,11 +855,52 @@ export class SceneViewerApp {
 
   private resolveTexturePath(draw: LoadedDraw, textureFile: string | null): string | null {
     if (!textureFile) return null;
+
+    const raw = textureFile.replace(/\\/g, "/").replace(/^\.\//, "");
     const meshPath = draw.meshPath ?? "";
     const meshDir = dirname(meshPath);
-    const candidate = joinPath(meshDir, textureFile);
-    const direct = this.vfs.get(candidate) ? candidate : this.vfs.get(textureFile) ? textureFile : candidate;
-    return direct ?? null;
+    const parts = raw.split("/").filter(Boolean);
+    const baseName = parts.length > 0 ? parts[parts.length - 1] : raw;
+
+    const candidates = new Set<string>([
+      raw,
+      joinPath(meshDir, raw),
+      joinPath(dirname(meshDir), raw),
+      joinPath(meshDir, baseName),
+      joinPath(dirname(meshDir), baseName),
+      baseName,
+    ]);
+
+    for (const candidate of candidates) {
+      const resolved = this.vfs.get(candidate);
+      if (resolved) return candidate;
+    }
+
+    for (const key of this.vfs.keys()) {
+      const normalized = key.replace(/\\/g, "/");
+      if (normalized === raw || normalized.endsWith(`/${raw}`) || normalized.endsWith(`/${baseName}`)) {
+        return normalized;
+      }
+    }
+
+    return null;
+  }
+
+  private loadTextureThumb(img: HTMLImageElement, file: File): void {
+    const asBlob = URL.createObjectURL(file);
+    img.decoding = "async";
+    img.onload = () => {
+      console.log('texture image loaded.')
+      img.dataset.loaded = "true";
+    };
+    img.onerror = () => {
+      console.warn('failed to load texture image')
+      img.replaceWith(Object.assign(document.createElement("div"), {
+        className: "resource-texture-thumb resource-texture-thumb--missing",
+        textContent: "No image",
+      }));
+    };
+    img.src = asBlob;
   }
 
   private showResources(index: number): void {
@@ -887,11 +958,16 @@ export class SceneViewerApp {
 
     panel.querySelectorAll<HTMLImageElement>(".resource-texture-thumb[data-texture-path]").forEach((img) => {
       const filePath = img.dataset.texturePath;
+      console.info('> processing img tag. Trying to load texture:', filePath, ' — img.dataset:', img.dataset);
       if (!filePath) return;
       const file = this.vfs.get(filePath);
+      console.info('> processing img tag. Attempting to load file', filePath, ' — file from vfs:', file, '\nvfs:', this.vfs);
+
       if (!file) return;
-      if (file.type.startsWith("image/")) {
-        img.src = URL.createObjectURL(file);
+
+      const isLikelyImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(file.name);
+      if (isLikelyImage) {
+        this.loadTextureThumb(img, file);
       } else {
         img.replaceWith(Object.assign(document.createElement("div"), {
           className: "resource-texture-thumb resource-texture-thumb--missing",
@@ -961,6 +1037,76 @@ export class SceneViewerApp {
     else this.selectOnly(index);
   }
 
+  private pickDrawAtPointer(event: PointerEvent): number | null {
+    const target = this.sceneManager.renderer.domElement;
+    const rect = target.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, this.sceneManager.camera);
+    const contentGroup = this.sceneManager.getContentGroup();
+    const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
+    const hits = raycaster.intersectObjects(roots, true).filter((hit) => !hit.object.userData.isSelectionVisual);
+    const hit = hits.find((entry) => {
+      const drawIndices = entry.object.userData.drawIndices;
+      return Array.isArray(drawIndices) && drawIndices.length > 0;
+    });
+    if (!hit) return null;
+
+    const drawIndices = hit.object.userData.drawIndices;
+    if (Array.isArray(drawIndices) && drawIndices.length > 0) return Number(drawIndices[0]);
+    return null;
+  }
+
+  private scrollDrawIntoView(index: number): void {
+    const row = this.objectList.querySelector<HTMLElement>(`.draw-item[data-index="${index}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  private handleSceneObjectPointer(event: PointerEvent): void {
+    if (event.button === 1) return;
+    const index = this.pickDrawAtPointer(event);
+
+    if (event.button === 2) {
+      if (index === null || this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) {
+        if (this.selectedIndices.size > 0) {
+          this.selectedIndices.clear();
+          this.lastClickedIndex = null;
+          this.refreshSelectionVisuals();
+          this.renderObjectListState();
+        }
+        return;
+      }
+
+      if (!this.selectedIndices.has(index)) {
+        this.selectedIndices.clear();
+        this.lastClickedIndex = null;
+        this.refreshSelectionVisuals();
+        this.renderObjectListState();
+      }
+      return;
+    }
+
+    if (index === null || this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) return;
+
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
+      else this.selectedIndices.add(index);
+    } else {
+      this.selectedIndices.clear();
+      this.selectedIndices.add(index);
+    }
+
+    this.lastClickedIndex = index;
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+    this.scrollDrawIntoView(index);
+  }
+
   /** Rebuilds the selection highlight (outline + dot markers) from scratch -
    * cheap enough to call on every selection change since it only touches
    * the small selected subset, not the full merged scene. */
@@ -995,7 +1141,7 @@ export class SceneViewerApp {
     this.selectionVisuals = [];
   }
 
-  /** Builds the silhouette outline (extruded backface mesh) and both dot
+  /** Builds the screen-space outline mesh and both dot
    * marker pairs for the currently-selected, currently-rendered objects,
    * and adds them to the content group. No-ops if nothing is selected, or
    * if there's no content group yet (nothing reconstructed). Selected
@@ -1008,12 +1154,16 @@ export class SceneViewerApp {
     const activeSelected = Array.from(this.selectedIndices).filter(
       (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
     );
-    if (activeSelected.length === 0) return;
+    if (activeSelected.length === 0) {
+      this.applySelectionDimming(group, false);
+      return;
+    }
 
-    const outlineGeometry = this.buildOutlineGeometry(activeSelected);
-    if (outlineGeometry) {
-      const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffaa66, side: THREE.BackSide });
-      const outlineMesh = new THREE.Mesh(outlineGeometry, outlineMaterial);
+    this.applySelectionDimming(group, true);
+
+    for (const index of activeSelected) {
+      const outlineMesh = this.createOutlineMesh(this.loadedDraws[index]);
+      if (!outlineMesh) continue;
       group.add(outlineMesh);
       this.selectionVisuals.push(outlineMesh);
     }
@@ -1037,36 +1187,63 @@ export class SceneViewerApp {
     }
   }
 
-  /** Concatenates every given draw's geometry, with each vertex pushed
-   * outward along its own normal by a fraction of THAT draw's own diagonal
-   * (see SELECTION_OUTLINE_WIDTH_RATIO). Rendered back-face-only with a
-   * solid color, this is the classic dependency-free "silhouette outline"
-   * trick - no post-processing pipeline needed. Uses a pre-sized
-   * Float32Array rather than array spreading/pushing, since spreading a
-   * large per-vertex array as call arguments can hit the JS engine's
-   * argument-count limit on big meshes. */
-  private buildOutlineGeometry(indices: number[]): THREE.BufferGeometry | null {
-    let totalLength = 0;
-    for (const i of indices) totalLength += this.loadedDraws[i].geometryData.positions.length;
-    if (totalLength === 0) return null;
+  private applySelectionDimming(group: THREE.Group, enabled: boolean): void {
+    if (!enabled) return;
 
-    const positions = new Float32Array(totalLength);
-    let offset = 0;
-    for (const i of indices) {
-      const draw = this.loadedDraws[i];
-      const { positions: srcPositions, normals } = draw.geometryData;
-      const width = draw.diagonal * SELECTION_OUTLINE_WIDTH_RATIO;
-      for (let j = 0; j < srcPositions.length; j += 3) {
-        positions[offset + j] = srcPositions[j] + normals[j] * width;
-        positions[offset + j + 1] = srcPositions[j + 1] + normals[j + 1] * width;
-        positions[offset + j + 2] = srcPositions[j + 2] + normals[j + 2] * width;
-      }
-      offset += srcPositions.length;
+    group.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh) || obj.userData.isSelectionVisual) return;
+      const drawIndices = obj.userData.drawIndices;
+      if (!Array.isArray(drawIndices) || drawIndices.length === 0) return;
+      const selected = drawIndices.some((index) => this.selectedIndices.has(Number(index)));
+      if (selected) return;
+
+      const material = obj.material;
+      if (Array.isArray(material)) return;
+      if (!(material instanceof THREE.MeshBasicMaterial)) return;
+
+      const dimMaterial = material.clone();
+      dimMaterial.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "vec4 diffuseColor = vec4( diffuseColor.rgb, opacity );",
+          "vec3 c = diffuseColor.rgb; float grayscale = dot(c, vec3(0.299, 0.587, 0.114)); c = mix(c, vec3(grayscale), 0.8); c *= vec3(0.38, 0.39, 0.42); vec4 diffuseColor = vec4( c, opacity );",
+        );
+      };
+      dimMaterial.needsUpdate = true;
+      obj.material = dimMaterial;
+    });
+  }
+
+  /** Builds a slightly inflated shell mesh for a selected draw, so it creates
+   * a real visible outline around the object instead of only tinting the back
+   * side of the original mesh. */
+  private createOutlineMesh(draw: LoadedDraw): THREE.Mesh | null {
+    const { positions, normals } = draw.geometryData;
+    if (positions.length === 0 || normals.length !== positions.length) return null;
+
+    const offsetAmount = Math.max(0.001, draw.diagonal * 0.01);
+    const expanded = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      expanded[i] = positions[i] + normals[i] * offsetAmount;
+      expanded[i + 1] = positions[i + 1] + normals[i + 1] * offsetAmount;
+      expanded[i + 2] = positions[i + 2] + normals[i + 2] * offsetAmount;
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    return geometry;
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(expanded, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+
+    const material = new THREE.MeshBasicMaterial({
+      color: SELECTION_OUTLINE_COLOR,
+      side: THREE.FrontSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.isSelectionVisual = true;
+    mesh.renderOrder = 997;
+    return mesh;
   }
 
   /** Adds one dot-marker pair (a black 1px-wider outline dot underneath, a
@@ -1098,6 +1275,8 @@ export class SceneViewerApp {
 
     const outline = new THREE.Points(geometry, outlineMaterial);
     const fill = new THREE.Points(geometry, fillMaterial);
+    outline.userData.isSelectionVisual = true;
+    fill.userData.isSelectionVisual = true;
     outline.renderOrder = 998; // black underneath
     fill.renderOrder = 999; // colored dot on top
 
@@ -1139,6 +1318,10 @@ export class SceneViewerApp {
   private setupObjectList(): void {
     this.objectList.addEventListener("scroll", () => {
       this.syncResourcePanelPosition();
+    });
+
+    this.sceneManager.renderer.domElement.addEventListener("pointerdown", (event) => {
+      if (event.button === 0 || event.button === 2) this.handleSceneObjectPointer(event as PointerEvent);
     });
 
     this.objectList.addEventListener("click", (event) => {

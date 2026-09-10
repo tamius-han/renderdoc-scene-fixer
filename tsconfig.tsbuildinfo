@@ -1,0 +1,1 @@
+{"root":["./src/app.ts","./src/filesystem.ts","./src/help-page.ts","./src/main.ts","./src/manifest.ts","./src/types.ts","./src/vite-env.d.ts","./src/parsers/mtl.ts","./src/parsers/obj.ts","./src/scene/mesh-builder.ts","./src/scene/movement-bindings.interface.ts","./src/scene/scene-manager.ts","./src/scene/texture-manager.ts"],"version":"5.9.3"}

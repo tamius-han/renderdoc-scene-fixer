@@ -88,16 +88,18 @@ export class MaterialMergeGroup {
   private positions: number[] = [];
   private uvs: number[] = [];
   private normals: number[] = [];
+  private drawIndices: number[] = [];
 
   constructor(public readonly material: THREE.Material) {}
 
-  add(data: GeometryArrays): void {
+  add(drawIndex: number, data: GeometryArrays): void {
     // Plain loops rather than `arr.push(...data.positions)`: spreading a
     // large array as call arguments can hit the JS engine's argument-count
     // limit and throw on big meshes, so this avoids that entirely.
     for (let i = 0; i < data.positions.length; i++) this.positions.push(data.positions[i]);
     for (let i = 0; i < data.uvs.length; i++) this.uvs.push(data.uvs[i]);
     for (let i = 0; i < data.normals.length; i++) this.normals.push(data.normals[i]);
+    this.drawIndices.push(drawIndex);
   }
 
   get vertexCount(): number {
@@ -109,20 +111,22 @@ export class MaterialMergeGroup {
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(this.positions, 3));
     geometry.setAttribute("uv", new THREE.Float32BufferAttribute(this.uvs, 2));
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(this.normals, 3));
-    return new THREE.Mesh(geometry, this.material);
+    const mesh = new THREE.Mesh(geometry, this.material);
+    mesh.userData.drawIndices = [...this.drawIndices];
+    return mesh;
   }
 }
 
 export class SceneMeshBuilder {
   private groups = new Map<string, MaterialMergeGroup>();
 
-  addDraw(materialKey: string, material: THREE.Material, data: GeometryArrays): void {
+  addDraw(materialKey: string, material: THREE.Material, data: GeometryArrays, drawIndex: number): void {
     let group = this.groups.get(materialKey);
     if (!group) {
       group = new MaterialMergeGroup(material);
       this.groups.set(materialKey, group);
     }
-    group.add(data);
+    group.add(drawIndex, data);
   }
 
   get groupCount(): number {
