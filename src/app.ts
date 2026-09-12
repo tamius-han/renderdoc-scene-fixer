@@ -663,7 +663,7 @@ export class SceneViewerApp {
     const mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
 
-    const bounds = draw.bounds;
+    const bounds = computeBounds(sourceData.positions);
     const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
     const size = bounds.max.clone().sub(bounds.min);
     const radius = Math.max(size.length() * 0.5, 0.25);

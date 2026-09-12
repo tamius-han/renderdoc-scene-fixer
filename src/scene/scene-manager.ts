@@ -31,10 +31,18 @@ export class SceneManager {
   readonly renderer: THREE.WebGLRenderer;
 
   private target = new THREE.Vector3(0, 0, 0);
+  // Camera position relative to target. Replaces the old distance/theta/phi
+  // spherical-coordinate model - see updateCamera()'s doc comment for why:
+  // that model tied camera ORIENTATION to wherever `target` pointed via an
+  // unconditional lookAt(), which meant simply changing the pivot (e.g. to
+  // re-center rotation/zoom on whatever's under the cursor) would snap the
+  // view to stare directly at the new pivot, even though the pivot is
+  // deliberately often off-center. This model keeps position (target +
+  // offset) and orientation (camera.quaternion) fully independent, so
+  // repivoting can never, by construction, touch orientation.
+  private offset = new THREE.Vector3(0, 0, 10);
   private contentGroup: THREE.Group | null = null;
-  private distance = 10;
-  private theta = Math.PI * 0.25;
-  private phi = Math.PI * 0.35;
+  private raycaster = new THREE.Raycaster();
 
   // mouse movement mode (needed for blender-style mouse navigation)
   private mode: "none" | "rotate" | "pan" = "none";
@@ -67,7 +75,18 @@ export class SceneManager {
     this.scene.background = new THREE.Color(0x0b0e13);
 
     this.camera = new THREE.PerspectiveCamera(55, 1, 0.01, 100000);
+    // Initial view angle, matching the old default (theta=pi/4, phi=0.35pi).
+    // A one-time lookAt() here is fine - unlike everywhere else in this
+    // class, there's no prior orientation to preserve at construction time.
+    const initialTheta = Math.PI * 0.25;
+    const initialPhi = Math.PI * 0.35;
+    this.offset.set(
+      10 * Math.sin(initialPhi) * Math.sin(initialTheta),
+      10 * Math.cos(initialPhi),
+      10 * Math.sin(initialPhi) * Math.cos(initialTheta),
+    );
     this.updateCamera();
+    this.camera.lookAt(this.target);
 
     window.addEventListener("resize", () => this.resize());
     this.resize();
@@ -75,6 +94,10 @@ export class SceneManager {
     this.renderer.domElement.addEventListener("pointerdown", (e) => {
       if (this.flying || e.button !== 1) return;
       e.preventDefault(); // stops the browser's middle-click autoscroll icon
+      // Re-pivot to whatever's under the cursor RIGHT NOW, once, at the
+      // start of this drag - not continuously during it (see
+      // repivotAtMouse's doc comment for why).
+      this.repivotAtMouse(e.clientX, e.clientY);
       this.mode = e.shiftKey ? "pan" : "rotate";
       this.lastX = e.clientX;
       this.lastY = e.clientY;
@@ -125,14 +148,6 @@ export class SceneManager {
     this.bindings = scheme === "wasd" ? WASD_BINDINGS : ESDF_BINDINGS;
     this.heldKeys.clear();
     for (const handler of this.controlSchemeHandlers) handler(this.scheme);
-  }
-
-  setTarget(point: THREE.Vector3): void {
-    // Intentionally left as a no-op: changing the orbit pivot should not
-    // recenter the camera or move the scene. The camera pose remains fixed
-    // while the interaction continues; the hit point is only used for the
-    // current drag's pivot intent, not as a world-space camera target.
-    void point;
   }
 
   private movementCodes(): string[] {
@@ -198,7 +213,7 @@ export class SceneManager {
     this.camera.getWorldDirection(dir);
     this.flyPitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
     this.flyYaw = Math.atan2(dir.x, dir.z);
-    this.flySpeed = Math.max(this.distance * 0.5, 0.5);
+    this.flySpeed = Math.max(this.offset.length() * 0.5, 0.5);
     // Pointer lock can be rejected (needs a user gesture / focused
     // document) - this is called from a keydown/click handler so it
     // normally qualifies, but browsers vary, hence the catch to avoid a
@@ -246,16 +261,18 @@ export class SceneManager {
   }
   //#endregion fly mode handling
 
-  /** Reconstructs the orbit camera's target/theta/phi from the fly camera's
+  /** Reconstructs the orbit camera's target/offset from the fly camera's
    * final position and look direction, so leaving fly mode doesn't snap the
-   * view - matches Blender's own fly-mode exit behavior. */
+   * view - matches Blender's own fly-mode exit behavior. Places target
+   * exactly along the current view direction (i.e. dead center) so that
+   * camera.quaternion - already correct, untouched, from fly mode - stays
+   * exactly valid without needing a lookAt() call here. */
   private handOffFlyToOrbit(): void {
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
-    this.target.copy(this.camera.position).addScaledVector(dir, this.distance);
-    const offset = this.camera.position.clone().sub(this.target);
-    this.phi = Math.acos(Math.max(-1, Math.min(1, offset.y / this.distance)));
-    this.theta = Math.atan2(offset.x, offset.z);
+    const distance = this.offset.length() || 1; // preserve prior zoom level across the fly<->orbit transition
+    this.target.copy(this.camera.position).addScaledVector(dir, distance);
+    this.offset.copy(this.camera.position).sub(this.target);
     this.heldKeys.clear();
     this.updateCamera();
   }
@@ -269,12 +286,51 @@ export class SceneManager {
     this.lastY = e.clientY;
 
     if (this.mode === "rotate") {
-      this.theta -= dx * 0.006;
-      this.phi = Math.max(0.05, Math.min(Math.PI - 0.05, this.phi - dy * 0.006));
-      this.updateCamera();
+      this.rotateAroundPivot(dx, dy);
     } else {
       this.pan(dx, dy);
     }
+  }
+
+  /** Orbits the camera around `target` by revolving BOTH the position
+   * (offset) and the camera's own orientation (quaternion) by the same
+   * incremental rotation - rather than recomputing position from stored
+   * absolute angles and then calling lookAt(). This is what keeps the
+   * pivot from "jumping to center": at zero rotation delta nothing changes
+   * at all (no snap), and composing the SAME rotation onto both position
+   * and orientation preserves how the pivot was framed at the start of the
+   * drag as it swings around it. Yaw is always around world-up and pitch
+   * around the just-updated local right axis (recomputed after yaw, not
+   * cached) - the standard order that avoids any roll drift accumulating
+   * over many drags. */
+  private rotateAroundPivot(dx: number, dy: number): void {
+    const ROTATE_SENSITIVITY = 0.006;
+    const worldUp = new THREE.Vector3(0, 1, 0);
+
+    const yawAngle = -dx * ROTATE_SENSITIVITY;
+    const yawQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, yawAngle);
+    this.offset.applyQuaternion(yawQuat);
+    this.camera.quaternion.premultiply(yawQuat);
+
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const pitchAngle = -dy * ROTATE_SENSITIVITY;
+    const pitchQuat = new THREE.Quaternion().setFromAxisAngle(right, pitchAngle);
+
+    // Apply, then check the resulting angle from world-up - if pitching
+    // this far would flip the camera past straight-up/straight-down,
+    // revert just the pitch (yaw above still applies). This is the offset-
+    // model equivalent of the old phi clamp.
+    this.offset.applyQuaternion(pitchQuat);
+    const newDistance = this.offset.length() || 1;
+    const newPhi = Math.acos(Math.max(-1, Math.min(1, this.offset.y / newDistance)));
+    if (newPhi < 0.05 || newPhi > Math.PI - 0.05) {
+      const inversePitch = pitchQuat.clone().invert();
+      this.offset.applyQuaternion(inversePitch);
+    } else {
+      this.camera.quaternion.premultiply(pitchQuat);
+    }
+
+    this.updateCamera();
   }
 
   private pan(dx: number, dy: number): void {
@@ -286,7 +342,7 @@ export class SceneManager {
 
     const screenHeight = this.container.clientHeight || 1;
     const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
-    const worldUnitsPerPixel = (2 * this.distance * Math.tan(fovRad / 2)) / screenHeight;
+    const worldUnitsPerPixel = (2 * this.offset.length() * Math.tan(fovRad / 2)) / screenHeight;
 
     this.target.addScaledVector(right, -dx * worldUnitsPerPixel);
     this.target.addScaledVector(up, dy * worldUnitsPerPixel);
@@ -303,16 +359,72 @@ export class SceneManager {
       this.notifyFlyState();
       return;
     }
-    this.distance = Math.max(0.01, this.distance * (1 + e.deltaY * 0.0012));
+    // Each wheel tick is its own atomic "movement" (there's no drag to hold
+    // a pivot steady across, unlike rotate/pan), so re-pivot every time -
+    // this gives the expected "zoom toward whatever's under the cursor"
+    // feel rather than always zooming toward a stale point. Critically,
+    // repivotAtMouse() only ever touches target/offset, never
+    // camera.quaternion - so this can't cause the view to rotate, only to
+    // dolly toward/away from wherever the cursor is pointing.
+    this.repivotAtMouse(e.clientX, e.clientY);
+    const newLength = Math.max(0.01, this.offset.length() * (1 + e.deltaY * 0.0012));
+    this.offset.setLength(newLength);
     this.updateCamera();
   }
 
+  /** Re-centers the orbit pivot (target/offset) on whatever scene geometry
+   * is directly under the given screen position, via a raycast - WITHOUT
+   * moving OR reorienting the camera at all: offset is recomputed from the
+   * camera's CURRENT (unchanged) position relative to the new target, and
+   * camera.quaternion isn't touched here at all (this model keeps
+   * orientation fully independent of target/offset - see updateCamera()).
+   * This is deliberately called once at the start of a rotate/pan drag or
+   * on each individual wheel tick - never continuously during an ongoing
+   * drag, which would make the pivot drift mid-gesture instead of staying
+   * put for it. If the ray doesn't hit anything (e.g. empty space, or
+   * nothing's been loaded yet), the current pivot is left exactly as it
+   * was - there's nothing sensible to fall back to that isn't just
+   * guessing. Selection-highlight overlays (outline shell, center-point
+   * markers) are excluded from the hit test via their userData tag, so the
+   * pivot always lands on actual mesh surface, not on outline geometry
+   * that's been pushed outward from it. */
+  private repivotAtMouse(clientX: number, clientY: number): void {
+    const hit = this.raycastAtMouse(clientX, clientY);
+    if (!hit) return;
+
+    const newOffset = this.camera.position.clone().sub(hit);
+    if (newOffset.lengthSq() < 1e-12) return; // camera is essentially AT the hit point - degenerate
+
+    this.target.copy(hit);
+    this.offset.copy(newOffset);
+  }
+
+  private raycastAtMouse(clientX: number, clientY: number): THREE.Vector3 | null {
+    const group = this.contentGroup;
+    if (!group) return null;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+
+    const targets = group.children.filter((child) => !child.userData?.isSelectionVisual);
+    const hits = this.raycaster.intersectObjects(targets, true);
+    return hits.length > 0 ? hits[0].point.clone() : null;
+  }
+
+  /** Repositions the camera from target+offset. Deliberately does NOT call
+   * lookAt() - orientation is maintained independently (by
+   * rotateAroundPivot()'s incremental quaternion composition, or fly
+   * mode's own yaw/pitch), which is exactly what lets target/offset change
+   * (via repivotAtMouse or pan) without ever moving or reorienting the
+   * camera as a side effect. */
   private updateCamera(): void {
-    const x = this.target.x + this.distance * Math.sin(this.phi) * Math.sin(this.theta);
-    const y = this.target.y + this.distance * Math.cos(this.phi);
-    const z = this.target.z + this.distance * Math.sin(this.phi) * Math.cos(this.theta);
-    this.camera.position.set(x, y, z);
-    this.camera.lookAt(this.target);
+    this.camera.position.copy(this.target).add(this.offset);
   }
 
   //#endregion
@@ -353,15 +465,28 @@ export class SceneManager {
     return this.contentGroup;
   }
 
+  /** Resets to a fixed default viewing angle framing the whole scene - a
+   * deliberate full view reset (unlike repivotAtMouse), so unconditionally
+   * reorienting via lookAt() here is intentional and correct, not a case of
+   * the snap-to-pivot bug this class otherwise avoids. */
   frameOnScene(): void {
     const box = new THREE.Box3().setFromObject(this.scene);
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const distance = maxDim * 1.2;
+
+    const theta = Math.PI * 0.25;
+    const phi = Math.PI * 0.35;
     this.target.copy(center);
-    this.distance = maxDim * 1.2;
+    this.offset.set(
+      distance * Math.sin(phi) * Math.sin(theta),
+      distance * Math.cos(phi),
+      distance * Math.sin(phi) * Math.cos(theta),
+    );
     this.updateCamera();
+    this.camera.lookAt(this.target);
   }
 
   clear(): void {
