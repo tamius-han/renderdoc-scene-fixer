@@ -1187,6 +1187,21 @@ export class SceneViewerApp {
     });
     if (!hit) return null;
 
+    // A single mesh here is usually a MaterialMergeGroup batch of many
+    // draws sharing one material (see SceneMeshBuilder) - drawIndices[0]
+    // would just be "the first draw in the batch", not the one actually
+    // under the cursor. faceDrawIndices maps the raycast's own faceIndex
+    // (which triangle of the merged, non-indexed geometry was hit) back to
+    // the specific draw that triangle came from.
+    const faceDrawIndices = hit.object.userData.faceDrawIndices as Uint32Array | undefined;
+    if (faceDrawIndices && hit.faceIndex !== undefined && hit.faceIndex !== null) {
+      const owner = faceDrawIndices[hit.faceIndex];
+      if (owner !== undefined) return owner;
+    }
+
+    // Fallback for objects without a face map (e.g. selection visuals that
+    // slipped through, or single-draw batches) - only correct when the
+    // batch really does contain just one draw.
     const drawIndices = hit.object.userData.drawIndices;
     if (Array.isArray(drawIndices) && drawIndices.length > 0) return Number(drawIndices[0]);
     return null;

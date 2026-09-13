@@ -89,6 +89,13 @@ export class MaterialMergeGroup {
   private uvs: number[] = [];
   private normals: number[] = [];
   private drawIndices: number[] = [];
+  /** Which original draw each triangle of the merged geometry came from,
+   * in the same order/indexing as THREE.Raycaster's `faceIndex` for a
+   * non-indexed geometry (triangle 0 = vertices [0,1,2], triangle 1 =
+   * [3,4,5], ...). Without this, a raycast hit on the merged mesh can only
+   * be resolved back to "one of the draws batched into it" - see build()
+   * and pickDrawAtPointer() in app.ts, which is what this exists to fix. */
+  private faceDrawIndices: number[] = [];
 
   constructor(public readonly material: THREE.Material) {}
 
@@ -100,6 +107,13 @@ export class MaterialMergeGroup {
     for (let i = 0; i < data.uvs.length; i++) this.uvs.push(data.uvs[i]);
     for (let i = 0; i < data.normals.length; i++) this.normals.push(data.normals[i]);
     this.drawIndices.push(drawIndex);
+
+    // Non-indexed geometry: 3 position components per vertex, 3 vertices
+    // per triangle - so this draw contributes exactly this many triangles,
+    // appended right after whatever's already in faceDrawIndices, keeping
+    // it aligned with the position buffer's own triangle order.
+    const triangleCount = data.positions.length / 9;
+    for (let i = 0; i < triangleCount; i++) this.faceDrawIndices.push(drawIndex);
   }
 
   get vertexCount(): number {
@@ -113,6 +127,10 @@ export class MaterialMergeGroup {
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(this.normals, 3));
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.userData.drawIndices = [...this.drawIndices];
+    // Per-triangle owner (see faceDrawIndices doc comment above) - lets a
+    // raycast hit's faceIndex be resolved to the exact draw that was
+    // clicked, not just any draw in this batch.
+    mesh.userData.faceDrawIndices = new Uint32Array(this.faceDrawIndices);
     return mesh;
   }
 }
