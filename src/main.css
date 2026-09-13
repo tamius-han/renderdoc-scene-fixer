@@ -21,6 +21,47 @@
 @theme {
   --font-sans: "Source Code Pro", monospace;
   --font-mono: "Source Code Pro", monospace;
+
+  /* Warm color palette: browns */
+  --color-warm-50: oklch(0.95 0.012 64.22);
+  --color-warm-100: oklch(0.871 0.032 64.22);
+  --color-warm-200: oklch(0.792 0.055 64.22);
+  --color-warm-300: oklch(0.713 0.057 64.22);
+  --color-warm-400: oklch(0.634 0.051 64.22);
+  --color-warm-500: oklch(0.555 0.045 64.22);
+  --color-warm-600: oklch(0.475 0.038 64.22);
+  --color-warm-700: oklch(0.395 0.032 64.22);
+  --color-warm-800: oklch(0.315 0.025 64.22);
+  --color-warm-900: oklch(0.235 0.019 64.22);
+  --color-warm-950: oklch(0.155 0.012 64.22);
+
+  /* browns but darker: */
+  --color-brown-50: oklch(0.65 0.034 51.567);
+  --color-brown-100: oklch(0.57 0.03 51.567);
+  --color-brown-200: oklch(0.49 0.026 51.567);
+  --color-brown-300: oklch(0.41 0.022 51.567);
+  --color-brown-400: oklch(0.33 0.017 51.567);
+  --color-brown-500: oklch(0.25 0.013 51.567);
+  --color-brown-600: oklch(0.21 0.011 51.567);
+  --color-brown-700: oklch(0.17 0.009 51.567);
+  --color-brown-800: oklch(0.13 0.007 51.567);
+  --color-brown-900: oklch(0.09 0.005 51.567);
+  --color-brown-950: oklch(0.05 0.003 51.567);
+
+  /* Cool color palette */
+  --color-cool-50: oklch(0.687 0.042 296.213);
+  --color-cool-100: oklch(0.607 0.054 296.213);
+  --color-cool-200: oklch(0.527 0.064 296.213);
+  --color-cool-300: oklch(0.447 0.054 296.213);
+  --color-cool-400: oklch(0.367 0.045 296.213);
+  --color-cool-500: oklch(0.287 0.035 296.213);
+  --color-cool-600: oklch(0.239 0.029 296.213);
+  --color-cool-700: oklch(0.192 0.023 296.213);
+  --color-cool-800: oklch(0.145 0.018 296.213);
+  --color-cool-900: oklch(0.097 0.012 296.213);
+  --color-cool-950: oklch(0.05 0.006 296.213);
+
+
 }
 
 :root {
@@ -79,20 +120,22 @@ p {
 .field {
   @apply flex flex-col gap-2 my-2 w-full;
 
+  input[type="text"] {
+    @apply border-b border-b-1 border-b-amber-300 px-2
+  }
+
   .combined-slider-value {
-    @apply flex flex-row items-center gap-2 w-full;
+    @apply flex flex-row items-center gap-2 w-full relative;
 
     input {
-
       &.input-percent {
         @apply !w-12 text-right pr-4 relative;
-
-        &::after {
-          content: "%";
-          @apply absolute right-2 top-1/2 -translate-y-1/2 text-mist-400;
-
-        }
       }
+    }
+    &::after {
+      content: "%";
+      @apply text-warm-300 border-b border-b-1 border-b-amber-300 -ml-4 px-2;
+
     }
   }
 
@@ -159,31 +202,67 @@ code {
 
 .subtitle { font-size: 12px; color: var(--text-dim); margin: 0 0 18px; line-height: 1.5; }
 
-.dropzone {
+/* .dropzone {
   border: 1.5px dashed var(--line); border-radius: 10px; padding: 22px 14px;
   text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
   font-size: 12.5px; color: var(--text-dim);
 }
 .dropzone.drag { border-color: var(--accent); background: rgba(110, 231, 200, 0.06); color: var(--text); }
 .dropzone strong { color: var(--text); font-weight: 600; }
-.dropzone .hint { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.dropzone .hint { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); } */
 
 .section-label {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-dim); margin: 22px 0 8px;
 }
 
-.pass-list { display: flex; flex-direction: column; gap: 6px; }
+/* .pass-list { display: flex; flex-direction: column; gap: 6px; } */
 .pass-row {
-  background: var(--bg-card); border: 1px solid var(--line); border-radius: 8px;
-  padding: 9px 10px; cursor: pointer; display: flex; gap: 9px; align-items: flex-start;
+  @apply cursor-pointer py-1 pl-2 pr-4 flex gap-2 items-start bg-brown-700 text-warm-200;
+
+  user-select: none;
+
+  &:hover {
+    @apply bg-brown-500;
+  }
+
+  input {
+    @apply mt-1 accent-warm-400;
+    pointer-events: none;
+  }
+
+  .name {
+    @apply text-[0.9rem] font-bold;
+  }
+  .stats {
+    @apply text-[0.75rem] text-warm-500;
+  }
+  .role {
+    @apply text-[0.8rem] text-warm-400;
+  }
+
+  &.selected {
+    @apply bg-warm-200 text-warm-900;
+
+    &:hover {
+      @apply bg-warm-100;
+    }
+
+    input {
+      @apply mt-1 accent-warm-800;
+    }
+
+    .name {
+      @apply text-[0.9rem] font-bold;
+    }
+    .stats {
+      @apply text-[0.75rem] text-warm-600;
+    }
+    .role {
+      @apply text-[0.8rem] text-warm-800;
+    }
+  }
 }
-.pass-row:hover { background: var(--bg-card-hover); }
-.pass-row input { margin-top: 2px; accent-color: var(--accent); }
-.pass-row .meta { flex: 1; min-width: 0; }
-.pass-row .name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
-.pass-row .role { font-size: 11.5px; color: var(--accent); margin-top: 1px; }
-.pass-row .stats { font-size: 11px; color: var(--text-dim); margin-top: 2px; font-family: var(--mono); }
 
 .draw-row-wrap {
   display: flex; align-items: flex-start; gap: 12px;

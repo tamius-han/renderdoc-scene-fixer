@@ -71,7 +71,11 @@ export class SceneManager {
 
 
   constructor(private container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // stencil:true is required for the selection outline's mask+ring
+    // stencil technique (see buildSelectionOutline() in app.ts) - not
+    // guaranteed on by default across three.js versions, so it's requested
+    // explicitly rather than relying on whatever the current default is.
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);

@@ -12,6 +12,7 @@
   </head>
   <body>
     <div class="show-on-initial-load">Loading ...</div>
+
     <div id="app" class="hide-on-initial-load flex flex-col !h-[100dvh] !w-[100vw]">
       <div id="topbar" class="flex flex-row gap-4 p-2 bg-mist-900">
         <div class="text-amber-200">RenderDoc Capture Fixer</div>
@@ -21,6 +22,11 @@
         <div>Control options</div>
         <div>Fix & export</div>
       </div>
+
+      <capture-importer
+        id="capture-importer"
+      >
+      </capture-importer>
 
       <div class="flex flex-row grow shrink overflow-hidden">
         <div id="sidebar" class="h-full">

@@ -165,9 +165,9 @@ export class SceneViewerApp {
     this.setupSelectionOutlinePass();
     this.sceneManager.onContextLoss((lost) => {
       if (lost) {
-        this.setStatus(
-          "WebGL context lost - the scene is likely too large for available GPU memory. Try selecting fewer passes.",
-        );
+        // this.setStatus(
+        //   "WebGL context lost - the scene is likely too large for available GPU memory. Try selecting fewer passes.",
+        // );
       }
     });
     // Keeps the UI toggle/label/speed indicator in sync regardless of
@@ -199,26 +199,26 @@ export class SceneViewerApp {
   }
 
   private wireEvents(): void {
-    this.dropzone.addEventListener("click", () => this.folderInput.click());
-    this.dropzone.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      this.dropzone.classList.add("drag");
-    });
-    this.dropzone.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
-    this.dropzone.addEventListener("drop", async (e) => {
-      e.preventDefault();
-      this.dropzone.classList.remove("drag");
-      if (!e.dataTransfer) return;
-      this.setStatus("Reading dropped folder...");
-      const entries = await collectFromDrop(e.dataTransfer);
-      await this.handleFiles(entries);
-    });
-    this.folderInput.addEventListener("change", async (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (!files) return;
-      this.setStatus("Reading folder...");
-      await this.handleFiles(collectFromInput(files));
-    });
+    // this.dropzone.addEventListener("click", () => this.folderInput.click());
+    // this.dropzone.addEventListener("dragover", (e) => {
+    //   e.preventDefault();
+    //   this.dropzone.classList.add("drag");
+    // });
+    // this.dropzone.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
+    // this.dropzone.addEventListener("drop", async (e) => {
+    //   e.preventDefault();
+    //   this.dropzone.classList.remove("drag");
+    //   if (!e.dataTransfer) return;
+    //   this.setStatus("Reading dropped folder...");
+    //   const entries = await collectFromDrop(e.dataTransfer);
+    //   await this.handleFiles(entries);
+    // });
+    // this.folderInput.addEventListener("change", async (e) => {
+    //   const files = (e.target as HTMLInputElement).files;
+    //   if (!files) return;
+    //   this.setStatus("Reading folder...");
+    //   await this.handleFiles(collectFromInput(files));
+    // });
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
@@ -251,54 +251,6 @@ export class SceneViewerApp {
     if (this.loadedDraws.length > 0) this.rebuildVisibleScene();
   }
 
-  private async handleFiles(entries: { path: string; file: File }[]): Promise<void> {
-    if (entries.length === 0) return;
-
-    this.vfs = new VirtualFileSystem();
-    for (const { path, file } of entries) this.vfs.set(path, file);
-
-    const loaded = await loadManifests(this.vfs);
-    if (!loaded) {
-      this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
-      return;
-    }
-
-    this.loaded = loaded;
-    this.renderPassList();
-    const failedNote = loaded.failedPassFolders.length
-      ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
-      : "";
-    this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.${failedNote}`);
-  }
-
-  private renderPassList(): void {
-    if (!this.loaded) return;
-    this.passSection.style.display = "block";
-    this.passList.innerHTML = "";
-
-    const defaultIndex = this.loaded.root.passes.findIndex((p) => p.guessedRole?.includes("presented"));
-    const selectedDefault = defaultIndex >= 0 ? defaultIndex : 0;
-
-    this.loaded.root.passes.forEach((p: PassIndexEntry, i: number) => {
-      const hasPosed = (this.loaded!.passManifests[p.folder]?.draws ?? []).some((d) => d.posedMesh);
-      const row = document.createElement("label");
-      row.className = "pass-row";
-      row.innerHTML = `
-        <input type="checkbox" data-folder="${p.folder}" ${i === selectedDefault ? "checked" : ""}>
-        <div class="meta">
-          <div class="name">${p.folder}</div>
-          <div class="role">${p.guessedRole ?? ""}</div>
-          <div class="stats">${p.drawCount} draw(s) &middot; ${p.colorTargets.length} color target(s) &middot; depth=${p.depthTarget ? "yes" : "no"} &middot; posed=${hasPosed ? "yes" : "no"}</div>
-        </div>`;
-      this.passList.appendChild(row);
-    });
-
-    for (const cb of this.passList.querySelectorAll("input")) {
-      cb.addEventListener("change", () => this.updatePoseWarning());
-    }
-    this.updatePoseWarning();
-  }
-
   private getSelectedFolders(): string[] {
     return Array.from(this.passList.querySelectorAll<HTMLInputElement>("input:checked")).map(
       (cb) => cb.dataset.folder as string,
@@ -326,10 +278,6 @@ export class SceneViewerApp {
   private showWarning(message: string): void {
     this.poseWarning.style.display = "block";
     this.poseWarning.textContent = message;
-  }
-
-  private setStatus(message: string): void {
-    this.statusBar.textContent = message;
   }
 
   private getUntexturedMaterial(): THREE.Material {
@@ -439,14 +387,14 @@ export class SceneViewerApp {
     if (!this.loaded) return;
     const selected = this.getSelectedFolders();
     if (selected.length === 0) {
-      this.setStatus("Select at least one pass first.");
+      // this.setStatus("Select at least one pass first.");
       return;
     }
 
     this.reconstructBtn.disabled = true;
     this.emptyHint.style.display = "none";
     this.hud.style.display = "block";
-    this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
+    // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
     try {
       this.clearSelectionVisuals();
@@ -1553,6 +1501,9 @@ export class SceneViewerApp {
       depthTest: false,
       depthWrite: false,
     });
+    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+    ring.userData.isSelectionVisual = true;
+    ring.renderOrder = renderOrderBase + 1;
 
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.outlineQuadMaterial);
     quad.frustumCulled = false;
