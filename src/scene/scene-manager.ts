@@ -49,6 +49,11 @@ export class SceneManager {
   private lastX = 0;
   private lastY = 0;
   private contextLossHandlers: ContextLossHandler[] = [];
+  /** Run every frame, right after the main scene render call - lets a
+   * caller (see SceneViewerApp's selection outline) layer extra render
+   * passes onto the same canvas/frame without SceneManager needing to know
+   * anything about what those passes are. */
+  private afterRenderHandlers: Array<() => void> = [];
 
   // first person/flying mode
   private flying = false;
@@ -125,6 +130,14 @@ export class SceneManager {
 
   onContextLoss(handler: ContextLossHandler): void {
     this.contextLossHandlers.push(handler);
+  }
+
+  /** Registers a callback to run every frame immediately after the main
+   * scene is rendered, before the frame is presented - see
+   * afterRenderHandlers' doc comment. Order relative to other handlers
+   * isn't guaranteed to matter; there's currently only ever one caller. */
+  onAfterRender(handler: () => void): void {
+    this.afterRenderHandlers.push(handler);
   }
 
   //#region fly mode handling
@@ -512,5 +525,6 @@ export class SceneManager {
     if (this.flying) this.updateFlyMovement(deltaSeconds);
 
     this.renderer.render(this.scene, this.camera);
+    for (const handler of this.afterRenderHandlers) handler();
   };
 }

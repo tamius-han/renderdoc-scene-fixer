@@ -18,9 +18,12 @@ import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
 import { calculateDistortion } from "./mesh-tools/calculator";
 
-// Selection outlines are rendered as a backface shell displaced in clip
-// space so the visible thickness stays at a literal 3 screen pixels.
-const SELECTION_OUTLINE_COLOR = new THREE.Color(0xffaa66);
+// Shared by both the selected-mesh flat-orange recolor and the outline
+// ring around it.
+const SELECTION_COLOR = new THREE.Color(0xff8c1a);
+// Outline ring thickness, in device (drawing-buffer) pixels - see
+// renderSelectionOutlinePass()'s doc comment.
+const OUTLINE_THICKNESS_PIXELS = 3;
 
 /** One draw's fully-parsed geometry/material/bounds, cached in memory so the
  * "hide largest % of objects" filter can rebuild the visible scene instantly
@@ -99,6 +102,30 @@ export class SceneViewerApp {
    * selection or scene rebuild, independent of the main content meshes'
    * own lifecycle (see clearSelectionVisuals()). */
   private selectionVisuals: THREE.Object3D[] = [];
+  /** One compiled "selected = flat orange / else = darkened" shader
+   * material per unique base (untouched) material - see
+   * buildSelectionShaderMaterial(). Keyed by the base material so it
+   * survives rebuildVisibleScene() (which recreates every Mesh but reuses
+   * the same underlying per-draw material instances) without recompiling a
+   * shader per selection change. */
+  private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
+
+  /** Selection outline: an image-space ("post-process") technique rather
+   * than expanding the mesh's own geometry - see renderSelectionOutlinePass()
+   * for why. outlineMaskGroup holds a plain white copy of each currently
+   * selected (and visible) draw's geometry, rendered every frame into
+   * outlineMaskTarget from the main camera; outlineQuadScene/Camera then
+   * draw a single fullscreen quad that samples that mask and paints a ring
+   * wherever a non-selected pixel is near a selected one. All set up once
+   * in setupSelectionOutlinePass(); outlineMaskGroup's children are
+   * rebuilt from scratch on every selection change (see
+   * rebuildSelectionOutlineMask()). */
+  private outlineMaskScene = new THREE.Scene();
+  private outlineMaskGroup = new THREE.Group();
+  private outlineMaskTarget: THREE.WebGLRenderTarget | null = null;
+  private outlineQuadScene = new THREE.Scene();
+  private outlineQuadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private outlineQuadMaterial: THREE.ShaderMaterial | null = null;
 
   private dropzone = this.el("dropzone");
   private folderInput = this.el<HTMLInputElement>("folder-input");
@@ -135,6 +162,7 @@ export class SceneViewerApp {
 
   constructor(viewportEl: HTMLElement) {
     this.sceneManager = new SceneManager(viewportEl);
+    this.setupSelectionOutlinePass();
     this.sceneManager.onContextLoss((lost) => {
       if (lost) {
         this.setStatus(
@@ -1287,12 +1315,17 @@ export class SceneViewerApp {
     this.selectionVisuals = [];
   }
 
-  /** Builds the screen-space outline mesh and both dot
-   * marker pairs for the currently-selected, currently-rendered objects,
-   * and adds them to the content group. No-ops if nothing is selected, or
-   * if there's no content group yet (nothing reconstructed). Selected
-   * objects that are filtered or manually hidden right now are excluded -
-   * there's nothing to outline/mark if they're not actually being drawn. */
+  /** Refreshes everything selection-related: recolors selected/dimmed
+   * triangles (applySelectionShading()), rebuilds the outline's mask
+   * geometry (rebuildSelectionOutlineMask()) - the actual outline drawing
+   * happens continuously in renderSelectionOutlinePass(), not here - and,
+   * for the currently-selected, currently-rendered objects, (re)builds
+   * both center-dot marker pairs, adding them to the content group.
+   * Selected objects that are filtered or manually hidden right now are
+   * excluded from outlining/marking - there's nothing to draw if they're
+   * not actually being rendered - but the shading and mask-rebuild passes
+   * above still run regardless, so hiding the last visible selected object
+   * still clears any leftover dimming/outline. */
   private updateSelectionVisuals(): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
@@ -1300,19 +1333,20 @@ export class SceneViewerApp {
     const activeSelected = Array.from(this.selectedIndices).filter(
       (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
     );
-    if (activeSelected.length === 0) {
-      this.applySelectionDimming(group, false);
-      return;
-    }
 
-    this.applySelectionDimming(group, true);
+    // Recolors selected/non-selected triangles (or restores everything to
+    // normal if activeSelected is empty) - see applySelectionShading()'s
+    // doc comment. Always runs, regardless of whether there's anything to
+    // outline below.
+    this.applySelectionShading();
 
-    for (const index of activeSelected) {
-      const outlineMesh = this.createOutlineMesh(this.loadedDraws[index]);
-      if (!outlineMesh) continue;
-      group.add(outlineMesh);
-      this.selectionVisuals.push(outlineMesh);
-    }
+    // Rebuilds the image-space outline's mask geometry (see
+    // rebuildSelectionOutlineMask()) - also unconditional, since an empty
+    // activeSelected needs to clear out any previous mask just as much as
+    // a non-empty one needs to populate it.
+    this.rebuildSelectionOutlineMask(activeSelected);
+
+    if (activeSelected.length === 0) return;
 
     const perObjectCenters: number[] = [];
     let unionBoundsAcc: Bounds | null = null;
@@ -1333,63 +1367,295 @@ export class SceneViewerApp {
     }
   }
 
-  private applySelectionDimming(group: THREE.Group, enabled: boolean): void {
-    if (!enabled) return;
+  /** Applies the "selected mesh(es) turn solid flat-shaded orange, every
+   * other mesh darkens by 50%" look (or, with nothing selected, restores
+   * everything to normal). Runs per merged BATCH mesh (what's actually in
+   * the scene graph - see SceneMeshBuilder), but recolors per TRIANGLE
+   * within each one using that mesh's precomputed faceDrawIndices (see
+   * mesh-builder.ts) rather than treating a whole batch as one unit - a
+   * batch is a group of draws sharing one material, so it very often mixes
+   * selected and non-selected draws together, and the old draw-index-based
+   * dimming here couldn't tell those apart.
+   *
+   * A mesh's material is only ever swapped for a cached shader variant (see
+   * buildSelectionShaderMaterial()) or restored to its original - never
+   * mutated in place - so repeated selection changes can't accumulate
+   * clones-of-clones, and a mesh with nothing selected always ends up back
+   * at pixel-identical output to before any selection existed. */
+  private applySelectionShading(): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    const hasSelection = this.selectedIndices.size > 0;
 
     group.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh) || obj.userData.isSelectionVisual) return;
-      const drawIndices = obj.userData.drawIndices;
-      if (!Array.isArray(drawIndices) || drawIndices.length === 0) return;
-      const selected = drawIndices.some((index) => this.selectedIndices.has(Number(index)));
-      if (selected) return;
+      const faceDrawIndices = obj.userData.faceDrawIndices as Uint32Array | undefined;
+      if (!faceDrawIndices) return;
 
-      const material = obj.material;
-      if (Array.isArray(material)) return;
-      if (!(material instanceof THREE.MeshBasicMaterial)) return;
+      // Stash the pristine material the first time this (freshly built -
+      // see addContent()) mesh is seen, so there's always something exact
+      // to restore to, regardless of how many times its material gets
+      // swapped afterward.
+      const baseMaterial = (obj.userData.baseMaterial as THREE.Material | undefined) ?? obj.material;
+      obj.userData.baseMaterial = baseMaterial;
 
-      const dimMaterial = material.clone();
-      dimMaterial.onBeforeCompile = (shader) => {
-        shader.fragmentShader = shader.fragmentShader.replace(
-          "vec4 diffuseColor = vec4( diffuseColor.rgb, opacity );",
-          "vec3 c = diffuseColor.rgb; float grayscale = dot(c, vec3(0.299, 0.587, 0.114)); c = mix(c, vec3(grayscale), 0.8); c *= vec3(0.38, 0.39, 0.42); vec4 diffuseColor = vec4( c, opacity );",
-        );
-      };
-      dimMaterial.needsUpdate = true;
-      obj.material = dimMaterial;
+      if (!hasSelection) {
+        obj.material = baseMaterial;
+        return;
+      }
+
+      // One flag per triangle, expanded to 3 (one per vertex, since the
+      // geometry is non-indexed - see mesh-builder.ts) - lets the shader
+      // below shade each triangle according to whether ITS OWN draw is
+      // selected, not the batch as a whole.
+      const vertexCount = faceDrawIndices.length * 3;
+      const selectedFlags = new Float32Array(vertexCount);
+      for (let face = 0; face < faceDrawIndices.length; face++) {
+        const flag = this.selectedIndices.has(faceDrawIndices[face]) ? 1 : 0;
+        const base = face * 3;
+        selectedFlags[base] = flag;
+        selectedFlags[base + 1] = flag;
+        selectedFlags[base + 2] = flag;
+      }
+      obj.geometry.setAttribute("aSelected", new THREE.Float32BufferAttribute(selectedFlags, 1));
+
+      let shaded = this.selectionShaderCache.get(baseMaterial);
+      if (!shaded) {
+        shaded = this.buildSelectionShaderMaterial(baseMaterial);
+        this.selectionShaderCache.set(baseMaterial, shaded);
+      }
+      obj.material = shaded;
     });
   }
 
-  /** Builds a slightly inflated shell mesh for a selected draw, so it creates
-   * a real visible outline around the object instead of only tinting the back
-   * side of the original mesh. */
-  private createOutlineMesh(draw: LoadedDraw): THREE.Mesh | null {
-    const { positions, normals } = draw.geometryData;
-    if (positions.length === 0 || normals.length !== positions.length) return null;
+  /** Clones a batch mesh's own (always MeshBasicMaterial - see
+   * mesh-builder.ts) material into one that branches per-vertex on the
+   * "aSelected" attribute applySelectionShading() maintains: triangles
+   * belonging to a selected draw render as flat, per-face-shaded
+   * SELECTION_COLOR (texture/vertex-color ignored entirely); everything
+   * else renders as normal, just at 50% brightness. The "flat per-face"
+   * look comes from computing a face normal in the fragment shader via
+   * screen-space derivatives (dFdx/dFdy) of a view-space position varying,
+   * rather than trusting the mesh's own (likely smoothed) normal attribute
+   * - that's what makes each triangle read as a distinct facet instead of
+   * a uniform flat blob. There's no actual light in this scene (everything
+   * else here is unlit MeshBasicMaterial - see scene-manager.ts), so the
+   * "light direction" is just a fixed vector chosen to give a pleasant
+   * range of shading across a typical model's orientation.
+   *
+   * Returns the material unchanged (no clone) if `base` isn't a
+   * MeshBasicMaterial - would only happen if a new material type is
+   * introduced elsewhere and this wasn't updated to match, and rendering
+   * that mesh unmodified is a safer failure mode than a broken shader. */
+  private buildSelectionShaderMaterial(base: THREE.Material): THREE.Material {
+    if (!(base instanceof THREE.MeshBasicMaterial)) return base;
 
-    const offsetAmount = Math.max(0.001, draw.diagonal * 0.01);
-    const expanded = new Float32Array(positions.length);
-    for (let i = 0; i < positions.length; i += 3) {
-      expanded[i] = positions[i] + normals[i] * offsetAmount;
-      expanded[i + 1] = positions[i + 1] + normals[i + 1] * offsetAmount;
-      expanded[i + 2] = positions[i + 2] + normals[i + 2] * offsetAmount;
-    }
+    const c = SELECTION_COLOR;
+    const shaded = base.clone();
+    shaded.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "attribute float aSelected;\nvarying float vSelected;\nvarying vec3 vSelectionViewPos;\n#include <common>",
+        )
+        .replace(
+          "#include <project_vertex>",
+          "#include <project_vertex>\nvSelected = aSelected;\nvSelectionViewPos = mvPosition.xyz;",
+        );
 
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(expanded, 3));
-    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "varying float vSelected;\nvarying vec3 vSelectionViewPos;\n#include <common>")
+        .replace(
+          "#include <specularmap_fragment>",
+          `#include <specularmap_fragment>
+          if ( vSelected > 0.5 ) {
+            vec3 faceNormal = normalize( cross( dFdx( vSelectionViewPos ), dFdy( vSelectionViewPos ) ) );
+            // abs() rather than clamp(): OBJ meshes don't reliably have
+            // consistent winding, and we don't have or want a real light
+            // to orient against - this just avoids any facet going
+            // completely black if its normal happens to point "away".
+            float ndotl = abs( dot( faceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
+            float shade = 0.45 + 0.55 * ndotl;
+            diffuseColor.rgb = vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)}) * shade;
+          } else {
+            diffuseColor.rgb *= 0.5;
+          }`,
+        );
+    };
+    shaded.needsUpdate = true;
+    return shaded;
+  }
 
-    const material = new THREE.MeshBasicMaterial({
-      color: SELECTION_OUTLINE_COLOR,
-      side: THREE.FrontSide,
+  /** One-time setup for the selection outline's render pass (see the
+   * outlineMaskScene/outlineQuadScene field doc comment for the overall
+   * approach and why it replaced the earlier mesh-geometry-based
+   * techniques). Builds the fullscreen quad and its mask-sampling shader,
+   * and registers the actual per-frame render work with the SceneManager
+   * so it runs every frame regardless of whether anything else in the app
+   * triggers a redraw (needed because the outline's on-screen position
+   * must track the camera continuously, not just at selection-change
+   * time). Called once, from the constructor. */
+  private setupSelectionOutlinePass(): void {
+    this.outlineMaskScene.add(this.outlineMaskGroup);
+
+    this.outlineQuadMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uMask: { value: null },
+        uTexelSize: { value: new THREE.Vector2() },
+        uThicknessPixels: { value: OUTLINE_THICKNESS_PIXELS },
+        uColor: { value: SELECTION_COLOR },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4( position.xy, 0.0, 1.0 );
+        }
+      `,
+      // For every screen pixel NOT covered by the selection mask, checks a
+      // ring of sample points at radius uThicknessPixels around it - if
+      // any of those samples IS covered, this pixel is part of the outline
+      // ring (discard otherwise). This is a direct, angle- and
+      // topology-independent read of "how close is this pixel to the
+      // selection's silhouette", which is what makes it immune to the
+      // failure modes of pushing the mesh's own geometry outward: it
+      // doesn't care what the mesh's normals look like, how it's
+      // tessellated, or which way any given triangle happens to be
+      // facing - only the already-rasterized 2D shape of the mask matters.
+      fragmentShader: `
+        uniform sampler2D uMask;
+        uniform vec2 uTexelSize;
+        uniform float uThicknessPixels;
+        uniform vec3 uColor;
+        varying vec2 vUv;
+
+        const int OUTLINE_SAMPLES = 16;
+
+        void main() {
+          if ( texture2D( uMask, vUv ).r > 0.5 ) discard;
+
+          bool nearSelection = false;
+          for ( int i = 0; i < OUTLINE_SAMPLES; i++ ) {
+            float angle = 6.28318530718 * ( float( i ) / float( OUTLINE_SAMPLES ) );
+            vec2 offset = vec2( cos( angle ), sin( angle ) ) * uThicknessPixels * uTexelSize;
+            if ( texture2D( uMask, vUv + offset ).r > 0.5 ) {
+              nearSelection = true;
+              break;
+            }
+          }
+          if ( !nearSelection ) discard;
+
+          gl_FragColor = vec4( uColor, 1.0 );
+        }
+      `,
+      transparent: true,
       depthTest: false,
       depthWrite: false,
-      toneMapped: false,
     });
 
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.userData.isSelectionVisual = true;
-    mesh.renderOrder = 997;
-    return mesh;
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.outlineQuadMaterial);
+    quad.frustumCulled = false;
+    this.outlineQuadScene.add(quad);
+
+    this.sceneManager.onAfterRender(() => this.renderSelectionOutlinePass());
+  }
+
+  /** Rebuilds outlineMaskGroup's children from scratch to match the
+   * currently-selected, currently-rendered draws - called once per
+   * selection change from updateSelectionVisuals(), NOT every frame (unlike
+   * the actual outline render pass, which does run every frame - see
+   * renderSelectionOutlinePass()). Each selected draw becomes a plain white,
+   * double-sided, depth-untested mesh: color and shading don't matter here
+   * since this scene only ever gets sampled for "is this pixel covered at
+   * all", and depthTest:false/no other content in this scene means the
+   * mask always covers a selected draw's FULL silhouette, regardless of
+   * what's occluding it in the real scene - which is what makes the
+   * resulting outline visible through walls. */
+  private rebuildSelectionOutlineMask(activeSelected: number[]): void {
+    for (const child of [...this.outlineMaskGroup.children]) {
+      this.outlineMaskGroup.remove(child);
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
+      }
+    }
+
+    // Matches contentGroup's own (always-uniform) scale, so the mask lines
+    // up pixel-for-pixel with the real, rendered geometry - see
+    // SceneManager.addContent().
+    const contentGroup = this.sceneManager.getContentGroup();
+    this.outlineMaskGroup.scale.setScalar(contentGroup?.scale.x ?? 1);
+
+    for (const index of activeSelected) {
+      const { positions } = this.loadedDraws[index].geometryData;
+      if (positions.length === 0) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.outlineMaskGroup.add(new THREE.Mesh(geometry, material));
+    }
+  }
+
+  /** Runs every frame (registered as a SceneManager afterRender hook - see
+   * setupSelectionOutlinePass()): re-renders the selection mask from the
+   * current camera into outlineMaskTarget, then draws the fullscreen ring
+   * shader on top of the already-rendered main scene. A no-op cost-wise
+   * whenever nothing is selected (returns immediately).
+   *
+   * Runs unconditionally every frame rather than only on selection change
+   * because the mask has to be re-projected from whatever the camera is
+   * doing right now - an outline computed once and left as static mesh
+   * geometry (the old approach) can only ever be exactly correct for one
+   * camera angle at a time. */
+  private renderSelectionOutlinePass(): void {
+    if (!this.outlineQuadMaterial || this.outlineMaskGroup.children.length === 0) return;
+
+    const renderer = this.sceneManager.renderer;
+    const size = new THREE.Vector2();
+    renderer.getDrawingBufferSize(size);
+    const width = Math.max(1, Math.round(size.x));
+    const height = Math.max(1, Math.round(size.y));
+
+    if (!this.outlineMaskTarget || this.outlineMaskTarget.width !== width || this.outlineMaskTarget.height !== height) {
+      this.outlineMaskTarget?.dispose();
+      this.outlineMaskTarget = new THREE.WebGLRenderTarget(width, height, {
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+    }
+
+    this.outlineQuadMaterial.uniforms.uMask.value = this.outlineMaskTarget.texture;
+    this.outlineQuadMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+
+    // Saved/restored rather than assumed, since this hook runs interleaved
+    // with SceneManager's own render call every frame and shouldn't leave
+    // renderer state different from how it found it.
+    const previousTarget = renderer.getRenderTarget();
+    const previousAutoClear = renderer.autoClear;
+    const previousClearColor = new THREE.Color();
+    renderer.getClearColor(previousClearColor);
+    const previousClearAlpha = renderer.getClearAlpha();
+
+    renderer.setRenderTarget(this.outlineMaskTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.autoClear = true;
+    renderer.render(this.outlineMaskScene, this.sceneManager.camera);
+
+    // autoClear:false here is essential - the main scene was already drawn
+    // to this same target (the canvas) by SceneManager just before this
+    // hook ran, and a normal render() call defaults to clearing its target
+    // first, which would erase it.
+    renderer.setRenderTarget(previousTarget);
+    renderer.setClearColor(previousClearColor, previousClearAlpha);
+    renderer.autoClear = false;
+    renderer.render(this.outlineQuadScene, this.outlineQuadCamera);
+    renderer.autoClear = previousAutoClear;
   }
 
   /** Adds one dot-marker pair (a black 1px-wider outline dot underneath, a
