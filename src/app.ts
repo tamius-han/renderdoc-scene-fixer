@@ -16,7 +16,7 @@ import {
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
-import { calculateDistortion } from "./mesh-tools/calculator";
+import { calculateDistortionMatrix } from "./mesh-tools/calculator";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -76,16 +76,20 @@ export class SceneViewerApp {
    * 'v' (visible, default) or 'h' (manually hidden) - see
    * getVisibilityState(). */
   private manuallyHiddenIndices = new Set<number>();
-  /** Index into loadedDraws of the object marked as the scale reference for
-   * transform-correction recalculation (see setLandmark() /
-   * recalculateTransformCorrection()) - at most one object can hold this at
-   * a time. */
+  /** Index into loadedDraws of the object marked as the scale reference in
+   * the object list ("is ref" button - see setLandmark()). No longer read
+   * by recalculateTransformCorrection(), which now fits a distortion
+   * independently per object instead of broadcasting one reference
+   * object's correction to the whole scene; kept only for the UI marker
+   * itself, which is otherwise harmless to leave clicked. */
   private scaleReferenceIndex: number | null = null;
   /** Rotation applied to the whole scene's content group (not to individual
    * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
    * (filter/visibility changes tear down and recreate the content group).
-   * Only ever set by recalculateTransformCorrection() when "also apply
-   * rotation" is checked; identity otherwise. */
+   * No longer set by recalculateTransformCorrection(): per-object matrix
+   * correction bakes rotation directly into each object's own vertices, so
+   * there's no separate whole-scene rotation left to apply. Stays identity
+   * unless something else sets it. */
   private sceneRotation = new THREE.Quaternion();
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
@@ -670,34 +674,73 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Runs the transform-correction recalculation for the object currently
-   * marked as the scale reference (see setLandmark()), then applies the
-   * resulting per-axis scale to EVERY loaded draw (including hidden ones -
-   * hiddenness only affects rendering/selection, not the underlying data).
-   * If "also apply rotation" is checked, the whole scene's content group
-   * (not individual objects) is additionally rotated by
-   * posedToNonPosedRotation. */
+  /** Runs the matrix-based transform-correction fit independently for EVERY
+   * loaded draw (including hidden ones - hiddenness only affects
+   * rendering/selection, not the underlying data), rather than fitting one
+   * correction from a single marked "scale reference" object and
+   * broadcasting it to the whole scene. Each draw already carries its own
+   * posed/non-posed vertex pair (geometryData/previewGeometryData - see
+   * loadDraw()), from the SAME draw call, so each object can - and, since
+   * different objects can genuinely be distorted differently (different
+   * skinning, different shaders, different bones), *should* - fit and
+   * apply its own correction instead of assuming one object's distortion
+   * speaks for the whole scene.
+   *
+   * A draw with no separate posed export (geometryData and
+   * previewGeometryData are literally the same array - see loadDraw()) has
+   * no posed/non-posed pair to fit a distortion from, so it's skipped
+   * rather than fed a degenerate identity fit. A draw whose fit fails for
+   * another reason (mismatched vertex counts, degenerate/planar geometry -
+   * see calculateDistortionMatrix()) is also skipped, logged, and counted,
+   * rather than aborting correction for the rest of the scene. */
   private recalculateTransformCorrection(): void {
-    if (this.scaleReferenceIndex === null) {
-      this.setStatus("Mark an object as the scale reference first (\u201cis ref\u201d button in the object list).");
+    if (this.loadedDraws.length === 0) {
+      this.setStatus("Reconstruct a scene first.");
       return;
     }
-    const scaleReferenceObject = this.loadedDraws[this.scaleReferenceIndex];
-    if (!scaleReferenceObject) {
-      this.scaleReferenceIndex = null;
-      this.renderObjectListState();
+    if (this.scaleReferenceIndex === null) {
+      this.setStatus("No scale reference object selected.");
       return;
     }
 
-    const distortion = calculateDistortion(scaleReferenceObject);
+    let corrected = 0;
+    let skipped = 0;
+    const failures: string[] = [];
+
+    let distortion;
+    try {
+      distortion = calculateDistortionMatrix(this.loadedDraws[this.scaleReferenceIndex]);
+    } catch (e) {
+      console.error('Failed to calculate distortion matrix');
+    }
 
     for (const draw of this.loadedDraws) {
-      this.applyScaleToPositions(draw.geometryData.positions, distortion.scale);
-      if (draw.previewGeometryData.positions !== draw.geometryData.positions) {
-        this.applyScaleToPositions(draw.previewGeometryData.positions, distortion.scale);
+      if (draw.previewGeometryData.positions === draw.geometryData.positions) {
+        skipped++;
+        continue;
       }
+
+
+
+      // Corrects this draw's own posed geometry toward the proportions its
+      // own bind-pose (previewGeometryData) implies - rotation, anisotropic
+      // scale, and shear all come baked into this one matrix, so there's no
+      // separate rotation step to apply afterward (contrast the old
+      // scale-only approach, which needed a separate whole-scene rotation
+      // for that).
+      this.applyMatrixToPositions(draw.geometryData.positions, distortion.posedToNonPosed);
       draw.bounds = computeBounds(draw.geometryData.positions);
       draw.diagonal = boundsDiagonal(draw.bounds);
+      corrected++;
+    }
+
+    if (corrected === 0) {
+      this.setStatus(
+        failures.length > 0
+          ? `Distortion correction failed for all ${failures.length} eligible object(s) - first error: ${failures[0]}`
+          : "No objects have a separate posed mesh to correct - nothing to do.",
+      );
+      return;
     }
 
     let overall: Bounds = this.loadedDraws[0].bounds;
@@ -705,24 +748,23 @@ export class SceneViewerApp {
     const size = overall.max.clone().sub(overall.min);
     this.fixedScale = computeNormalizationScale(Math.max(size.x, size.y, size.z));
 
-    if (this.applyRotationCheckbox.checked) {
-      this.sceneRotation = distortion.posedToNonPosedRotation;
-    }
-
     this.rebuildVisibleScene();
-    this.setStatus(
-      `Applied distortion correction (scale ${distortion.scale.x.toFixed(3)}, ${distortion.scale.y.toFixed(3)}, ${distortion.scale.z.toFixed(3)})` +
-        `${this.applyRotationCheckbox.checked ? " and scene rotation" : ""} to ${this.loadedDraws.length} object(s).`,
-    );
+
+    const statusParts = [`Applied per-object distortion correction to ${corrected} object(s)`];
+    if (skipped > 0) statusParts.push(`${skipped} skipped (no separate posed mesh)`);
+    if (failures.length > 0) statusParts.push(`${failures.length} failed (see console)`);
+    this.setStatus(statusParts.join(", ") + ".");
   }
 
-  /** Multiplies every vertex in a flat, non-indexed positions array
-   * (x0,y0,z0,x1,y1,z1,...) by scale, in place. */
-  private applyScaleToPositions(positions: number[], scale: THREE.Vector3): void {
+  /** Applies a 4x4 affine transform to every vertex in a flat, non-indexed
+   * positions array (x0,y0,z0,x1,y1,z1,...), in place. */
+  private applyMatrixToPositions(positions: number[], matrix: THREE.Matrix4): void {
+    const v = new THREE.Vector3();
     for (let i = 0; i < positions.length; i += 3) {
-      positions[i] *= scale.x;
-      positions[i + 1] *= scale.y;
-      positions[i + 2] *= scale.z;
+      v.set(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(matrix);
+      positions[i] = v.x;
+      positions[i + 1] = v.y;
+      positions[i + 2] = v.z;
     }
   }
 

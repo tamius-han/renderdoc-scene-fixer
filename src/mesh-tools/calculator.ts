@@ -165,6 +165,146 @@ function matrix3ToQuaternion(m: THREE.Matrix3): THREE.Quaternion {
   return new THREE.Quaternion().setFromRotationMatrix(basis);
 }
 
+// ============ Matrix-based distortion (replaces bounding-box scale) ======
+// analyzeTransform() above only recovers a rotation (via Kabsch) plus a
+// single per-axis scale derived from comparing bounding-box sizes AFTER
+// that rotation. That scale is only correct if the true posed/non-posed
+// difference happens to be a plain axis-aligned stretch once the rotation
+// is undone - it can't represent shear, and it's sensitive to outlier
+// vertices skewing the box. Since posed/non-posed vertices are already in
+// 1:1 correspondence (same mesh, same vertex order, two different poses),
+// we can instead fit the actual best 3x3 linear map directly from that
+// correspondence via ordinary least squares (multivariate linear
+// regression) - this captures anisotropic scale, shear, and rotation
+// together in whatever combination actually explains the distortion,
+// rather than assuming it lines up with the bounding box's own axes. It
+// also needs no eigendecomposition/SVD: forming the two covariance
+// matrices below and inverting one of them (a plain closed-form 3x3
+// inverse - see THREE.Matrix3.invert()) is enough.
+
+export interface AffineDistortionResult {
+  /** Full affine transform (3x3 linear map + translation) that maps a POSED
+   * vertex position directly to its corresponding NON-POSED (bind-pose)
+   * position. Apply this to raw, uncentered posed vertex coordinates - e.g.
+   * via THREE.Vector3.applyMatrix4() per-vertex, or BufferGeometry's
+   * applyMatrix4() to bake it into the whole mesh - to "unpose" the posed
+   * geometry back to its bind-pose shape. */
+  posedToNonPosed: THREE.Matrix4;
+  /** Inverse of posedToNonPosed - maps a NON-POSED vertex to (approximately)
+   * the posed mesh's distorted shape. */
+  nonPosedToPosed: THREE.Matrix4;
+}
+
+/** Entry point mirroring calculateDistortion() above, but returning a full
+ * transformation matrix instead of separate scale/rotation factors. */
+export function calculateDistortionMatrix(scaleReferenceObject: {
+  geometryData: { positions: number[] };
+  previewGeometryData: { positions: number[] };
+}): AffineDistortionResult {
+  const posedVertices = toVector3Array(scaleReferenceObject.geometryData);
+  const nonPosedVertices = toVector3Array(scaleReferenceObject.previewGeometryData);
+
+  return analyzeTransformMatrix(nonPosedVertices, posedVertices);
+}
+
+/** Fits the 3x3 linear map L (plus translation) that best explains
+ * posed_i ~= L * nonPosed_i + t for every corresponding vertex pair, via
+ * ordinary least squares - the standard multivariate linear regression
+ * solution L = Cov(posed, nonPosed) * Cov(nonPosed, nonPosed)^-1, computed
+ * about each side's own centroid to isolate the translation (t) from the
+ * linear part (L). Unlike Kabsch, L is not constrained to be orthogonal, so
+ * it can represent shear and anisotropic scale directly instead of only
+ * rotation + a separate, cruder axis-scale estimate.
+ */
+function analyzeTransformMatrix(
+  nonPosedVertices: THREE.Vector3[],
+  posedVertices: THREE.Vector3[],
+): AffineDistortionResult {
+  if (nonPosedVertices.length === 0 || posedVertices.length === 0) {
+    throw new Error("calculateDistortionMatrix: empty geometry input");
+  }
+  if (nonPosedVertices.length !== posedVertices.length) {
+    // The fit assumes vertex i of one array corresponds to vertex i of the
+    // other (same mesh, same vertex order, different pose) - a mismatched
+    // count means that assumption doesn't hold and the fit would silently
+    // pair up unrelated vertices for the shorter array's length.
+    throw new Error(
+      "calculateDistortionMatrix: posed and non-posed vertex counts must match (vertex correspondence is assumed)",
+    );
+  }
+
+  const nonPosedCentroid = computeCentroid(nonPosedVertices);
+  const posedCentroid = computeCentroid(posedVertices);
+
+  const nonPosedCentered = nonPosedVertices.map((v) => v.clone().sub(nonPosedCentroid));
+  const posedCentered = posedVertices.map((v) => v.clone().sub(posedCentroid));
+
+  // computeCovariance(a, b)[r][c] = sum_i a_i[r] * b_i[c], i.e. A^T * B for
+  // A/B with rows a_i/b_i - see its doc comment above. The least-squares
+  // linear map minimizing sum_i || posed_i - L * nonPosed_i ||^2 is
+  // L = (Posed^T NonPosed) * (NonPosed^T NonPosed)^-1.
+  const nonPosedNonPosedCov = computeCovariance(nonPosedCentered, nonPosedCentered);
+  const posedNonPosedCov = computeCovariance(posedCentered, nonPosedCentered);
+
+  const nonPosedNonPosedCovInv = nonPosedNonPosedCov.clone().invert();
+  if (isZeroMatrix3(nonPosedNonPosedCovInv)) {
+    // THREE.Matrix3.invert() silently zeroes out a singular matrix rather
+    // than throwing - this happens if the non-posed vertices are coplanar,
+    // collinear, or coincident, which leaves no unique 3x3 map to solve for.
+    throw new Error(
+      "calculateDistortionMatrix: non-posed geometry is degenerate (coplanar/collinear/coincident vertices) - can't fit a unique 3x3 transform",
+    );
+  }
+
+  const nonPosedToPosedLinear = posedNonPosedCov.clone().multiply(nonPosedNonPosedCovInv);
+  const posedToNonPosedLinear = nonPosedToPosedLinear.clone().invert();
+  if (isZeroMatrix3(posedToNonPosedLinear)) {
+    throw new Error(
+      "calculateDistortionMatrix: fitted transform is singular (posed geometry collapses onto a plane/line) and can't be inverted",
+    );
+  }
+
+  const nonPosedToPosed = affineFromLinearAndTranslation(nonPosedToPosedLinear, nonPosedCentroid, posedCentroid);
+  const posedToNonPosed = affineFromLinearAndTranslation(posedToNonPosedLinear, posedCentroid, nonPosedCentroid);
+
+  console.log("mesh matrix results:", { posedToNonPosed, nonPosedToPosed });
+
+  return { posedToNonPosed, nonPosedToPosed };
+}
+
+/** Builds the 4x4 affine matrix implementing
+ * `to = linear * (from - fromCentroid) + toCentroid`
+ * - i.e. the linear map applied about fromCentroid's origin, then
+ * translated so that fromCentroid lands on toCentroid. */
+function affineFromLinearAndTranslation(
+  linear: THREE.Matrix3,
+  fromCentroid: THREE.Vector3,
+  toCentroid: THREE.Vector3,
+): THREE.Matrix4 {
+  const linear4 = matrix3ToMatrix4(linear);
+  const pre = new THREE.Matrix4().makeTranslation(-fromCentroid.x, -fromCentroid.y, -fromCentroid.z);
+  const post = new THREE.Matrix4().makeTranslation(toCentroid.x, toCentroid.y, toCentroid.z);
+  // Composition order matters: pre is applied to the input vector first,
+  // then linear4, then post - matrix multiplication applies right-to-left.
+  return post.multiply(linear4).multiply(pre);
+}
+
+/** Embeds a 3x3 linear map as the upper-left block of a 4x4 matrix with no
+ * translation, by reusing each column as-is (unlike matrix3ToQuaternion's
+ * use of makeBasis elsewhere in this file, the columns here are NOT
+ * assumed to be orthonormal - makeBasis itself doesn't require that, it
+ * just places the three vectors as columns). */
+function matrix3ToMatrix4(m: THREE.Matrix3): THREE.Matrix4 {
+  const xAxis = new THREE.Vector3().setFromMatrix3Column(m, 0);
+  const yAxis = new THREE.Vector3().setFromMatrix3Column(m, 1);
+  const zAxis = new THREE.Vector3().setFromMatrix3Column(m, 2);
+  return new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+}
+
+function isZeroMatrix3(m: THREE.Matrix3): boolean {
+  return m.elements.every((v) => v === 0);
+}
+
 // ============ Eigen decomposition for symmetric 3x3 matrices =============
 // Jacobi iteration - sufficient for small 3x3 numeric stability. Three.js
 // has no eigendecomposition/SVD utility, so this stays hand-rolled.
