@@ -16,6 +16,7 @@ import {
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
+import { calculateDistortion } from "./mesh-tools/calculator";
 
 // Selection outlines are rendered as a backface shell displaced in clip
 // space so the visible thickness stays at a literal 3 screen pixels.
@@ -72,6 +73,17 @@ export class SceneViewerApp {
    * 'v' (visible, default) or 'h' (manually hidden) - see
    * getVisibilityState(). */
   private manuallyHiddenIndices = new Set<number>();
+  /** Index into loadedDraws of the object marked as the scale reference for
+   * transform-correction recalculation (see setLandmark() /
+   * recalculateTransformCorrection()) - at most one object can hold this at
+   * a time. */
+  private scaleReferenceIndex: number | null = null;
+  /** Rotation applied to the whole scene's content group (not to individual
+   * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
+   * (filter/visibility changes tear down and recreate the content group).
+   * Only ever set by recalculateTransformCorrection() when "also apply
+   * rotation" is checked; identity otherwise. */
+  private sceneRotation = new THREE.Quaternion();
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
   /** Anchor point for shift-click range selection - the last index selected
@@ -94,6 +106,8 @@ export class SceneViewerApp {
   private passList = this.el("pass-list");
   private poseWarning = this.el("pose-warning");
   private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
+  private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
+  private applyRotationCheckbox = this.el<HTMLInputElement>("apply-rotation-checkbox");
   private resetCamBtn = this.el("reset-cam-btn");
   private recenterCamBtn = this.el("recenter-camera-btn");
   private statusBar = this.el("status-bar");
@@ -179,6 +193,7 @@ export class SceneViewerApp {
     });
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
+    this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
@@ -560,7 +575,8 @@ export class SceneViewerApp {
     // owns directly, not these app-level Points markers.
     this.clearSelectionVisuals();
     this.sceneManager.clear();
-    this.sceneManager.addContent(meshes, this.fixedScale);
+    const contentGroup = this.sceneManager.addContent(meshes, this.fixedScale);
+    contentGroup.quaternion.copy(this.sceneRotation);
     this.updateSelectionVisuals();
 
     const visibleCount = this.loadedDraws.length - excludedCount;
@@ -617,9 +633,69 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Not yet specified - left as a safe no-op for now. */
-  private setLandmark(_index: number): void {
-    // TODO: intentionally unimplemented.
+  /** Marks/unmarks the draw at index as the scale reference object. Only one
+   * object may be the scale reference at a time, so marking a new one
+   * replaces the previous one. */
+  private setLandmark(index: number): void {
+    if (this.isObjectHidden(index)) return;
+    this.scaleReferenceIndex = this.scaleReferenceIndex === index ? null : index;
+    this.renderObjectListState();
+  }
+
+  /** Runs the transform-correction recalculation for the object currently
+   * marked as the scale reference (see setLandmark()), then applies the
+   * resulting per-axis scale to EVERY loaded draw (including hidden ones -
+   * hiddenness only affects rendering/selection, not the underlying data).
+   * If "also apply rotation" is checked, the whole scene's content group
+   * (not individual objects) is additionally rotated by
+   * posedToNonPosedRotation. */
+  private recalculateTransformCorrection(): void {
+    if (this.scaleReferenceIndex === null) {
+      this.setStatus("Mark an object as the scale reference first (\u201cis ref\u201d button in the object list).");
+      return;
+    }
+    const scaleReferenceObject = this.loadedDraws[this.scaleReferenceIndex];
+    if (!scaleReferenceObject) {
+      this.scaleReferenceIndex = null;
+      this.renderObjectListState();
+      return;
+    }
+
+    const distortion = calculateDistortion(scaleReferenceObject);
+
+    for (const draw of this.loadedDraws) {
+      this.applyScaleToPositions(draw.geometryData.positions, distortion.scale);
+      if (draw.previewGeometryData.positions !== draw.geometryData.positions) {
+        this.applyScaleToPositions(draw.previewGeometryData.positions, distortion.scale);
+      }
+      draw.bounds = computeBounds(draw.geometryData.positions);
+      draw.diagonal = boundsDiagonal(draw.bounds);
+    }
+
+    let overall: Bounds = this.loadedDraws[0].bounds;
+    for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+    const size = overall.max.clone().sub(overall.min);
+    this.fixedScale = computeNormalizationScale(Math.max(size.x, size.y, size.z));
+
+    if (this.applyRotationCheckbox.checked) {
+      this.sceneRotation = distortion.posedToNonPosedRotation;
+    }
+
+    this.rebuildVisibleScene();
+    this.setStatus(
+      `Applied distortion correction (scale ${distortion.scale.x.toFixed(3)}, ${distortion.scale.y.toFixed(3)}, ${distortion.scale.z.toFixed(3)})` +
+        `${this.applyRotationCheckbox.checked ? " and scene rotation" : ""} to ${this.loadedDraws.length} object(s).`,
+    );
+  }
+
+  /** Multiplies every vertex in a flat, non-indexed positions array
+   * (x0,y0,z0,x1,y1,z1,...) by scale, in place. */
+  private applyScaleToPositions(positions: number[], scale: THREE.Vector3): void {
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i] *= scale.x;
+      positions[i + 1] *= scale.y;
+      positions[i + 2] *= scale.z;
+    }
   }
 
   private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {
@@ -1366,6 +1442,14 @@ export class SceneViewerApp {
         visBtn.textContent = state;
         visBtn.disabled = state === "f";
         visBtn.classList.toggle("state-hidden", state === "h");
+      }
+
+      const landmarkBtn = item.querySelector<HTMLButtonElement>('button[data-action="landmark"]');
+      if (landmarkBtn) {
+        const isScaleReference = this.scaleReferenceIndex === index;
+        landmarkBtn.textContent = isScaleReference ? "[x]" : "[ ]";
+        landmarkBtn.disabled = hidden;
+        landmarkBtn.classList.toggle("active", isScaleReference);
       }
     }
   }

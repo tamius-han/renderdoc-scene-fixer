@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "fast-triangle-triangle-intersection": "^1.0.7",
     "tailwindcss": "^4.3.3",
     "three": "^0.160.0"
   },
