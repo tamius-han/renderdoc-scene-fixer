@@ -16,7 +16,7 @@ import {
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
-import { calculateDistortionMatrix } from "./mesh-tools/calculator";
+import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -38,6 +38,15 @@ interface LoadedDraw {
   diagonal: number;
   meshPath: string | null;
   previewPath: string | null;
+  /** Pristine copy of the posed mesh's positions as originally loaded (a
+   * plain copy, never mutated) - null when this draw has no separate posed
+   * export (geometryData IS previewGeometryData, same array - see
+   * loadDraw()). Distortion correction always re-fits and re-applies from
+   * this copy rather than from draw.geometryData.positions, so
+   * recalculateTransformCorrection() can be re-run (e.g. after changing
+   * the up-axis/handedness option) without compounding a previous run's
+   * correction onto itself. */
+  originalPosedPositions: number[] | null;
 }
 
 export class SceneViewerApp {
@@ -86,11 +95,46 @@ export class SceneViewerApp {
   /** Rotation applied to the whole scene's content group (not to individual
    * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
    * (filter/visibility changes tear down and recreate the content group).
-   * No longer set by recalculateTransformCorrection(): per-object matrix
-   * correction bakes rotation directly into each object's own vertices, so
-   * there's no separate whole-scene rotation left to apply. Stays identity
-   * unless something else sets it. */
+   * Set once per reconstructScene() from the auto-detected world-up axis
+   * (see detectWorldUpAxis()) - NOT by recalculateTransformCorrection(),
+   * whose per-object matrix correction bakes only a shape (stretch/shear)
+   * fix directly into each object's own vertices and deliberately leaves
+   * orientation untouched (see posedToNonPosedInPlace in calculator.ts),
+   * relying on this already having made world space's up axis vertical. */
   private sceneRotation = new THREE.Quaternion();
+  /** World-space axis (in RAW, pre-sceneRotation coordinates - i.e. as
+   * draw.geometryData.positions are actually stored) that
+   * detectWorldUpAxis() concluded was most likely "up", set once per
+   * reconstructScene(). Used both to build sceneRotation and, when the "Up
+   * axis" selector is set to a specific axis instead of "auto", as the
+   * target that override is expressed relative to - see
+   * buildUpAxisAdjustment(). */
+  private worldUpAxis: "x" | "y" | "z" = "y";
+  /** True while the "Mark ground plane" tool is armed and collecting the
+   * next of its three clicks on the mesh surface - see
+   * startGroundPlaneTool()/handleGroundPlaneClick(). Left/right clicks in
+   * the viewport are routed to the tool instead of normal object
+   * selection while this is true (see handleSceneObjectPointer()). */
+  private groundPlaneToolActive = false;
+  /** Points placed so far by the ground-plane tool (0-3), in the SAME
+   * local (pre-scale, pre-sceneRotation) space as
+   * draw.geometryData.positions/bounds - i.e. the space addDotPair()'s
+   * callers already use for selection markers - so these stay correctly
+   * attached to the mesh regardless of the content group's current
+   * scale/rotation. Cleared on cancel, on completion, and on any fresh
+   * reconstruct. */
+  private groundPlanePoints: THREE.Vector3[] = [];
+  /** Cross + dotted-line markers currently shown by the ground-plane tool
+   * - tracked separately from selectionVisuals (a different, unrelated
+   * overlay system) so the two never interfere with each other. */
+  private groundPlaneVisuals: THREE.Object3D[] = [];
+  /** Rotation computed by the ground-plane tool from its three marked
+   * points the last time it completed (see finishGroundPlaneTool()) -
+   * null until that has happened at least once for the current scene.
+   * Selecting "Manual" in the "Up axis" dropdown applies this instead of
+   * the auto-detected worldUpAxis-to-Y rotation - see
+   * getActiveSceneRotation(). */
+  private manualUpRotation: THREE.Quaternion | null = null;
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
   /** Anchor point for shift-click range selection - the last index selected
@@ -138,7 +182,9 @@ export class SceneViewerApp {
   private poseWarning = this.el("pose-warning");
   private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
-  private applyRotationCheckbox = this.el<HTMLInputElement>("apply-rotation-checkbox");
+  private markGroundPlaneBtn = this.el<HTMLButtonElement>("mark-ground-plane-btn");
+  private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
+  private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
   private resetCamBtn = this.el("reset-cam-btn");
   private recenterCamBtn = this.el("recenter-camera-btn");
   private statusBar = this.el("status-bar");
@@ -226,6 +272,15 @@ export class SceneViewerApp {
 
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
+    this.upAxisSelect.addEventListener("change", () => this.applySceneRotation());
+    // The tool's own right-click handling (cancel + clear) happens in
+    // handleSceneObjectPointer() via pointerdown, which fires before the
+    // browser's native contextmenu event - this just stops that native
+    // menu from popping up over the viewport afterwards.
+    this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
+      if (this.groundPlaneToolActive) event.preventDefault();
+    });
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
@@ -410,6 +465,7 @@ export class SceneViewerApp {
       diagonal: boundsDiagonal(bounds),
       meshPath: meshRel,
       previewPath: previewRel,
+      originalPosedPositions: previewGeometryData !== geometryData ? geometryData.positions.slice() : null,
     });
 
     return "added";
@@ -454,6 +510,12 @@ export class SceneViewerApp {
 
     try {
       this.clearSelectionVisuals();
+      // A fresh reconstruct starts a genuinely new scene - any in-progress
+      // or previously-completed ground-plane marking belonged to the old
+      // one and no longer means anything against new geometry.
+      this.cancelGroundPlaneTool();
+      this.manualUpRotation = null;
+      if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
       this.sceneManager.clear();
       // Full reload: previous draws/materials/textures are genuinely done
       // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
@@ -536,15 +598,34 @@ export class SceneViewerApp {
 
       // Normalization scale is computed ONCE here, from every loaded draw
       // regardless of the size filter, and then held fixed - see
-      // computeNormalizationScale() and rebuildVisibleScene().
+      // computeNormalizationScale() and rebuildVisibleScene(). World-space
+      // up-axis detection piggybacks on the same combined bounding box -
+      // see detectWorldUpAxis().
       this.fixedScale = 1;
+      this.worldUpAxis = "y";
+      this.sceneRotation = new THREE.Quaternion();
       if (this.loadedDraws.length > 0) {
         let overall: Bounds = this.loadedDraws[0].bounds;
         for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
         const size = overall.max.clone().sub(overall.min);
         const maxDim = Math.max(size.x, size.y, size.z);
         this.fixedScale = computeNormalizationScale(maxDim);
-        console.log("[reconstruct] scene bounds", { min: overall.min, max: overall.max, size, scale: this.fixedScale });
+
+        this.worldUpAxis = this.detectWorldUpAxis(overall);
+        if (this.worldUpAxis !== "y") {
+          this.sceneRotation = new THREE.Quaternion().setFromUnitVectors(
+            SceneViewerApp.axisVector(this.worldUpAxis),
+            new THREE.Vector3(0, 1, 0),
+          );
+        }
+
+        console.log("[reconstruct] scene bounds", {
+          min: overall.min,
+          max: overall.max,
+          size,
+          scale: this.fixedScale,
+          worldUpAxis: this.worldUpAxis,
+        });
       }
 
       const problems: string[] = [];
@@ -606,9 +687,10 @@ export class SceneViewerApp {
     // rebuilt, and sceneManager.clear() only disposes the Mesh objects it
     // owns directly, not these app-level Points markers.
     this.clearSelectionVisuals();
+    this.clearGroundPlaneVisuals();
     this.sceneManager.clear();
     const contentGroup = this.sceneManager.addContent(meshes, this.fixedScale);
-    contentGroup.quaternion.copy(this.sceneRotation);
+    contentGroup.quaternion.copy(this.getActiveSceneRotation());
     this.updateSelectionVisuals();
 
     const visibleCount = this.loadedDraws.length - excludedCount;
@@ -674,6 +756,328 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
+  /** Best-effort heuristic for which world-space axis is "up": the axis
+   * with the SMALLEST extent across the whole scene's combined bounding
+   * box. Most captured scenes (game levels, rooms, even most single
+   * characters) span much further horizontally than vertically, so the
+   * flattest axis is usually vertical - this is a common heuristic for
+   * unlabeled geometry, but not a guarantee; it can guess wrong for e.g. a
+   * narrow hallway or a very flat/wide creature. There's no way to verify
+   * this from bare geometry alone - if it guesses wrong, override it with
+   * the "Up axis" selector next to Recalculate. */
+  private detectWorldUpAxis(bounds: Bounds): "x" | "y" | "z" {
+    const size = bounds.max.clone().sub(bounds.min);
+    if (size.x <= size.y && size.x <= size.z) return "x";
+    if (size.z <= size.x && size.z <= size.y) return "z";
+    return "y";
+  }
+
+  private static axisVector(axis: "x" | "y" | "z"): THREE.Vector3 {
+    if (axis === "x") return new THREE.Vector3(1, 0, 0);
+    if (axis === "z") return new THREE.Vector3(0, 0, 1);
+    return new THREE.Vector3(0, 1, 0);
+  }
+
+  /** Extra per-object rotation for the "Up axis" selector next to
+   * Recalculate, composed on TOP of posedToNonPosedInPlace's shape-only
+   * correction (see recalculateTransformCorrection()):
+   * - "auto": identity. this.sceneRotation (see reconstructScene()) already
+   *   rotates worldUpAxis to vertical for the WHOLE scene uniformly, and
+   *   posedToNonPosedInPlace never disturbs an object's orientation, so
+   *   nothing extra is needed here for objects to end up world-axis-up.
+   * - "x"/"y"/"z": rotates the CHOSEN axis to wherever worldUpAxis
+   *   currently points, rather than straight to three.js's Y. That's
+   *   deliberate: sceneRotation is still going to rotate worldUpAxis to Y
+   *   at render time regardless of this per-object override, so composing
+   *   "chosen -> worldUpAxis" here (instead of "chosen -> Y" directly)
+   *   means the two rotations chain into exactly "chosen -> worldUpAxis ->
+   *   Y" - the chosen axis ends up vertical in the final display without
+   *   fighting or double-applying sceneRotation.
+   * - "manual": identity, same as "auto" - the ground-plane tool's
+   *   rotation (this.manualUpRotation) already replaces the whole-scene
+   *   rotation directly (see getActiveSceneRotation()) rather than
+   *   composing with worldUpAxis the way a plain axis choice does, so
+   *   there's nothing extra to add per-object here either. */
+  private buildUpAxisAdjustment(mode: "auto" | "x" | "y" | "z" | "manual"): THREE.Quaternion {
+    if (mode === "auto" || mode === "manual") return new THREE.Quaternion();
+    return new THREE.Quaternion().setFromUnitVectors(
+      SceneViewerApp.axisVector(mode),
+      SceneViewerApp.axisVector(this.worldUpAxis),
+    );
+  }
+
+  /** Whichever rotation should currently sit on the content group: the
+   * ground-plane tool's marked rotation when "Up axis" is set to "Manual"
+   * and the tool has completed at least once for this scene (see
+   * manualUpRotation), otherwise the auto-detected worldUpAxis-to-Y
+   * rotation computed once per reconstruct (see reconstructScene()). */
+  private getActiveSceneRotation(): THREE.Quaternion {
+    if (this.upAxisSelect.value === "manual" && this.manualUpRotation) return this.manualUpRotation;
+    return this.sceneRotation;
+  }
+
+  /** Re-applies getActiveSceneRotation() to whatever's currently in the
+   * content group, if anything - called whenever that choice could have
+   * changed: the "Up axis" dropdown and the ground-plane tool completing a
+   * new manual rotation. A no-op before anything's been reconstructed. */
+  private applySceneRotation(): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+    group.quaternion.copy(this.getActiveSceneRotation());
+  }
+
+  /** Arms/disarms the "Mark ground plane" tool - see
+   * startGroundPlaneTool()/cancelGroundPlaneTool(). */
+  private toggleGroundPlaneTool(): void {
+    if (this.groundPlaneToolActive) this.cancelGroundPlaneTool();
+    else this.startGroundPlaneTool();
+  }
+
+  /** Arms the ground-plane tool: switches the viewport cursor to a
+   * crosshair and starts collecting the next 3 left-clicks on mesh surface
+   * (see handleSceneObjectPointer()/handleGroundPlaneClick()). Left-clicks
+   * elsewhere while armed are effectively no-ops (see raycastMeshSurface())
+   * rather than falling through to normal object selection. */
+  private startGroundPlaneTool(): void {
+    if (this.loadedDraws.length === 0) {
+      this.setStatus("Reconstruct a scene first.");
+      return;
+    }
+    this.groundPlaneToolActive = true;
+    this.groundPlanePoints = [];
+    this.clearGroundPlaneVisuals();
+    this.sceneManager.renderer.domElement.style.cursor = "crosshair";
+    this.markGroundPlaneBtn.classList.add("active");
+    this.setStatus("Mark ground plane: click 3 points on the mesh surface (right-click to cancel).");
+  }
+
+  /** Disarms the ground-plane tool and clears any points/markers placed so
+   * far without computing a rotation - used both for an explicit
+   * right-click cancel and for toggling the button off mid-placement.
+   * Harmless to call when the tool isn't active (e.g. from
+   * reconstructScene()'s per-reconstruct reset). */
+  private cancelGroundPlaneTool(): void {
+    this.groundPlaneToolActive = false;
+    this.groundPlanePoints = [];
+    this.clearGroundPlaneVisuals();
+    this.sceneManager.renderer.domElement.style.cursor = "";
+    this.markGroundPlaneBtn.classList.remove("active");
+  }
+
+  /** Raycasts the viewport at the given pointer event against mesh surface
+   * only (excluding selection-highlight and ground-plane-marker overlays,
+   * via the same userData-tag convention as pickDrawAtPointer()), returning
+   * the world-space hit point, or null if the ray missed everything. */
+  private raycastMeshSurface(event: PointerEvent): THREE.Vector3 | null {
+    const target = this.sceneManager.renderer.domElement;
+    const rect = target.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, this.sceneManager.camera);
+    const contentGroup = this.sceneManager.getContentGroup();
+    const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
+    const hits = raycaster
+      .intersectObjects(roots, true)
+      .filter((hit) => !hit.object.userData.isSelectionVisual && !hit.object.userData.isGroundPlaneVisual);
+    return hits.length > 0 ? hits[0].point.clone() : null;
+  }
+
+  /** Handles one left-click while the ground-plane tool is armed: raycasts
+   * for mesh surface under the cursor (ignored if it missed), records the
+   * point (converted to the content group's local space - see
+   * groundPlanePoints' doc comment), draws its cross marker and, from the
+   * second point on, a dotted line back to the previous one. The third
+   * point triggers finishGroundPlaneTool(). */
+  private handleGroundPlaneClick(event: PointerEvent): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    const worldHit = this.raycastMeshSurface(event);
+    if (!worldHit) return;
+
+    const local = group.worldToLocal(worldHit.clone());
+    this.groundPlanePoints.push(local);
+    this.addGroundPlaneCross(local);
+    if (this.groundPlanePoints.length >= 2) {
+      const previous = this.groundPlanePoints[this.groundPlanePoints.length - 2];
+      this.addGroundPlaneDottedLine(previous, local);
+    }
+    this.setStatus(`Mark ground plane: ${this.groundPlanePoints.length}/3 points placed (right-click to cancel).`);
+
+    if (this.groundPlanePoints.length === 3) this.finishGroundPlaneTool();
+  }
+
+  /** Called once the third point is placed: fits the plane through all
+   * three marked points, computes the rotation that makes that plane
+   * horizontal (its normal vertical), stores it as manualUpRotation,
+   * switches "Up axis" to "Manual" and applies the rotation immediately,
+   * then disarms the tool. The three crosses/dashes are left in place as a
+   * visual record of what was marked - they're cleared the next time the
+   * tool is (re)started or the scene is rebuilt. */
+  private finishGroundPlaneTool(): void {
+    const [p0, p1, p2] = this.groundPlanePoints;
+    const edgeA = p1.clone().sub(p0);
+    const edgeB = p2.clone().sub(p0);
+    const normal = edgeA.cross(edgeB);
+
+    if (normal.lengthSq() < 1e-12) {
+      this.setStatus("Mark ground plane: those three points are collinear - couldn't compute a plane. Try again.");
+      this.cancelGroundPlaneTool();
+      return;
+    }
+    normal.normalize();
+
+    // Keep whichever side is currently "up" up, rather than risking an
+    // arbitrary flip depending on the order the three points happened to
+    // be clicked in - compares against the LOCAL-space direction that
+    // currently renders as world-up.
+    const currentLocalUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.getActiveSceneRotation().clone().invert());
+    if (normal.dot(currentLocalUp) < 0) normal.negate();
+
+    this.manualUpRotation = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
+    this.upAxisSelect.value = "manual";
+
+    this.groundPlaneToolActive = false;
+    this.groundPlanePoints = [];
+    this.sceneManager.renderer.domElement.style.cursor = "";
+    this.markGroundPlaneBtn.classList.remove("active");
+
+    this.applySceneRotation();
+    this.setStatus("Ground plane marked - scene reoriented (Up axis: Manual).");
+  }
+
+  /** Marker/dash size for the ground-plane tool's dotted connector lines: a
+   * small fraction of the whole loaded scene's local-space (pre-scale)
+   * bounding diagonal - the same space groundPlanePoints live in - so
+   * dashes read at a sensible size regardless of how big or small the
+   * loaded scene is. (The cross markers themselves are fixed-pixel-size
+   * screen-space sprites - see addGroundPlaneCross() - so they don't need
+   * this.) */
+  private groundPlaneMarkerSize(): number {
+    if (this.loadedDraws.length === 0) return 1;
+    let overall: Bounds = this.loadedDraws[0].bounds;
+    for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+    return Math.max(boundsDiagonal(overall) * 0.015, 1e-6);
+  }
+
+  /** Lazily-built, shared texture for the ground-plane cross markers: a
+   * black-outlined orange "X" on a transparent background - built once and
+   * reused for every marker rather than regenerated per click. */
+  private static groundPlaneCrossTexture: THREE.Texture | null = null;
+
+  private static getGroundPlaneCrossTexture(): THREE.Texture {
+    if (SceneViewerApp.groundPlaneCrossTexture) return SceneViewerApp.groundPlaneCrossTexture;
+
+    const size = 64;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d")!;
+    const pad = size * 0.16;
+
+    const strokeX = (lineWidth: number, color: string) => {
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = color;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(pad, pad);
+      ctx.lineTo(size - pad, size - pad);
+      ctx.moveTo(size - pad, pad);
+      ctx.lineTo(pad, size - pad);
+      ctx.stroke();
+    };
+
+    // Black outline drawn first, thicker, with the orange "X" stroked
+    // narrower on top of it - same layered outline-underneath/fill-on-top
+    // approach as addDotPair()'s two-Points selection-dot marker pairs.
+    strokeX(size * 0.26, "#000000");
+    strokeX(size * 0.14, `#${SELECTION_COLOR.getHexString()}`);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    SceneViewerApp.groundPlaneCrossTexture = texture;
+    return texture;
+  }
+
+  /** Adds one black-outlined orange "X" marker at the given LOCAL position,
+   * as a single-point Points object using getGroundPlaneCrossTexture() as
+   * its sprite. Points are always screen-aligned billboards, so this
+   * always faces the camera "for free" with no per-frame work needed - and
+   * sizeAttenuation:false (literal pixel size via gl_PointSize, not scaled
+   * by distance) keeps it a constant, readable size regardless of how far
+   * the camera is, matching addDotPair()'s selection-dot convention.
+   * depthTest:false so it stays visible through occluding geometry, same
+   * as those dots. */
+  private addGroundPlaneCross(point: THREE.Vector3): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute([point.x, point.y, point.z], 3));
+    const material = new THREE.PointsMaterial({
+      map: SceneViewerApp.getGroundPlaneCrossTexture(),
+      size: 22,
+      sizeAttenuation: false,
+      transparent: true,
+      alphaTest: 0.4,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const cross = new THREE.Points(geometry, material);
+    cross.userData.isGroundPlaneVisual = true;
+    cross.renderOrder = 999;
+
+    group.add(cross);
+    this.groundPlaneVisuals.push(cross);
+  }
+
+  /** Adds a dotted line between two LOCAL points, connecting consecutive
+   * ground-plane markers. */
+  private addGroundPlaneDottedLine(from: THREE.Vector3, to: THREE.Vector3): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+    const dash = this.groundPlaneMarkerSize() * 0.6;
+
+    const geometry = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const material = new THREE.LineDashedMaterial({
+      color: SELECTION_COLOR,
+      dashSize: dash,
+      gapSize: dash,
+      depthTest: false,
+    });
+    const line = new THREE.Line(geometry, material);
+    line.computeLineDistances();
+    line.userData.isGroundPlaneVisual = true;
+    line.renderOrder = 999;
+
+    group.add(line);
+    this.groundPlaneVisuals.push(line);
+  }
+
+  /** Removes and disposes every currently-tracked ground-plane marker -
+   * mirrors clearSelectionVisuals()'s must-run-before-teardown handling,
+   * since these also live inside the content group. Never disposes the
+   * shared cross texture itself (see getGroundPlaneCrossTexture()) - only
+   * each marker's own geometry/material. Safe to call with nothing to
+   * clear. */
+  private clearGroundPlaneVisuals(): void {
+    const group = this.sceneManager.getContentGroup();
+    for (const obj of this.groundPlaneVisuals) {
+      group?.remove(obj);
+      if (obj instanceof THREE.Line || obj instanceof THREE.LineSegments || obj instanceof THREE.Points) {
+        obj.geometry.dispose();
+        const material = obj.material;
+        if (Array.isArray(material)) material.forEach((m) => m.dispose());
+        else material.dispose();
+      }
+    }
+    this.groundPlaneVisuals = [];
+  }
+
   /** Runs the matrix-based transform-correction fit independently for EVERY
    * loaded draw (including hidden ones - hiddenness only affects
    * rendering/selection, not the underlying data), rather than fitting one
@@ -686,49 +1090,74 @@ export class SceneViewerApp {
    * apply its own correction instead of assuming one object's distortion
    * speaks for the whole scene.
    *
-   * A draw with no separate posed export (geometryData and
-   * previewGeometryData are literally the same array - see loadDraw()) has
-   * no posed/non-posed pair to fit a distortion from, so it's skipped
-   * rather than fed a degenerate identity fit. A draw whose fit fails for
-   * another reason (mismatched vertex counts, degenerate/planar geometry -
-   * see calculateDistortionMatrix()) is also skipped, logged, and counted,
-   * rather than aborting correction for the rest of the scene. */
+   * Always re-fits from draw.originalPosedPositions (a pristine copy taken
+   * at load time - see loadDraw()) rather than from
+   * draw.geometryData.positions, and writes the result into a NEW array
+   * rather than mutating in place - so re-running this (e.g. after
+   * changing the Up axis / handedness option) starts fresh each time
+   * instead of compounding the previous run's correction onto itself.
+   *
+   * A draw with no separate posed export (originalPosedPositions is null -
+   * see loadDraw()) has no posed/non-posed pair to fit a distortion from,
+   * so it's skipped rather than fed a degenerate identity fit. A draw
+   * whose fit fails for another reason (mismatched vertex counts,
+   * degenerate/planar geometry - see calculateDistortionMatrix()) is also
+   * skipped, logged, and counted, rather than aborting correction for the
+   * rest of the scene. */
   private recalculateTransformCorrection(): void {
     if (this.loadedDraws.length === 0) {
       this.setStatus("Reconstruct a scene first.");
       return;
     }
     if (this.scaleReferenceIndex === null) {
-      this.setStatus("No scale reference object selected.");
       return;
     }
+
+    const handedness = this.handednessSelect.value as HandednessMode;
+    const upAxisMode = this.upAxisSelect.value as "auto" | "x" | "y" | "z" | "manual";
+    const upAxisAdjustment = this.buildUpAxisAdjustment(upAxisMode);
+    const upAxisAdjustment4 = new THREE.Matrix4().makeRotationFromQuaternion(upAxisAdjustment);
 
     let corrected = 0;
     let skipped = 0;
     const failures: string[] = [];
 
+    const referenceObject = this.loadedDraws[this.scaleReferenceIndex];
     let distortion;
     try {
-      distortion = calculateDistortionMatrix(this.loadedDraws[this.scaleReferenceIndex]);
+      distortion = calculateDistortionMatrix(
+        { geometryData: { positions: referenceObject.originalPosedPositions }, previewGeometryData: referenceObject.previewGeometryData },
+        { handedness },
+      );
     } catch (e) {
-      console.error('Failed to calculate distortion matrix');
+      // const label = `eid${draw.draw.eventId}`;
+      // failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+      // console.warn(`[recalculateTransformCorrection] skipping ${label}`, e);
+      // continue;
+      return;
     }
 
     for (const draw of this.loadedDraws) {
-      if (draw.previewGeometryData.positions === draw.geometryData.positions) {
+      if (draw.originalPosedPositions === null) {
         skipped++;
         continue;
       }
 
+      // Shape-only fix (posedToNonPosedInPlace) pivoted about this draw's
+      // own posed centroid, plus the "Up axis" override (also pivoted
+      // about that same centroid, applied after the shape fix) - see
+      // buildUpAxisAdjustment() for why composing it this way avoids
+      // fighting the whole-scene sceneRotation set up in reconstructScene().
+      const c = distortion.posedCentroid;
+      const pivotedUpAdjustment = new THREE.Matrix4()
+        .makeTranslation(c.x, c.y, c.z)
+        .multiply(upAxisAdjustment4)
+        .multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
+      const finalMatrix = pivotedUpAdjustment.multiply(distortion.posedToNonPosedInPlace);
 
-
-      // Corrects this draw's own posed geometry toward the proportions its
-      // own bind-pose (previewGeometryData) implies - rotation, anisotropic
-      // scale, and shear all come baked into this one matrix, so there's no
-      // separate rotation step to apply afterward (contrast the old
-      // scale-only approach, which needed a separate whole-scene rotation
-      // for that).
-      this.applyMatrixToPositions(draw.geometryData.positions, distortion.posedToNonPosed);
+      const correctedPositions = draw.originalPosedPositions.slice();
+      this.applyMatrixToPositions(correctedPositions, finalMatrix);
+      draw.geometryData.positions = correctedPositions;
       draw.bounds = computeBounds(draw.geometryData.positions);
       draw.diagonal = boundsDiagonal(draw.bounds);
       corrected++;
@@ -1284,6 +1713,11 @@ export class SceneViewerApp {
   }
 
   private handleSceneObjectPointer(event: PointerEvent): void {
+    if (this.groundPlaneToolActive) {
+      if (event.button === 2) this.cancelGroundPlaneTool();
+      else if (event.button === 0) this.handleGroundPlaneClick(event);
+      return;
+    }
     if (event.button === 1) return;
     const index = this.pickDrawAtPointer(event);
 
@@ -1613,7 +2047,14 @@ export class SceneViewerApp {
    * all", and depthTest:false/no other content in this scene means the
    * mask always covers a selected draw's FULL silhouette, regardless of
    * what's occluding it in the real scene - which is what makes the
-   * resulting outline visible through walls. */
+   * resulting outline visible through walls.
+   *
+   * Positions are added in the SAME local (pre-scale, pre-rotation) space
+   * as draw.geometryData.positions itself - outlineMaskGroup's own
+   * scale/rotation is what maps that into the real scene's space, and is
+   * kept in sync with contentGroup's on EVERY FRAME by
+   * renderSelectionOutlinePass(), not just here - see that method's doc
+   * comment for why a one-time sync isn't enough. */
   private rebuildSelectionOutlineMask(activeSelected: number[]): void {
     for (const child of [...this.outlineMaskGroup.children]) {
       this.outlineMaskGroup.remove(child);
@@ -1623,12 +2064,9 @@ export class SceneViewerApp {
       }
     }
 
-    // Matches contentGroup's own (always-uniform) scale, so the mask lines
-    // up pixel-for-pixel with the real, rendered geometry - see
-    // SceneManager.addContent().
-    const contentGroup = this.sceneManager.getContentGroup();
-    this.outlineMaskGroup.scale.setScalar(contentGroup?.scale.x ?? 1);
-
+    // Full transform (scale + rotation) sync happens every frame in
+    // renderSelectionOutlinePass() - see this method's doc comment - so
+    // nothing needs to be set on outlineMaskGroup here beyond its children.
     for (const index of activeSelected) {
       const { positions } = this.loadedDraws[index].geometryData;
       if (positions.length === 0) continue;
@@ -1654,9 +2092,28 @@ export class SceneViewerApp {
    * because the mask has to be re-projected from whatever the camera is
    * doing right now - an outline computed once and left as static mesh
    * geometry (the old approach) can only ever be exactly correct for one
-   * camera angle at a time. */
+   * camera angle at a time.
+   *
+   * Also re-syncs outlineMaskGroup's own scale/rotation from contentGroup
+   * every frame, for the same reason: contentGroup's transform can change
+   * (recalculating transform correction, switching "Up axis" - including
+   * to/from the ground-plane tool's "Manual" - or completing the
+   * ground-plane tool itself) at any time OTHER than a selection change,
+   * and none of those paths call rebuildSelectionOutlineMask(). Syncing
+   * only there (as this used to) meant the mask could silently render with
+   * a stale rotation and drift out of registration with the actual
+   * (already-rotated) mesh - syncing it here instead means the outline can
+   * never go stale regardless of which of those paths caused the change.
+   * (The ground-plane tool's own dot/cross markers don't need this fix -
+   * they're ordinary children of contentGroup itself, so they already pick
+   * up any transform change for free through the normal scene graph.) */
   private renderSelectionOutlinePass(): void {
     if (!this.outlineQuadMaterial || this.outlineMaskGroup.children.length === 0) return;
+
+    const contentGroup = this.sceneManager.getContentGroup();
+    this.outlineMaskGroup.scale.setScalar(contentGroup?.scale.x ?? 1);
+    this.outlineMaskGroup.quaternion.copy(contentGroup?.quaternion ?? new THREE.Quaternion());
+    this.outlineMaskGroup.position.copy(contentGroup?.position ?? new THREE.Vector3());
 
     const renderer = this.sceneManager.renderer;
     const size = new THREE.Vector2();

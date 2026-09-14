@@ -64,12 +64,27 @@
           </div>
 
           <div>
-            <label><input type="checkbox" id="apply-rotation-checkbox" /> Also apply rotation</label>
-          </div>
-          <div>
             Recalculate transform correction:
             <button id="recalculate-correction-btn">Recalculate</button>
-
+            <button id="mark-ground-plane-btn" title="Click 3 points on the mesh surface to define the ground plane">Mark ground plane</button>
+            <label>
+              Up axis:
+              <select id="up-axis-select">
+                <option value="auto" selected>Auto</option>
+                <option value="x">X</option>
+                <option value="y">Y</option>
+                <option value="z">Z</option>
+                <option value="manual">Manual</option>
+              </select>
+            </label>
+            <label>
+              Coordinate system handedness:
+              <select id="handedness-select">
+                <option value="auto" selected>World space (right-handed)</option>
+                <option value="left">Left-handed</option>
+                <option value="right">Right-handed</option>
+              </select>
+            </label>
           </div>
 
 
