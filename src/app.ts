@@ -1240,7 +1240,23 @@ export class SceneViewerApp {
 
     const bounds = computeBounds(sourceData.positions);
     const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
-    const size = bounds.max.clone().sub(bounds.min);
+    const rawSize = bounds.max.clone().sub(bounds.min);
+
+    // Non-posed preview copy: centered at the origin, then scaled down
+    // (never up) to fit inside a 100x100x100 cube if it doesn't already -
+    // applied as the mesh's own position/scale (not baked into the
+    // geometry) so it's purely a property of this preview render, not of
+    // sourceData itself. Object3D's local matrix scales geometry BEFORE
+    // translating by position, so position has to be -scale*center (not
+    // just -center) for the result to be "centered, then scaled" rather
+    // than "centered by an unscaled offset, then scaled off-center".
+    const PREVIEW_CUBE_SIZE = 100;
+    const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z);
+    const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
+    mesh.position.copy(center).multiplyScalar(-previewScale);
+    mesh.scale.setScalar(previewScale);
+
+    const size = rawSize.clone().multiplyScalar(previewScale);
     const radius = Math.max(size.length() * 0.5, 0.25);
     const targetFill = 0.875;
 
@@ -1261,7 +1277,6 @@ export class SceneViewerApp {
     let fitDistance = computeFitDistance(1);
 
     const modelRoot = new THREE.Group();
-    mesh.position.sub(center);
     modelRoot.add(mesh);
     scene.add(modelRoot);
 
@@ -1289,10 +1304,12 @@ export class SceneViewerApp {
     let currentDistance = fitDistance;
 
     const handlePointerDown = (event: PointerEvent) => {
-      // Middle mouse button only, matching the main viewport's Blender-
-      // style scheme (left/other buttons intentionally do nothing).
-      if (event.button !== 1) return;
-      event.preventDefault(); // stops the browser's middle-click autoscroll icon
+      // Left OR middle mouse button rotate - unlike the main viewport
+      // (left click there selects an object, middle orbits), there's
+      // nothing to select in this thumbnail, so both buttons are just
+      // "rotate" here.
+      if (event.button !== 0 && event.button !== 1) return;
+      event.preventDefault(); // stops the browser's middle-click autoscroll icon (and any drag/selection UI on left)
       pointerDown = true;
       lastX = event.clientX;
       lastY = event.clientY;
