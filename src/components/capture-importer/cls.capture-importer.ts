@@ -1,7 +1,18 @@
 import { collectFromDrop, collectFromInput, dirname, joinPath, VirtualFileSystem } from "../../filesystem";
 import { loadManifests, type LoadedManifests } from "../../manifest";
 import { UNIT_CONVERSION } from '../../util/const.unit-conversion';
+import template from './cls.capture-importer.html?raw';
 import { RenderPassList } from '../common/cmp.render-pass-list';
+import { guessIntelGPAImportTargetFromFilename, guessIntelGPAImportTargetsFromFilenames, identifyIntelGPAImport } from './intel-gpa-import-helpers';
+import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
+import { FileInfo } from '../../types/file-info.interface';
+
+enum ImportType {
+  Unknown = 0,
+  RenderDocExport = 1,
+  IntelGPAExportFull = 2,
+  IntelGPAExportPartial = 3,
+}
 
 export class CaptureImporter extends HTMLElement {
   constructor() {
@@ -27,70 +38,21 @@ export class CaptureImporter extends HTMLElement {
   private statusBar!: HTMLElement;
   private renderPassList!: RenderPassList;
 
+  private intelGPADropzones!: {
+    [key in IntelGPADropzone]: {
+      dropzone: HTMLElement;
+      input: HTMLInputElement;
+    }
+  }
 
-  private htmlTemplate: string = `
-    <div id="capture-importer-container" class="absolute left-0 top-0 !w-[100vw] h-[100dvh] bg-cool-800 z-100 flex flex-col items-center justify-center">
-
-      <div class="max-h-[90%] max-w-[90%] bg-brown-800 border border-warm-500 p-4">
-        <div class="
-          w-[calc(100%+2rem)] bg-warm-200 text-warm-800 smallcap
-          -mx-4 -mt-4 pt-1 pb-1 px-4
-        ">
-          Renderdoc scene explorer
-        </div>
-        <h2>Import scene</h2>
-        <div class="text-warm-50 max-w-[960px]">Export scene from RenderDoc with Renderdoc Scene Exporter extension, then drop the exported folder below in order to reconstruct it.</div>
-        <div class="text-warm-300 mt-4"> <> <a href="/help.html" target="_blank" class="!text-warm-300 underline">What is this?</a></div>
-
-        <div id="capture-importer-dropzone" class="h-[8rem] flex flex-col items-center justify-center border border-4 border-warm-500 border-dashed m-8 text-warm-300" >
-          <div><strong>Drop export folder</strong> or click to browse</div>
-          <div class="hint">expects manifest.json at the top level</div>
-        </div>
-        <input type="file" id="capture-importer-folder-input" webkitdirectory multiple />
-
-        <div
-          id="capture-importer-import-processing-section"
-          style="display: none"
-        >
-          <div class="flex flex-col lg:flex-row gap-4">
-
-            <render-pass-list class="render-pass-list lg:flex-1"></render-pass-list>
-
-            <!-- import options go inside div, because they aren't a separate component -->
-            <div class="lg:flex-1">
-              <h3>Import options</h3>
-              <div class="field w-full">
-                <div class="label">Capture unit size:</div>
-                <div class="flex flex-row gap-4">
-                  <input type="text" id="capture-importer-unit-size" class="text-right" min="0" value="1" />
-                  <select value="m" class="w-12 text-amber-300">
-                    ${Object.keys(UNIT_CONVERSION).map(unit => `<option value="${unit}">${unit}</option>`).join('')}
-                  </select>
-                </div>
-              </div>
-              <div class="field">
-                <div class="label">Hide largest % of objects:</div>
-                <div class="combined-slider-value">
-                  <input type="range" id="capture-importer-import-filter-size-slider" min="0" max="100" value="10" />
-                  <input type="text" id="capture-importer-import-filter-size-value" class="input-percent" min="0" max="100" value="10" />
-                </div>
-              </div>
-            </div>
-
-          </div>
-
-          <div id="capture-importer-pose-warning" class="warning" style="display: none"></div>
-
-
-
-          <button class="primary" id="capture-importer-reconstruct-btn">Reconstruct scene</button>
-        </div>
-      </div>
-      <div id="status-bar">Waiting for a folder&hellip;</div>
-  `;
+  private intelGPAImports: { [key in IntelGPADropzone]: File | null } = {
+    'landmark-source': null,
+    'landmark-output': null,
+    'scene': null
+  }
 
   connectedCallback() {
-    this.innerHTML = this.htmlTemplate;
+    this.innerHTML = template;
 
     this.registerElements();
     this.setupEvents();
@@ -101,15 +63,29 @@ export class CaptureImporter extends HTMLElement {
    */
   private registerElements() {
     this.dropzoneOuter = this.querySelector("#capture-importer-container") as HTMLElement;
+
+    // individual dropzones and file inputs
     this.dropzone = this.querySelector("#capture-importer-dropzone") as HTMLElement;
     this.folderInput = this.querySelector("#capture-importer-folder-input") as HTMLInputElement;
+    this.intelGPADropzones = {
+      'landmark-source': {
+        dropzone: this.querySelector("#capture-importer-landmark-source-obj") as HTMLElement,
+        input: this.querySelector("#capture-importer-landmark-source-input") as HTMLInputElement,
+      },
+      'landmark-output': {
+        dropzone: this.querySelector("#capture-importer-landmark-output-obj") as HTMLElement,
+        input: this.querySelector("#capture-importer-landmark-output-input") as HTMLInputElement,
+      },
+      'scene': {
+        dropzone: this.querySelector("#capture-importer-scene-obj") as HTMLElement,
+        input: this.querySelector("#capture-importer-scene-input") as HTMLInputElement,
+      }
+    }
 
     this.importProcessingSection = this.querySelector("#capture-importer-import-processing-section") as HTMLElement;
     this.renderPassList = this.querySelector(".render-pass-list") as RenderPassList;
 
-
     this.statusBar = this.querySelector("#status-bar") as HTMLElement;
-
 
     this.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
     this.recalculateCorrectionBtn = this.querySelector("#capture-importer-recalculate-correction-btn") as HTMLButtonElement;
