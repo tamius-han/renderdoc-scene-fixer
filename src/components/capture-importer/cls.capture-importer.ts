@@ -161,6 +161,13 @@ export class CaptureImporter extends HTMLElement {
       const entries = await collectFromDrop(e.dataTransfer);
       await this.handleFiles(entries);
     });
+    this.dropzone.addEventListener("click", () => this.folderInput.click());
+    this.folderInput.addEventListener("change", async (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (!files) return;
+      this.setStatus("[renderdoc folder input] Reading folder...");
+      await this.handleFiles(collectFromInput(files));
+    });
 
     for (const target in this.intelGPADropzones) {
       const dropzone = this.intelGPADropzones[target as IntelGPADropzone].dropzone;
@@ -181,6 +188,8 @@ export class CaptureImporter extends HTMLElement {
         const entries = await collectFromDrop(e.dataTransfer);
         await this.handleFiles(entries, target as IntelGPADropzone);
       });
+
+      dropzone.addEventListener('click', () => input.click());
 
       input.addEventListener('change', async (e) => {
         const files = (e.target as HTMLInputElement).files;
@@ -384,7 +393,7 @@ export class CaptureImporter extends HTMLElement {
   }
 
   /**
-   * Updates
+   * Highlights the relevant Intel GPA dropzone segments and updates it to show the file name
    * @param dropzone
    * @param file
    */
@@ -394,7 +403,16 @@ export class CaptureImporter extends HTMLElement {
   }
 
   /**
-   *
+   * Resets the relevant Intel GPA dropzone segment to its initial state
+   * @param dropzone
+   */
+  private resetIntelGPADropzone(dropzone: IntelGPADropzone) {
+    this.intelGPADropzones[dropzone].dropzone.innerHTML = `<div>Drop your <strong>${dropzone}.obj</strong> here</div>`;
+    this.intelGPADropzones[dropzone].dropzone.classList.remove('has-file');
+  }
+
+  /**
+   * Processes the Intel GPA import once all required files are present
    */
   private async processIntelGPAImport() {
     // bail out unless all files are present
@@ -415,12 +433,22 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
+
+    // reset all dropzones on successful import
+    for (const dropzone in this.intelGPADropzones) {
+      this.resetIntelGPADropzone(dropzone as IntelGPADropzone);
+    }
+
     alert('TODO: implement loading');
   }
 
+  /**
+   * Handles dropped files and builds render pass list
+   * @param entries
+   * @param target
+   * @returns
+   */
   private async handleFiles(entries: FileInfo[], target?: IntelGPADropzone | 'renderdoc-export'): Promise<void> {
-    console.log('handling files', entries, target);
-
     if (entries.length === 0) {
       return;
     }
@@ -457,7 +485,7 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
-
+    // if we came this far, this should be a Renderdoc Scene Exporter folder.
     const vfs = new VirtualFileSystem();
     for (const { path, file } of entries) vfs.set(path, file);
 
@@ -476,5 +504,9 @@ export class CaptureImporter extends HTMLElement {
       ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
       : "";
     this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.${failedNote}`);
+
+    for (const dropzone in this.intelGPADropzones) {
+      this.resetIntelGPADropzone(dropzone as IntelGPADropzone);
+    }
   }
 }
