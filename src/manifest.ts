@@ -63,3 +63,10 @@ export async function loadManifests(vfs: VirtualFileSystem): Promise<LoadedManif
   return { rootPrefix, root, passManifests, failedPassFolders };
 }
 
+/**
+ * Converts Intel GPA export into a format compatible with RenderDoc exports
+ * @param sceneObj
+ */
+export async function fakeManifest(sceneObj: File) {
+
+}

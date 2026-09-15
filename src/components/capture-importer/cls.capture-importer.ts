@@ -495,6 +495,8 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
+    console.log("Loaded manifests:", loaded);
+
     this.renderPassList.manifests = loaded;
     this.importProcessingSection.style.display = "block";
 
