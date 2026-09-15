@@ -104,8 +104,33 @@ export class CaptureImporter extends HTMLElement {
    * Sets up event listeners for all relevant HTML elements.
    */
   private setupEvents() {
-    this.dropzone.addEventListener("click", () => this.folderInput.click());
+    this.setupDropzones();
 
+    this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
+
+    // this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    // this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    // this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    // this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
+    // this.controlSchemeDropdown.addEventListener("change", () => {
+    //   const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
+    //   this.sceneManager.setControlScheme(scheme);
+    // });
+
+    // // Both filter control pairs (import screen + post-reconstruct viewport
+    // // menu) drive the same underlying value and stay in sync with each
+    // // other - see setHidePercent().
+    // for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
+    //   slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
+    // }
+    // for (const text of [this.importFilterValue, this.viewportFilterValue]) {
+    //   text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
+    // }
+
+    // this.setupObjectList();
+  }
+
+  private setupDropzones() {
     // For the time being, we don't change classes when mouse hovers over global dropzone
     // this.dropzoneOuter.addEventListener("dragover", (e) => {
     //   e.preventDefault();
@@ -120,12 +145,6 @@ export class CaptureImporter extends HTMLElement {
       this.setStatus("[global dropzone] Reading dropped files ...");
       const entries = await collectFromDrop(e.dataTransfer);
       await this.handleFiles(entries);
-    });
-    this.folderInput.addEventListener("change", async (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (!files) return;
-      this.setStatus("[renderdoc folder input] Reading folder...");
-      await this.handleFiles(collectFromInput(files));
     });
     this.dropzone.addEventListener("dragover", (e) => {
       e.stopPropagation();
@@ -170,28 +189,129 @@ export class CaptureImporter extends HTMLElement {
         await this.handleFiles(collectFromInput(files), target as IntelGPADropzone);
       });
     }
+  }
 
-    // this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
-    // this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    // this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
-    // this.controlSchemeDropdown.addEventListener("change", () => {
-    //   const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
-    //   this.sceneManager.setControlScheme(scheme);
-    // });
+  private async reconstructScene(): Promise<void> {
+  // if (!this.loaded) return;
+  //   const selected = this.getSelectedFolders();
+  //   if (selected.length === 0) {
+  //     // this.setStatus("Select at least one pass first.");
+  //     return;
+  //   }
 
-    // // Both filter control pairs (import screen + post-reconstruct viewport
-    // // menu) drive the same underlying value and stay in sync with each
-    // // other - see setHidePercent().
-    // for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
-    //   slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
-    // }
-    // for (const text of [this.importFilterValue, this.viewportFilterValue]) {
-    //   text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
-    // }
+  //   this.reconstructBtn.disabled = true;
+  //   this.emptyHint.style.display = "none";
+  //   this.hud.style.display = "block";
+  //   // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
-    // this.setupObjectList();
+  //   try {
+  //     this.clearSelectionVisuals();
+  //     this.sceneManager.clear();
+  //     // Full reload: previous draws/materials/textures are genuinely done
+  //     // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
+  //     // which reuses all of this.
+  //     for (const material of this.materialCache.values()) material.dispose();
+  //     this.materialCache.clear();
+  //     if (this.untexturedMaterial) {
+  //       this.untexturedMaterial.dispose();
+  //       this.untexturedMaterial = null;
+  //     }
+  //     this.textures.disposeAll();
+  //     this.loadedDraws = [];
+  //     this.objectList.innerHTML = "";
+  //     this.selectedIndices.clear();
+  //     this.hiddenDrawIndices.clear();
+  //     this.manuallyHiddenIndices.clear();
+  //     this.lastClickedIndex = null;
+
+  //     let noMeshPathCount = 0;
+  //     let meshNotFoundCount = 0;
+  //     let exceptionCount = 0;
+  //     let processed = 0;
+  //     let loggedMissingManifest = false;
+  //     let loggedMissingMesh = false;
+
+  //     for (const folder of selected) {
+  //       const manifest = this.loaded.passManifests[folder];
+  //       if (!manifest) {
+  //         if (!loggedMissingManifest) {
+  //           console.error(
+  //             `[reconstruct] No manifest data for pass "${folder}" - it either failed to load ` +
+  //               `(check the warning when the folder was dropped) or was never fetched.`,
+  //           );
+  //           loggedMissingManifest = true;
+  //         }
+  //         continue;
+  //       }
+  //       const passDir = joinPath(this.loaded.rootPrefix, folder);
+
+  //       for (const draw of manifest.draws) {
+  //         processed++;
+  //         try {
+  //           const outcome = await this.loadDraw(draw, passDir);
+  //           if (outcome === "no-mesh-path") {
+  //             noMeshPathCount++;
+  //           } else if (outcome === "mesh-not-found") {
+  //             meshNotFoundCount++;
+  //             if (!loggedMissingMesh) {
+  //               const meshRel = draw.posedMesh ? draw.posedMesh : draw.mesh;
+  //               console.error(
+  //                 `[reconstruct] Mesh file not found for eid${draw.eventId}: tried "${joinPath(passDir, meshRel ?? "")}". ` +
+  //                   `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
+  //               );
+  //               loggedMissingMesh = true;
+  //             }
+  //           } else {
+  //             // Global index into loadedDraws (loadDraw() just pushed this
+  //             // draw onto it) - NOT the per-pass manifest index, which
+  //             // would collide across multiple selected passes since each
+  //             // pass's manifest.draws restarts at 0.
+  //             const globalIndex = this.loadedDraws.length - 1;
+  //             const loadedDraw = this.loadedDraws[globalIndex];
+  //             const stats = {
+  //               vertices: Math.max(0, loadedDraw.geometryData.positions.length / 3),
+  //               faces: Math.max(0, loadedDraw.geometryData.positions.length / 9),
+  //               size: loadedDraw.diagonal,
+  //             };
+  //             this.objectList.appendChild(this.createDrawItem(draw, globalIndex, stats));
+  //           }
+  //         } catch (e) {
+  //           exceptionCount++;
+  //           console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
+  //         }
+  //         if (processed % 50 === 0) {
+  //           this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
+  //           await new Promise((resolve) => setTimeout(resolve, 0));
+  //         }
+  //       }
+  //     }
+
+  //     // Normalization scale is computed ONCE here, from every loaded draw
+  //     // regardless of the size filter, and then held fixed - see
+  //     // computeNormalizationScale() and rebuildVisibleScene().
+  //     this.fixedScale = 1;
+  //     if (this.loadedDraws.length > 0) {
+  //       let overall: Bounds = this.loadedDraws[0].bounds;
+  //       for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+  //       const size = overall.max.clone().sub(overall.min);
+  //       const maxDim = Math.max(size.x, size.y, size.z);
+  //       this.fixedScale = computeNormalizationScale(maxDim);
+  //       console.log("[reconstruct] scene bounds", { min: overall.min, max: overall.max, size, scale: this.fixedScale });
+  //     }
+
+  //     const problems: string[] = [];
+  //     if (meshNotFoundCount) problems.push(`${meshNotFoundCount} mesh file(s) not found`);
+  //     if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
+  //     if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
+  //     this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
+
+  //     this.rebuildVisibleScene();
+  //   } catch (e) {
+  //     console.error("[reconstruct] Reconstruction failed", e);
+  //     this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
+  //   } finally {
+  //     this.reconstructBtn.disabled = false;
+  //   }
   }
 
   private setStatus(message: string): void {
