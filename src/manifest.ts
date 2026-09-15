@@ -1,5 +1,6 @@
 import { dirname, joinPath, VirtualFileSystem } from "./filesystem";
-import type { PassManifest, RootManifest } from "./types";
+import { splitObj } from "./parsers/obj";
+import type { DrawEntry, ParsedOBJ, PassIndexEntry, PassManifest, RootManifest } from "./types";
 
 export interface LoadedManifests {
   /** Folder (relative to the dropped root) that manifest.json was found in -
@@ -63,10 +64,101 @@ export async function loadManifests(vfs: VirtualFileSystem): Promise<LoadedManif
   return { rootPrefix, root, passManifests, failedPassFolders };
 }
 
+export interface FakeManifestResult {
+  manifests: LoadedManifests;
+  /** The generated part_N.obj files the fake manifest's draws point at -
+   * there's no real capture folder backing them, so they can't be read
+   * from any vfs the caller already has. */
+  vfs: VirtualFileSystem;
+}
+
+/** Computes a unit face normal from a triangle's three corner positions
+ * (right-hand rule). Falls back to +Z for a degenerate (zero-area)
+ * triangle, the same default objToGeometryArrays uses for a missing
+ * normal. */
+function computeFlatNormal(
+  a: [number, number, number],
+  b: [number, number, number],
+  c: [number, number, number],
+): [number, number, number] {
+  const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+  const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+  const nx = uy * vz - uz * vy;
+  const ny = uz * vx - ux * vz;
+  const nz = ux * vy - uy * vx;
+  const len = Math.hypot(nx, ny, nz);
+  return len > 1e-12 ? [nx / len, ny / len, nz / len] : [0, 0, 1];
+}
+
+/** Serializes one split-off part back to OBJ text for the fake manifest's
+ * draws. Every face gets its own `vn`, shared by all 3 of its corners, so
+ * the part reads as flat/faceted rather than smoothed. There are no `vt`s
+ * and no `mtllib` - these parts have no UVs or material, so the viewer's
+ * normal untextured-material fallback (flat grey) applies to them. */
+function partToFlatShadedOBJText(part: ParsedOBJ): string {
+  const vLines = part.positions.map(([x, y, z]) => `v ${x} ${y} ${z}`);
+  const vnLines: string[] = [];
+  const fLines: string[] = [];
+
+  for (const face of part.faces) {
+    const [a, b, c] = face.map((corner) => part.positions[corner.v - 1]);
+    const normal = computeFlatNormal(a, b, c);
+    vnLines.push(`vn ${normal[0]} ${normal[1]} ${normal[2]}`);
+    const n = vnLines.length;
+    fLines.push(`f ${face.map((corner) => `${corner.v}//${n}`).join(" ")}`);
+  }
+
+  return `${[...vLines, ...vnLines, ...fLines].join("\n")}\n`;
+}
+
 /**
- * Converts Intel GPA export into a format compatible with RenderDoc exports
+ * Converts Intel GPA export into a format compatible with RenderDoc exports.
+ *
+ * The dropped scene .obj is split into its loose parts (see splitObj) and
+ * each part becomes one "draw" of a single synthetic pass, so the rest of
+ * the viewer - built around RenderDoc's pass/manifest/draw shape - can load
+ * an Intel GPA scene without any special-casing. None of the parts carry a
+ * material or texture, so each is written out flat-shaded (one normal per
+ * face) and left without a `mtllib`, which is what makes the viewer fall
+ * back to its plain grey untextured material for them.
  * @param sceneObj
  */
-export async function fakeManifest(sceneObj: File) {
+export async function fakeManifest(sceneObj: File): Promise<FakeManifestResult> {
+  const text = await sceneObj.text();
+  const parts = splitObj(text);
 
+  const passFolder = "intel-gpa-scene";
+  const vfs = new VirtualFileSystem();
+
+  const draws: DrawEntry[] = parts.map((part, i) => {
+    const meshFile = `part_${i}.obj`;
+    vfs.set(joinPath(passFolder, meshFile), new File([partToFlatShadedOBJText(part)], meshFile, { type: "text/plain" }));
+
+    return {
+      eventId: i,
+      name: `${sceneObj.name} part ${i}`,
+      mesh: meshFile,
+      posedMesh: null,
+      textures: [],
+    };
+  });
+
+  const passIndex: PassIndexEntry = {
+    folder: passFolder,
+    index: 0,
+    // No real pass roles to guess from, but marking it "presented" makes
+    // the (only) pass auto-selected in the render pass list UI.
+    guessedRole: "presented",
+    colorTargets: [],
+    depthTarget: 0,
+    drawCount: draws.length,
+  };
+
+  const root: RootManifest = { passes: [passIndex] };
+  const passManifests: Record<string, PassManifest> = { [passFolder]: { draws } };
+
+  return {
+    manifests: { rootPrefix: "", root, passManifests, failedPassFolders: [] },
+    vfs,
+  };
 }
