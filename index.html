@@ -87,42 +87,63 @@
         </div>
 
         <div id="viewport" class="h-full w-full relative">
-          <div class="absolute top-0 left-0 z-10 p-1 w-full">
-            <div class="flex flex-row gap-2 bg-brown-800/75 px-4 py-2">
+          <div class="tool-menu-overlay">
+            <div class="tools">
               <button id="select-volume-btn">Select volume</button>
               &middot;
               <button id="fix-distortion-btn">Fix distortion</button>
               &middot;
               <button id="select-ground-plane-btn">Select ground plane</button>
               &middot;
-              <button id="set-up-axis-btn">Set up axis</button>
+              <span class="hidden">
+                <button id="set-up-axis-btn">Set up axis</button>
+                &middot;
+              </span>
+              <button id="mirror-scene-btn">Mirror</button>
               &middot;
-              <button id="mirror-btn">Mirror</button>
+              <button id="show-resources-panel-button">Show resource panel</button>
+              <button id="hide-resources-panel-button" class="hidden">Hide resource panel</button>
               &middot;
               <button id="reset-camera-btn">Reset camera</button>
             </div>
 
-            <div id="select-volume-submenu" class="mt-2">
-              <button id="select-sphere-btn" class="ghost" title="Sphere select: click the mesh to place a sphere">O</button>
-              <button id="select-box-btn"    class="ghost" title="Box select: click the mesh to place a box">[]</button>
+            <div id="select-by-volume-submenu" class="submenu hidden">
+              <div class="flex flex-row gap-2">
+                <div class="text-warm-300">Selection type:</div>
+                <button id="select-by-volume-sphere-btn" class="option" title="Sphere select: click the mesh to place a sphere">O</button>
+                <button id="select-by-volume-box-btn"    class="option" title="Box select: click the mesh to place a box">[]</button>
+
+                <div class="text-warm-300">Select objects:</div>
+                <button id="select-by-volume-inside"  class="option">Fully</button>
+                <button id="select-by-volume-outside" class="option">Partially</button>
+                <div class="text-warm-300">inside shape</div>
+              </div>
+
+              <div class="flex flex-row gap-2 mt-2">
+                <button id="select-by-volume_replace" class="ghost">Replace selection</button>
+                <button id="select-by-volume_add"     class="ghost">Add to selection</button>
+                <button id="select-by-volume_remove"  class="ghost">Remove from selection</button>
+                <button id="select-by-volume_cancel"  class="ghost">Cancel</button>
+              </div>
+
             </div>
 
-            <div id="fix-distortion-submenu" class="mt-2">
+            <div id="select-landmark-submenu" class="submenu hidden">
               <div class="flex flex-row">
-                <div id="fix-distortion-submenu_no-selection">
+                <div id="select-landmark-submenu_no-selection">
                   Select a landmark to calculate distortion.
-                  <small>
+                  <small class="opacity-50">
                     <br/>
                     Your landmark should be an object that is not rigged or otherwise animated in the game.<br/>
                     Landmark should also appear the same as it does in the game when viewed from resource preview panel (different rotations are ok).
                   </small>
                 </div>
-                <button id="fix-distortion-apply"  class="ghost hidden">Apply</button>
-                <button id="fix-distortion-cancel" class="ghost">Cancel</button>
+                <button id="select-landmark-apply"  class="ghost hidden">Apply</button>
+                <button id="select-landmark-cancel" class="ghost">Cancel</button>
               </div>
             </div>
 
-            <div id="select-ground-plane-submenu" class="mt-2">
+            <div id="select-ground-plane-submenu" class="submenu hidden">
               <div id="select-ground-plane_incomplete-selection">
                 Select three points to define the ground (horizontal) plane.
               </div>
@@ -148,7 +169,6 @@
             <div id="control-options-menu">
               <div class="field">
                 <div id="fly-mode-label"></div>
-
               </div>
             </div>
             <div id="select-options-menu"></div>

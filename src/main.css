@@ -111,6 +111,15 @@ button {
       @apply border-b-2 border-amber-300 text-amber-100;
     }
   }
+
+  &.option {
+    @apply text-amber-200 hover:text-amber-100 bg-brown-950 hover:bg-brown-500 border border-brown-700 px-4;
+
+    &.active {
+      @apply bg-warm-500 border-b-amber-300;
+    }
+
+  }
 }
 
 p {
@@ -571,3 +580,20 @@ input[type="file"] { display: none; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 .overlay-backdrop-blur { backdrop-filter: blur(1rem); }
+
+.tool-menu-overlay {
+  @apply absolute top-0 left-0 z-10 p-4 w-full;
+
+  .tools {
+    @apply flex flex-row gap-2 bg-brown-900/90 px-4 py-2;
+
+    button {
+      @apply text-amber-200 hover:text-amber-100;
+    }
+  }
+
+  .submenu {
+    @apply mt-2 py-2 px-4 bg-brown-900/90 text-warm-300;
+  }
+}
+

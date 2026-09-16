@@ -20,7 +20,6 @@ import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
 import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
-import { ObjectsSidebar } from './components/objects-sidebar/cmp.objects-sidebar';
 import { Overlay } from './components/common/overlay/cmp.overlay';
 import { Config } from './config/cls.config';
 
@@ -220,6 +219,36 @@ export class SceneViewerApp {
       fixExport: this.el("menu-fix-export"),
     },
 
+    toolsMenu: {
+      selectVolumeBtn: this.el("select-volume-btn"),
+      fixDistortionBtn: this.el("fix-distortion-btn"),
+      selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
+      setUpAxisBtn: this.el("set-up-axis-btn"),
+      mirrorBtn: this.el("mirror-scene-btn"),
+      resetCameraBtn: this.el("reset-camera-btn"),
+      showResourcesPanelBtn: this.el("show-resources-panel-button"),
+      hideResourcesPanelBtn: this.el("hide-resources-panel-button"),
+
+      selectVolumeSubmenu: {
+        menu: this.el("select-by-volume-submenu"),
+        selectSphereBtn: this.el("select-by-volume-sphere-btn"),
+        selectBoxBtn: this.el("select-by-volume-box-btn"),
+        selectInsideBtn: this.el("select-by-volume-inside"),
+        selectOutsideBtn: this.el("select-by-volume-outside"),
+        selectReplaceBtn: this.el("select-by-volume_replace"),
+        selectAddBtn: this.el("select-by-volume_add"),
+        selectRemoveBtn: this.el("select-by-volume_remove"),
+        selectCancelBtn: this.el("select-by-volume_cancel"),
+      },
+
+      selectLandmarkSubmenu: {
+        menu: this.el("select-landmark-submenu"),
+        hint: this.el("select-landmark-submenu_no-selection"),
+        selectLandmarkApplyBtn: this.el("select-landmark-apply"),
+        selectLandmarkCancelBtn: this.el("select-landmark-cancel"),
+      }
+    },
+
     captureImporter: this.el<CaptureImporter>("capture-importer"),
     loadingScreen: this.el<LoadingScreen>("loading-screen"),
     controlsOverlay: this.el<Overlay>("controls-overlay"),
@@ -229,8 +258,6 @@ export class SceneViewerApp {
 
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
   private markGroundPlaneBtn = this.el<HTMLButtonElement>("mark-ground-plane-btn");
-  private selectSphereBtn = this.el<HTMLButtonElement>("select-sphere-btn");
-  private selectBoxBtn = this.el<HTMLButtonElement>("select-box-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
@@ -279,6 +306,7 @@ export class SceneViewerApp {
       console.warn('Control scheme change called from scene manager!', scheme);
     });
     this.setupMenu();
+    this.setupToolsMenu();
     this.wireEvents();
   }
 
@@ -298,6 +326,7 @@ export class SceneViewerApp {
 
   }
 
+
   private setupMenu() {
     this.elements.menu.importScene.addEventListener('click', () => {
       this.elements.captureImporter.classList.remove('hidden');
@@ -316,6 +345,68 @@ export class SceneViewerApp {
     });
   }
 
+  private setupToolsMenu() {
+    // setup top level
+    {
+      this.elements.toolsMenu.selectVolumeBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        if (Config.sessionConfig.tools.activeTool !== 'select-by-volume') {
+          Config.sessionConfig.tools.activeTool = 'select-by-volume';
+          this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.remove('hidden');
+          this.toggleVolumeSelectTool(true);
+        } else {
+          this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.add('hidden');
+          Config.sessionConfig.tools.activeTool = null;
+        }
+      });
+      this.elements.toolsMenu.fixDistortionBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        if (Config.sessionConfig.tools.activeTool !== 'select-landmark') {
+          Config.sessionConfig.tools.activeTool = 'select-landmark';
+          this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.remove('hidden');
+        } else {
+          this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add('hidden');
+          Config.sessionConfig.tools.activeTool = null;
+        }
+      });
+      // TODO: merge in ground plane select button
+      this.elements.toolsMenu.setUpAxisBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        // we don't have 'select up axis' submenu yet
+        // this.elements.toolsMenu.setUpAxisSubmenu.menu.classList.remove('hidden');
+      });
+      this.elements.toolsMenu.mirrorBtn.addEventListener('click', () => {
+        // mirror scene doesn't need to hide tool submenus or cancel tools
+        this.mirrorSceneAlongX();
+      });
+      this.elements.toolsMenu.resetCameraBtn.addEventListener('click', () => {
+        // this also doesn't need to hide or cancel any tools
+        this.sceneManager.frameOnScene();
+      });
+
+      this.elements.toolsMenu.showResourcesPanelBtn.addEventListener('click', () => {
+        this.toggleResourcePanel(true);
+      });
+      this.elements.toolsMenu.hideResourcesPanelBtn.addEventListener('click', () => {
+        this.toggleResourcePanel(false);
+      });
+
+      this.restoreResourcePanel();
+    }
+
+    // setup submenu: select volume
+    {
+      this.elements.toolsMenu.selectVolumeSubmenu.selectSphereBtn.addEventListener("click", () => this.setVolumeSelectTool("sphere"));
+      this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.addEventListener("click", () => this.setVolumeSelectTool("box"));
+
+      this.elements.toolsMenu.selectVolumeSubmenu.selectInsideBtn.addEventListener("click", () => this.setVolumeSelectMode("inside"));
+      this.elements.toolsMenu.selectVolumeSubmenu.selectOutsideBtn.addEventListener("click", () => this.setVolumeSelectMode("outside"));
+    }
+  }
+
   private wireEvents(): void {
     this.elements.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
       console.log('received reconstruct-scene:', e);
@@ -325,8 +416,7 @@ export class SceneViewerApp {
 
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
     this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
-    this.selectSphereBtn.addEventListener("click", () => this.toggleSelectAreaTool("sphere"));
-    this.selectBoxBtn.addEventListener("click", () => this.toggleSelectAreaTool("box"));
+
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
     // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
@@ -355,6 +445,47 @@ export class SceneViewerApp {
 
     this.setupObjectList();
   }
+
+  //#region tools
+  private hideAllToolSubmenus() {
+    this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.add("hidden");
+    this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add("hidden");
+  }
+  private cancelAllTools() {
+    this.cancelVolumeSelectTool();
+
+  }
+  /**
+   * Toggles visibility of resource panel.
+   * @param show whether to show or to hide the resource panel
+   */
+  private toggleResourcePanel(show: boolean, noSaveState?: boolean) {
+    if (show) {
+      // TODO: Show the resource panel
+    } else {
+      // TODO: Hide the resource panel
+    }
+
+    if (!noSaveState) {
+      if (show) {
+        this.elements.toolsMenu.showResourcesPanelBtn.classList.add('hidden');
+        this.elements.toolsMenu.hideResourcesPanelBtn.classList.remove('hidden');
+        // TODO: Show the resource panel
+      } else {
+        this.elements.toolsMenu.hideResourcesPanelBtn.classList.add('hidden');
+        this.elements.toolsMenu.showResourcesPanelBtn.classList.remove('hidden');
+        // TODO: Hide the resource panel
+      }
+
+      Config.sessionConfig.resourcesPanel.visible = show;
+    }
+  }
+
+  private restoreResourcePanel() {
+    this.toggleResourcePanel(Config.sessionConfig.resourcesPanel.visible);
+  }
+
+  //#endregion
 
   private setHidePercent(value: number): void {
     const clamped = Math.min(100, Math.max(0, Math.round(Number.isFinite(value) ? value : 0)));
@@ -517,7 +648,7 @@ export class SceneViewerApp {
       this.cancelGroundPlaneTool();
       this.manualUpRotation = null;
       if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
-      this.cancelSelectAreaTool();
+      this.cancelVolumeSelectTool();
       this.clearSelectAreaShape();
       this.sceneManager.clear();
       // Full reload: previous draws/materials/textures are genuinely done
@@ -787,6 +918,13 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
+  /**
+   * Mirrors the entire scene along the X axis.
+   */
+  private mirrorSceneAlongX(): {
+
+  }
+
   /** Best-effort heuristic for which world-space axis is "up": the axis
    * with the SMALLEST extent across the whole scene's combined bounding
    * box. Most captured scenes (game levels, rooms, even most single
@@ -874,7 +1012,7 @@ export class SceneViewerApp {
       this.setStatus("Reconstruct a scene first.");
       return;
     }
-    this.cancelSelectAreaTool(); // mutually exclusive with the select-area tools
+    this.cancelVolumeSelectTool(); // mutually exclusive with the select-area tools
     this.groundPlaneToolActive = true;
     this.groundPlanePoints = [];
     this.clearGroundPlaneVisuals();
@@ -1160,9 +1298,32 @@ export class SceneViewerApp {
   /** Arms/disarms one of the select-area tools - see
    * startSelectAreaTool()/cancelSelectAreaTool(). Clicking the currently-
    * armed tool's own button again disarms it. */
-  private toggleSelectAreaTool(kind: "sphere" | "box"): void {
-    if (this.selectAreaToolActive === kind) this.cancelSelectAreaTool();
-    else this.startSelectAreaTool(kind);
+  private toggleVolumeSelectTool(enable?: boolean): void {
+    if (!enable) {
+      this.cancelVolumeSelectTool();
+    } else {
+      this.startSelectAreaTool(Config.sessionConfig.tools.selectAreaTool);
+    }
+  }
+
+  private setVolumeSelectTool(kind: "sphere" | "box"): void {
+    if (this.selectAreaToolActive === kind) {
+      return;
+    }
+
+    Config.sessionConfig.tools.selectAreaTool = kind;
+    this.startSelectAreaTool(kind);
+  }
+
+  private setVolumeSelectMode(mode: "inside" | "outside"): void {
+    Config.sessionConfig.tools.selectAreaMode = mode;
+    if (mode === "inside") {
+      this.elements.toolsMenu.selectVolumeSubmenu.selectInsideBtn.classList.add("active");
+      this.elements.toolsMenu.selectVolumeSubmenu.selectOutsideBtn.classList.remove("active");
+    } else {
+      this.elements.toolsMenu.selectVolumeSubmenu.selectInsideBtn.classList.remove("active");
+      this.elements.toolsMenu.selectVolumeSubmenu.selectOutsideBtn.classList.add("active");
+    }
   }
 
   /** Arms the given select-area tool: swaps the viewport cursor for that
@@ -1177,8 +1338,8 @@ export class SceneViewerApp {
     this.cancelGroundPlaneTool(); // mutually exclusive with the ground-plane tool
     this.selectAreaToolActive = kind;
     this.sceneManager.renderer.domElement.style.cursor = SceneViewerApp.SELECT_AREA_CURSORS[kind];
-    this.selectSphereBtn.classList.toggle("active", kind === "sphere");
-    this.selectBoxBtn.classList.toggle("active", kind === "box");
+    this.elements.toolsMenu.selectVolumeSubmenu.selectSphereBtn.classList.toggle("active", kind === "sphere");
+    this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.toggle("active", kind === "box");
     const shapeName = kind === "sphere" ? "Sphere" : "Box";
     this.setStatus(`${shapeName} select: click the mesh surface to place it (right-click to cancel).`);
   }
@@ -1187,11 +1348,11 @@ export class SceneViewerApp {
    * anything - restores the normal cursor. Does NOT remove an
    * already-placed shape (see clearSelectAreaShape() for that); harmless to
    * call when no tool is active. */
-  private cancelSelectAreaTool(): void {
+  private cancelVolumeSelectTool(): void {
     this.selectAreaToolActive = null;
     this.sceneManager.renderer.domElement.style.cursor = "";
-    this.selectSphereBtn.classList.remove("active");
-    this.selectBoxBtn.classList.remove("active");
+    this.elements.toolsMenu.selectVolumeSubmenu.selectSphereBtn.classList.remove("active");
+    this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.remove("active");
   }
 
   /** Called every frame (see SceneManager.onBeforeRender()) to keep the
@@ -1273,7 +1434,7 @@ export class SceneViewerApp {
 
     const worldHit = this.raycastMeshSurface(event);
     if (worldHit) this.placeSelectAreaShape(kind, worldHit);
-    this.cancelSelectAreaTool();
+    this.cancelVolumeSelectTool();
   }
 
   /** Places (replacing any existing one - see clearSelectAreaShape()) a
@@ -1703,7 +1864,15 @@ export class SceneViewerApp {
       lastX = event.clientX;
       lastY = event.clientY;
       modelRoot.rotation.y += dx * 0.01;
-      modelRoot.rotation.x += dy * 0.01;
+      // Clamped to +-90 degrees so vertical dragging can't carry the model
+      // past vertical and flip it upside down - horizontal dragging (yaw,
+      // above) has no such limit since spinning all the way around is fine.
+      const PITCH_LIMIT = Math.PI / 2;
+      modelRoot.rotation.x = THREE.MathUtils.clamp(
+        modelRoot.rotation.x + dy * 0.01,
+        -PITCH_LIMIT,
+        PITCH_LIMIT,
+      );
     };
     const handlePointerUp = (event: PointerEvent) => {
       pointerDown = false;
@@ -2143,7 +2312,7 @@ export class SceneViewerApp {
       return;
     }
     if (this.selectAreaToolActive) {
-      if (event.button === 2) this.cancelSelectAreaTool();
+      if (event.button === 2) this.cancelVolumeSelectTool();
       else if (event.button === 0) this.handleSelectAreaClick(event);
       return;
     }

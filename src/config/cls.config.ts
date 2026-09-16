@@ -26,6 +26,19 @@ export interface AppConfiguration {
   canRecalculateDistortion: boolean;
 }
 
+export interface AppSessionConfiguration {
+  tools: {
+    activeTool: 'select-by-volume' | 'select-landmark' | 'select-ground-plane' | 'select-up-axis' | null;
+
+    selectAreaTool: "sphere" | "box";
+    selectAreaMode: "inside" | "outside";
+  };
+
+  resourcesPanel: {
+    visible: boolean;
+  };
+}
+
 export class Config {
 
   private static defaultConfig: AppConfiguration = {
@@ -58,6 +71,16 @@ export class Config {
   static conf: Config;
 
   config: AppConfiguration;
+  static sessionConfig: AppSessionConfiguration = {
+    tools: {
+      selectAreaTool: 'sphere',
+      selectAreaMode: "inside",
+    },
+
+    resourcesPanel: {
+      visible: false
+    }
+  }
 
   constructor(savedConfig?: AppConfiguration) {
     console.info('initializing app config. Provided AppConfiguration?', savedConfig);
