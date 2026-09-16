@@ -15,51 +15,22 @@
 
     <div id="app" class="hide-on-initial-load flex flex-col !h-[100dvh] !w-[100vw]">
       <div id="topbar" class="flex flex-row gap-4 p-2 bg-mist-900">
-        <div class="text-amber-200">RenderDoc Capture Fixer</div>
-        <div>Import scene</div>
-        <div>Filter objects</div>
-        <div>Calibration options</div>
-        <div>Control options</div>
-        <div>Fix & export</div>
+        <div class="text-amber-200">RenderDoc Capture Fixer <b>::</b></div>
+        <button id="menu-import-scene">Import scene</button>
+        &middot;
+        <button id="menu-control-options">Control options</button>
+        &middot;
+        <button id="menu-fix-export">Fix & export</button>
+        &middot;
+        <a href="./help.html" target="_blank">Help</a>
       </div>
 
-      <capture-importer
-        id="capture-importer"
-      >
-      </capture-importer>
+      <capture-importer id="capture-importer"></capture-importer>
+      <loading-screen id="loading-screen"></loading-screen>
+      <control-scheme id="controls-overlay"></control-scheme>
+      <export-mesh id="export-overlay"></export-mesh>
 
       <div class="flex flex-row grow shrink overflow-hidden">
-        <div id="sidebar" class="h-full">
-          <div id="sidebar-scroll" class="h-full">
-            <h2>Import scene</h2>
-            <p class="subtitle">Drop a folder exported by the RenderDoc SceneExporter extension to reconstruct it here.</p>
-
-            <div class="dropzone" id="dropzone">
-              <div><strong>Drop export folder</strong> or click to browse</div>
-              <div class="hint">expects manifest.json at the top level</div>
-            </div>
-            <input type="file" id="folder-input" webkitdirectory multiple />
-
-            <div id="pass-section" style="display: none">
-              <div class="section-label">Detected passes</div>
-              <div class="pass-list" id="pass-list"></div>
-
-              <div id="pose-warning" class="warning" style="display: none"></div>
-
-              <div class="field">
-                <div class="label">Hide largest % of objects:</div>
-                <div class="combined-slider-value">
-                  <input type="range" id="import-filter-size-slider" min="0" max="100" value="10" />
-                  <input type="text" id="import-filter-size-value" class="input-percent" min="0" max="100" value="10" />
-                </div>
-              </div>
-
-              <button class="primary" id="reconstruct-btn">Reconstruct scene</button>
-              <button class="ghost" id="reset-cam-btn" style="width: 100%; margin-top: 8px">Reset camera</button>
-            </div>
-          </div>
-          <div id="status-bar">Waiting for a folder&hellip;</div>
-        </div>
 
         <div id="sidebar-object-list" class="p-4 h-full overflow-hidden flex flex-col">
           <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
@@ -75,18 +46,34 @@
           <div>
             Recalculate transform correction:
             <button id="recalculate-correction-btn">Recalculate</button>
-
           </div>
 
 
           <b class="mt-8 text-white">Object list:</b>
           <div>Order by: <button>draw order</button>, <button>size</button>, <button>faces</button></div>
-          <div class="grow shrink flex flex-col gap-2 overflow-auto" id="object-list">
+          <div class="grow shrink flex flex-col gap-2 overflow-auto pr-3 -mr-2" id="object-list">
 
           </div>
         </div>
 
         <div id="viewport" class="h-full w-full relative">
+          <div class="absolute top-0 left-0 z-10 p-1 w-full">
+            <div class="flex flex-row gap-2 bg-brown-800/75 px-4 py-2">
+              <button>Select volume</button>
+              &middot;
+              <button>Fix distortion</button>
+              &middot;
+              <button>Select ground plane</button>
+              &middot;
+              <button>Set up axis</button>
+              &middot;
+              <button>Mirror</button>
+              &middot;
+              <button>Reset camera</button>
+            </div>
+          </div>
+
+
           <div class="absolute right-4 top-4">
             <div id="object-filter-menu" class="menu">
               <div class="field">
@@ -100,38 +87,8 @@
             </div>
             <div id="control-options-menu">
               <div class="field">
-                <div class="toggle-row">
-                  <div>
-                    <div class="lbl">Camera control:</div>
-                    <span class="sub" id="fly-mode-label">Orbit / pan</span>
-                  </div>
-                  <label class="switch">
-                    <input type="checkbox" id="fly-mode-toggle" />
-                    <span class="slider"></span>
-                  </label>
-                </div>
+                <div id="fly-mode-label"></div>
                 <div class="sub" id="fly-speed-indicator" style="display: none"></div>
-              </div>
-              <div class="field">
-                <div class="toggle-row">
-                  <div>
-                    <div class="flex flex-row space-between gap-4">
-                      <div>Control scheme</div>
-                      <select value="esdf" class="text-blue-300" id="control-scheme-dropdown">
-                        <option value="esdf">ESDF</option>
-                        <option value="wasd">WASD</option>
-                      </select>
-                    </div>
-                    <span class="sub leading-[1.25rem]">
-                      <code id="control-scheme-label-movement">ESDF</code> — movement (fly mode)<br/>
-                      <code id="control-scheme-label-toggle-fly">A</code> — toggle fly mode<br/>
-                      <span  id="control-scheme-label">ESDF - movement; A: toggle fly mode</span><br/>
-                      <code>Space</code> — up; <code>Ctrl</code> — down<br/>
-                      <code>Num 1</code>, <code>Num 3</code>, <code>Num 7</code> — front/side/top view<br/>
-                      <code>Num 9</code> — flip view; <code>Num 5</code> — toggle ortographic
-                    </span>
-                  </div>
-                </div>
               </div>
             </div>
             <div id="select-options-menu"></div>
