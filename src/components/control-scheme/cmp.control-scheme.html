@@ -1,0 +1,96 @@
+<div class="overlay-backdrop-blur fixed top-0 left-0 w-[100vw] h-[100dvh] bg-cool-900/75 hidden z-100 flex flex-col items-center justify-center">
+
+  <!-- Window -->
+  <div class="window max-w-[720px] flex flex-col border border-warm-500 pointer-events-none">
+
+    <!-- Titlebar -->
+    <div class="py-2 px-4 bg-warm-200 text-brown-900">
+      Controls
+    </div>
+
+    <!-- Content -->
+    <span class="p-8 bg-brown-900 pointer-events-auto">
+      <div class="field row">
+        <div>Control scheme</div>
+        <select value="esdf" class="text-blue-300" id="control-scheme-use-control-scheme-dropdown">
+          <option value="esdf">ESDF</option>
+          <option value="wasd">WASD</option>
+        </select>
+      </div>
+
+      <h3>Key bindings:</h3>
+
+      <!-- ESDF CONTROLS -->
+      <div id="control-scheme-esdf" class="hidden">
+        <div class="mt-8 mb-2 w-full text-center text-warm-200 text-[1.25rem]">Camera:</div>
+        <div class="flex flex-col gap-2">
+          <div><code>Num 1</code> / <code>Num 3</code> / <code>Num 7</code> — front/side/top view</div>
+          <div><code>Num 9</code> — flip view</div>
+          <div><code>Num 5</code> — toggle orthographic/perspective</div>
+          <div><code id="control-scheme-label-toggle-fly">A</code> — toggle fly mode</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Fly mode:</div>
+        <div class="flex flex-col gap-2">
+          <div><code id="control-scheme-label-movement">ESDF</code> — movement (fly mode)</div>
+          <div><code>Space</code> — up; <code>Ctrl</code> — down</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Selection:</div>
+          <div class="flex flex-col gap-2">
+          <div><code>Left Click</code> — select</div>
+          <div><code>Shift</code> <code>Left Click</code> — multi-select</div>
+          <div><code>Ctrl</code> <code>Left Click</code> — add/remove from selection</div>
+          <div><code>Right Click</code> (off-object) — clear selection</div>
+          <div><code>ESC</code> — clear selection</div>
+          <div><code>Ctrl</code> <code>I</code> — invert selection</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Misc.</div>
+        <div class="flex flex-col gap-2">
+          <div><code>H</code> — hide selected</div>
+          <div><code>Ctrl</code> <code>Shift</code> <code>E</code> — export selection</div>
+          <div><code>Ctrl</code> <code>E</code> — export selection</div>
+        </div>
+      </div>
+
+      <!-- WASD CONTROLS -->
+      <div id="control-scheme-wasd" class="hidden">
+        <div class="mt-8 mb-2 w-full text-center text-warm-200 text-[1.25rem]">Camera:</div>
+        <div class="flex flex-col gap-2">
+          <div><code>Num 1</code> / <code>Num 3</code> / <code>Num 7</code> — front/side/top view</div>
+          <div><code>Num 9</code> — flip view</div>
+          <div><code>Num 5</code> — toggle orthographic/perspective</div>
+          <div><code id="control-scheme-label-toggle-fly">F</code> — toggle fly mode</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Fly mode:</div>
+        <div class="flex flex-col gap-2">
+          <div><code id="control-scheme-label-movement">WASD</code> — movement (fly mode)</div>
+          <div><code>Space</code> — up; <code>Ctrl</code> — down</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Selection:</div>
+          <div class="flex flex-col gap-2">
+          <div><code>Left Click</code> — select</div>
+          <div><code>Shift</code> <code>Left Click</code> — multi-select</div>
+          <div><code>Ctrl</code> <code>Left Click</code> — add/remove from selection</div>
+          <div><code>Right Click</code> (off-object) — clear selection</div>
+          <div><code>ESC</code> — clear selection</div>
+          <div><code>Ctrl</code> <code>I</code> — invert selection</div>
+        </div>
+
+        <div class="mt-8 mb-2 w-full text-center text-warm-300 text-[1.25rem]">Misc.</div>
+        <div class="flex flex-col gap-2">
+          <div><code>H</code> — hide selected</div>
+          <div><code>Ctrl</code> <code>Shift</code> <code>E</code> — export selection</div>
+          <div><code>Ctrl</code> <code>E</code> — export selection</div>
+        </div>
+      </div>
+
+
+
+
+    </div>
+  </div>
+</div>

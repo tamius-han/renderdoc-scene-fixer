@@ -16,8 +16,13 @@ import {
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
-import type { DrawEntry, PassIndexEntry } from "./types";
+import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
 import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
+import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
+import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
+import { ObjectsSidebar } from './components/objects-sidebar/cmp.objects-sidebar';
+import { Overlay } from './components/common/overlay/cmp.overlay';
+import { Config } from './config/cls.config';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -55,6 +60,7 @@ export class SceneViewerApp {
   private loaded: LoadedManifests | null = null;
   private textures = new TextureManager();
   private sceneManager: SceneManager;
+  private appConfig: Config;
 
   private materialCache = new Map<string, THREE.Material>();
   private untexturedMaterial: THREE.Material | null = null;
@@ -207,12 +213,20 @@ export class SceneViewerApp {
   private outlineQuadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private outlineQuadMaterial: THREE.ShaderMaterial | null = null;
 
-  private dropzone = this.el("dropzone");
-  private folderInput = this.el<HTMLInputElement>("folder-input");
-  private passSection = this.el("pass-section");
-  private passList = this.el("pass-list");
-  private poseWarning = this.el("pose-warning");
-  private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
+  private elements = {
+    menu: {
+      importScene: this.el("menu-import-scene"),
+      controlOptions: this.el("menu-control-options"),
+      fixExport: this.el("menu-fix-export"),
+    },
+
+    captureImporter: this.el<CaptureImporter>("capture-importer"),
+    loadingScreen: this.el<LoadingScreen>("loading-screen"),
+    controlsOverlay: this.el<Overlay>("controls-overlay"),
+    exportOverlay: this.el<Overlay>("export-overlay"),
+  };
+
+
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
   private markGroundPlaneBtn = this.el<HTMLButtonElement>("mark-ground-plane-btn");
   private selectSphereBtn = this.el<HTMLButtonElement>("select-sphere-btn");
@@ -222,7 +236,6 @@ export class SceneViewerApp {
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
   private resetCamBtn = this.el("reset-cam-btn");
   private recenterCamBtn = this.el("recenter-camera-btn");
-  private statusBar = this.el("status-bar");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
   private objectList = this.el('object-list');
@@ -233,32 +246,32 @@ export class SceneViewerApp {
   private resourcePanelMinSize = { width: 360, height: 420 };
   private resourcePanelSize = { ...this.resourcePanelMinSize };
 
-  private importFilterSlider = this.el<HTMLInputElement>("import-filter-size-slider");
-  private importFilterValue = this.el<HTMLInputElement>("import-filter-size-value");
   private viewportFilterSlider = this.el<HTMLInputElement>("object-filter-size-slider");
   private viewportFilterValue = this.el<HTMLInputElement>("object-filter-size-value");
 
-  private flyModeToggle = this.el<HTMLInputElement>("fly-mode-toggle");
   private flyModeLabel = this.el("fly-mode-label");
   private flySpeedIndicator = this.el("fly-speed-indicator");
 
-  private controlSchemeDropdown = this.el<HTMLSelectElement>("control-scheme-dropdown");
-  private controlSchemeLabel = this.el("control-scheme-label");
 
   constructor(viewportEl: HTMLElement) {
+    this.appConfig = Config.getConfig();
+
     this.sceneManager = new SceneManager(viewportEl);
-    this.setupSelectionOutlinePass();
+    try {
+      this.setupSelectionOutlinePass();
+    } catch (e) {
+      console.warn('setupSelectionOutlinePass failed', e);
+    }
     this.sceneManager.onContextLoss((lost) => {
       if (lost) {
-        this.setStatus(
-          "WebGL context lost - the scene is likely too large for available GPU memory. Try selecting fewer passes.",
-        );
+        // this.setStatus(
+        //   "WebGL context lost - the scene is likely too large for available GPU memory. Try selecting fewer passes.",
+        // );
       }
     });
     // Keeps the UI toggle/label/speed indicator in sync regardless of
     // whether fly mode was triggered from this checkbox or the 'A' key.
     this.sceneManager.onFlyStateChange((flying, speed) => {
-      this.flyModeToggle.checked = flying;
       this.flyModeLabel.textContent = flying ? "Fly cam (first-person)" : "Orbit / pan";
       this.flySpeedIndicator.style.display = flying ? "block" : "none";
       this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
@@ -266,10 +279,9 @@ export class SceneViewerApp {
     });
     this.sceneManager.onBeforeRender(() => this.updateSelectAreaGizmoTransform());
     this.sceneManager.onControlSchemeChange((scheme) => {
-      this.controlSchemeDropdown.value = scheme;
-      this.controlSchemeLabel.textContent =
-        scheme === "wasd" ? "WASD - movement; F: toggle fly mode" : "ESDF - movement; A: toggle fly mode";
+      console.warn('Control scheme change called from scene manager!', scheme);
     });
+    this.setupMenu();
     this.wireEvents();
   }
 
@@ -285,29 +297,35 @@ export class SceneViewerApp {
     return found as T;
   }
 
+  private setStatus() {
+
+  }
+
+  private setupMenu() {
+    this.elements.menu.importScene.addEventListener('click', () => {
+      this.elements.captureImporter.classList.remove('hidden');
+    });
+    this.elements.menu.controlOptions.addEventListener('click', () => {
+      console.info('opening control options overlay');
+      this.elements.controlsOverlay.show();
+    });
+    this.elements.controlsOverlay.addEventListener('control-scheme-updated', (e: any) => {
+      console.log('[app] Control scheme updated:', e.detail.controlScheme);
+      this.sceneManager.setControlScheme(e.detail.controlScheme);
+    });
+    this.elements.menu.fixExport.addEventListener('click', () => {
+      console.info('opening export overlay');
+      this.elements.exportOverlay.show();
+    });
+  }
+
   private wireEvents(): void {
-    this.dropzone.addEventListener("click", () => this.folderInput.click());
-    this.dropzone.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      this.dropzone.classList.add("drag");
-    });
-    this.dropzone.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
-    this.dropzone.addEventListener("drop", async (e) => {
-      e.preventDefault();
-      this.dropzone.classList.remove("drag");
-      if (!e.dataTransfer) return;
-      this.setStatus("Reading dropped folder...");
-      const entries = await collectFromDrop(e.dataTransfer);
-      await this.handleFiles(entries);
-    });
-    this.folderInput.addEventListener("change", async (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (!files) return;
-      this.setStatus("Reading folder...");
-      await this.handleFiles(collectFromInput(files));
+    this.elements.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
+      console.log('received reconstruct-scene:', e);
+      this.reconstructScene(e.detail);
     });
 
-    this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
+
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
     this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
     this.selectSphereBtn.addEventListener("click", () => this.toggleSelectAreaTool("sphere"));
@@ -328,19 +346,14 @@ export class SceneViewerApp {
     });
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
-    this.controlSchemeDropdown.addEventListener("change", () => {
-      const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
-      this.sceneManager.setControlScheme(scheme);
-    });
 
     // Both filter control pairs (import screen + post-reconstruct viewport
     // menu) drive the same underlying value and stay in sync with each
     // other - see setHidePercent().
-    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
+    for (const slider of [this.viewportFilterSlider]) {
       slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
     }
-    for (const text of [this.importFilterValue, this.viewportFilterValue]) {
+    for (const text of [this.viewportFilterValue]) {
       text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
     }
 
@@ -350,90 +363,9 @@ export class SceneViewerApp {
   private setHidePercent(value: number): void {
     const clamped = Math.min(100, Math.max(0, Math.round(Number.isFinite(value) ? value : 0)));
     this.hidePercent = clamped;
-    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) slider.value = String(clamped);
-    for (const text of [this.importFilterValue, this.viewportFilterValue]) text.value = String(clamped);
+    for (const slider of [this.viewportFilterSlider]) slider.value = String(clamped);
+    for (const text of [this.viewportFilterValue]) text.value = String(clamped);
     if (this.loadedDraws.length > 0) this.rebuildVisibleScene();
-  }
-
-  private async handleFiles(entries: { path: string; file: File }[]): Promise<void> {
-    if (entries.length === 0) return;
-
-    this.vfs = new VirtualFileSystem();
-    for (const { path, file } of entries) this.vfs.set(path, file);
-
-    const loaded = await loadManifests(this.vfs);
-    if (!loaded) {
-      this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
-      return;
-    }
-
-    this.loaded = loaded;
-    this.renderPassList();
-    const failedNote = loaded.failedPassFolders.length
-      ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
-      : "";
-    this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.${failedNote}`);
-  }
-
-  private renderPassList(): void {
-    if (!this.loaded) return;
-    this.passSection.style.display = "block";
-    this.passList.innerHTML = "";
-
-    const defaultIndex = this.loaded.root.passes.findIndex((p) => p.guessedRole?.includes("presented"));
-    const selectedDefault = defaultIndex >= 0 ? defaultIndex : 0;
-
-    this.loaded.root.passes.forEach((p: PassIndexEntry, i: number) => {
-      const hasPosed = (this.loaded!.passManifests[p.folder]?.draws ?? []).some((d) => d.posedMesh);
-      const row = document.createElement("label");
-      row.className = "pass-row";
-      row.innerHTML = `
-        <input type="checkbox" data-folder="${p.folder}" ${i === selectedDefault ? "checked" : ""}>
-        <div class="meta">
-          <div class="name">${p.folder}</div>
-          <div class="role">${p.guessedRole ?? ""}</div>
-          <div class="stats">${p.drawCount} draw(s) &middot; ${p.colorTargets.length} color target(s) &middot; depth=${p.depthTarget ? "yes" : "no"} &middot; posed=${hasPosed ? "yes" : "no"}</div>
-        </div>`;
-      this.passList.appendChild(row);
-    });
-
-    for (const cb of this.passList.querySelectorAll("input")) {
-      cb.addEventListener("change", () => this.updatePoseWarning());
-    }
-    this.updatePoseWarning();
-  }
-
-  private getSelectedFolders(): string[] {
-    return Array.from(this.passList.querySelectorAll<HTMLInputElement>("input:checked")).map(
-      (cb) => cb.dataset.folder as string,
-    );
-  }
-
-  private updatePoseWarning(): void {
-    if (!this.loaded) return;
-    const selected = this.getSelectedFolders();
-    const anyPosed = selected.some((f) => (this.loaded!.passManifests[f]?.draws ?? []).some((d) => d.posedMesh));
-
-    if (!anyPosed) {
-      this.showWarning(
-        "None of the selected passes have posed mesh data (this export may have been done without \u201cwith posed meshes\u201d) - falling back to bind pose, piled near the origin.",
-      );
-    } else if (selected.length > 1) {
-      this.showWarning(
-        "Multiple passes selected: posed geometry is relative to whatever camera was active for that pass. Different passes may use different cameras and won't necessarily align spatially when combined.",
-      );
-    } else {
-      this.poseWarning.style.display = "none";
-    }
-  }
-
-  private showWarning(message: string): void {
-    this.poseWarning.style.display = "block";
-    this.poseWarning.textContent = message;
-  }
-
-  private setStatus(message: string): void {
-    this.statusBar.textContent = message;
   }
 
   private getUntexturedMaterial(): THREE.Material {
@@ -526,32 +458,59 @@ export class SceneViewerApp {
     const size = stats?.size ?? 0;
 
     const div = document.createElement("div");
-    div.className = "draw-item";
+    div.className = "draw-item flex flex-col w-full";
     div.dataset.index = String(drawIndex);
     div.innerHTML = `
-      <b>Draw #${drawIndex}</b> <small>(eid ${draw.eventId})</small>
-      &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}">[ ]</button>
-      &nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button>
+      <div class="flex flex-row justify-between items-baseline">
+        <div>
+          <b class="name">Draw #${drawIndex}</b> <small class="role">(eid ${draw.eventId})</small>
+        </div>
+        <div class="flex flex-row">
+          <div>vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}">[ ]</button></div>
+          <div>sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button></div>
+        </div>
+      </div>
+      <div>
+        <small>v: ${vertices}, f: ${faces}, size: ${size.toFixed(2)}</small>
+      </div>
+
+      <div class="hidden">
       &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}">[ ]</button>
-      <small>v: ${vertices}, f: ${faces}, size: ${size.toFixed(2)}</small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+       &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+      </div>
     `;
 
     wrap.appendChild(div);
     return wrap;
   }
 
-  private async reconstructScene(): Promise<void> {
-    if (!this.loaded) return;
-    const selected = this.getSelectedFolders();
-    if (selected.length === 0) {
-      this.setStatus("Select at least one pass first.");
+  private async reconstructScene({vfs, manifests, importOptions }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: any }): Promise<void> {
+    this.loaded = manifests;
+    if (!this.loaded || !vfs) {
+      console.info('No manifests loaded — doing nothing.');
       return;
     }
 
-    this.reconstructBtn.disabled = true;
+    const selected: string[] = [];
+    for (const f in this.loaded.passManifests) {
+      if (this.loaded.passManifests[f].markedForRender) {
+        selected.push(f);
+      }
+    }
+
+    if (selected.length === 0) {
+      console.info('No passes selected — doing nothing.');
+      return;
+    }
+    this.vfs = vfs;
+    this.elements.captureImporter.classList.add('hidden');
+    this.elements.loadingScreen.show();
+    this.elements.loadingScreen.log("Starting reconstruction...");
+
+
     this.emptyHint.style.display = "none";
     this.hud.style.display = "block";
-    this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
+    // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
     try {
       this.clearSelectionVisuals();
@@ -590,6 +549,8 @@ export class SceneViewerApp {
       let loggedMissingMesh = false;
 
       for (const folder of selected) {
+        const logLine = this.elements.loadingScreen.log(`Processing pass "${folder}"...`);
+
         const manifest = this.loaded.passManifests[folder];
         if (!manifest) {
           if (!loggedMissingManifest) {
@@ -599,11 +560,13 @@ export class SceneViewerApp {
             );
             loggedMissingManifest = true;
           }
+          logLine.updateLogItem(`No manifest found for pass "${folder}"; skipping`);
           continue;
         }
         const passDir = joinPath(this.loaded.rootPrefix, folder);
 
         for (const draw of manifest.draws) {
+          logLine.updateLogItem(`Processing pass "${folder}" ...`, { current: processed, total: manifest.draws.length });
           processed++;
           try {
             const outcome = await this.loadDraw(draw, passDir);
@@ -618,6 +581,7 @@ export class SceneViewerApp {
                     `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
                 );
                 loggedMissingMesh = true;
+                this.elements.loadingScreen.log(`Mesh file not found for eid${draw.eventId}`);
               }
             } else {
               // Global index into loadedDraws (loadDraw() just pushed this
@@ -636,13 +600,16 @@ export class SceneViewerApp {
           } catch (e) {
             exceptionCount++;
             console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
+            this.elements.loadingScreen.log(`Exception loading draw eid${draw.eventId}`);
           }
           if (processed % 50 === 0) {
-            this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
+            // this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         }
       }
+
+      this.elements.loadingScreen.log(`Finished processing all passes. Calculating scale and/or initial scale ...`);
 
       // Normalization scale is computed ONCE here, from every loaded draw
       // regardless of the size filter, and then held fixed - see
@@ -682,13 +649,16 @@ export class SceneViewerApp {
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
       this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
+      this.elements.loadingScreen.log(`Rebuilding visible scene...`);
       this.rebuildVisibleScene();
+      this.elements.loadingScreen.log(`Visible scene rebuilt.`);
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
-      this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
-    } finally {
-      this.reconstructBtn.disabled = false;
+      // this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
+      this.elements.loadingScreen.log(`Reconstruction failed.`);
     }
+
+    this.elements.loadingScreen.hide();
   }
 
   /** Rebuilds the rendered scene from this.loadedDraws according to both
@@ -1714,7 +1684,7 @@ export class SceneViewerApp {
     // currentDistance = fitDistance * zoomRatio - keeping the user's zoom as
     // a RATIO (rather than an absolute distance) means resizing the panel
     // (which changes fitDistance, see resize() below) preserves how far
-    // they'd zoomed in/out instead of resetting it.
+    // // they'd zoomed in/out instead of resetting it.
     let zoomRatio = 1;
     let currentDistance = fitDistance;
 
@@ -2492,6 +2462,9 @@ export class SceneViewerApp {
       depthTest: false,
       depthWrite: false,
     });
+    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+    ring.userData.isSelectionVisual = true;
+    ring.renderOrder = renderOrderBase + 1;
 
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.outlineQuadMaterial);
     quad.frustumCulled = false;

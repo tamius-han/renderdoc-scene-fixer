@@ -1,0 +1,112 @@
+<div id="capture-importer-container" class="absolute left-0 top-0 !w-[100vw] h-[100dvh] bg-cool-800 z-100 flex flex-col items-center justify-center">
+
+  <div class="max-h-[90%] w-[1280px] max-w-[90%] bg-brown-800 border border-warm-500 p-4 flex flex-col items-center justify-center">
+    <div class="
+      w-[calc(100%+2rem)] bg-warm-200 text-warm-800 smallcap
+      -mx-4 -mt-4 pt-1 pb-1 px-4
+    ">
+      Renderdoc scene explorer
+    </div>
+    <div class="">
+      <h2>Import scene</h2>
+      <div class="text-warm-50 max-w-[720px]">Export scene from RenderDoc with Renderdoc Scene Exporter extension, then drop the exported folder below in order to reconstruct it.</div>
+      <div class="text-warm-300 mt-4"> <> <a href="/help.html" target="_blank" class="!text-warm-300 underline">What is this?</a></div>
+    </div>
+
+    <div class="flex flex-col lg:flex-row gap-4 w-full mt-12">
+      <div class="flex-1">
+        <h3 class="text-center">RenderDoc Scene Exporter</h3>
+        <div id="capture-importer-dropzone" class="dropzone dropzone-segment h-[12rem] m-8" >
+          <div><strong>Drop export folder</strong> or click to browse</div>
+          <div class="hint">expects manifest.json at the top level</div>
+        </div>
+        <input type="file" id="capture-importer-folder-input" webkitdirectory multiple />
+      </div>
+
+      <div class="flex-1">
+        <h3 class="text-center">Intel GPA export</h3>
+        <div class="dropzone m-8 h-[12rem]">
+          <div id="capture-importer-landmark-source-obj" class="dropzone-segment flex-1">
+            <div>Drop your <strong>landmark-source.obj</strong> here</div>
+          </div>
+          <input type="file" id="capture-importer-landmark-source-input" webkitdirectory multiple />
+
+          <div id="capture-importer-landmark-output-obj" class="dropzone-segment flex-1">
+            <div>Drop your <strong>landmark-output.obj</strong> here</div>
+          </div>
+          <input type="file" id="capture-importer-landmark-output-input" webkitdirectory multiple />
+
+          <div id="capture-importer-scene-obj" class="dropzone-segment flex-1">
+            <div>Drop your <strong>scene.obj</strong> here</div>
+          </div>
+          <input type="file" id="capture-importer-scene-input" webkitdirectory multiple />
+        </div>
+      </div>
+    </div>
+
+
+    <div
+      id="capture-importer-import-processing-section"
+      style="display: none"
+    >
+      <div class="flex flex-col lg:flex-row gap-4">
+
+        <render-pass-list class="render-pass-list lg:flex-1"></render-pass-list>
+
+        <!-- import options go inside div, because they aren't a separate component -->
+        <div class="lg:flex-1">
+          <h3>Import options</h3>
+
+          <!-- Capture unit size + unit -->
+          <div class="field row">
+            <div class="label">Capture unit size:</div>
+            <div class="input flex flex-row gap-4">
+              <input type="text" id="capture-importer-capture-unit-size" class="text-right" min="0" value="1" />
+              <select id="capture-importer-capture-unit-unit" value="m" class="w-12 text-amber-300">
+
+              </select>
+            </div>
+          </div>
+
+          <!-- Hide largest % of objects -->
+          <div class="field row">
+            <div class="label">Hide largest % of objects:</div>
+            <div class="input combined-slider-value">
+              <input type="range" id="capture-importer-import-size-filter-slider" min="0" max="100" value="10" />
+              <input type="text" id="capture-importer-import-size-filter-value" class="input-percent" min="0" max="100" value="10" />
+            </div>
+          </div>
+
+          <!-- Enforce max scene size -->
+          <div class="field row">
+            <input type="checkbox" id="capture-importer-enforce-max-scene-size" /> Enforce max scene size
+          </div>
+
+          <!-- Max scene size -->
+          <div class="field row">
+            <div class="label">Max scene size (scene units):</div>
+            <input type="text" id="capture-importer-max-scene-size" class="text-right input disabled" />
+          </div>
+
+          <!-- Enforce initial scale limit -->
+           <div class="field row">
+            <input type="checkbox" id="capture-importer-enforce-initial-scale-limit" /> Enforce initial scale limit
+          </div>
+
+          <!-- Initial scale limit -->
+          <div class="field row">
+            <div class="label">Initial scale limit:</div>
+            <input type="text" id="capture-importer-initial-scale-limit" class="text-right input disabled" />
+          </div>
+        </div>
+
+      </div>
+
+      <div id="capture-importer-pose-warning" class="warning" style="display: none"></div>
+
+
+      <button id="capture-importer-reconstruct-btn" class="primary disabled" >Reconstruct scene</button>
+    </div>
+  </div>
+  <div id="status-bar">Waiting for a folder&hellip;</div>
+</div>

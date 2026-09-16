@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { MovementBindings, WASD_BINDINGS, ESDF_BINDINGS } from './movement-bindings.interface';
+import { Config } from '../config/cls.config';
 
 export type ContextLossHandler = (lost: boolean) => void;
 export type FlyStateHandler = (flying: boolean, speed: number) => void;
@@ -74,10 +75,14 @@ export class SceneManager {
   private scheme: ControlScheme = "esdf";
   private bindings: MovementBindings = ESDF_BINDINGS;
 
-
+  private appConfig = Config.getConfig();
 
   constructor(private container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // stencil:true is required for the selection outline's mask+ring
+    // stencil technique (see buildSelectionOutline() in app.ts) - not
+    // guaranteed on by default across three.js versions, so it's requested
+    // explicitly rather than relying on whatever the current default is.
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
@@ -132,6 +137,8 @@ export class SceneManager {
     });
 
     this.animate();
+
+    this.setControlScheme(this.appConfig.config.controls.controlScheme as ControlScheme);
   }
 
   onContextLoss(handler: ContextLossHandler): void {

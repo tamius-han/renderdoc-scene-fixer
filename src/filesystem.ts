@@ -1,3 +1,5 @@
+import { FileInfo } from './types/file-info.interface';
+
 export function normalizePath(path: string): string {
   const parts = path.split("/");
   const out: string[] = [];
@@ -50,7 +52,7 @@ export class VirtualFileSystem {
   }
 }
 
-async function readEntry(entry: FileSystemEntry, path: string): Promise<{ path: string; file: File }[]> {
+async function readEntry(entry: FileSystemEntry, path: string): Promise<FileInfo[]> {
   if (entry.isFile) {
     const fileEntry = entry as FileSystemFileEntry;
     const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
@@ -79,9 +81,9 @@ async function readEntry(entry: FileSystemEntry, path: string): Promise<{ path: 
   return [];
 }
 
-export async function collectFromDrop(dataTransfer: DataTransfer): Promise<{ path: string; file: File }[]> {
+export async function collectFromDrop(dataTransfer: DataTransfer): Promise<FileInfo[]> {
   const items = dataTransfer.items;
-  const jobs: Promise<{ path: string; file: File }[]>[] = [];
+  const jobs: Promise<FileInfo[]>[] = [];
   for (let i = 0; i < items.length; i++) {
     const entry = items[i].webkitGetAsEntry();
     if (entry) jobs.push(readEntry(entry, ""));
@@ -90,8 +92,8 @@ export async function collectFromDrop(dataTransfer: DataTransfer): Promise<{ pat
   return results.flat();
 }
 
-export function collectFromInput(fileList: FileList): { path: string; file: File }[] {
-  const out: { path: string; file: File }[] = [];
+export function collectFromInput(fileList: FileList): FileInfo[] {
+  const out: FileInfo[] = [];
   for (const file of Array.from(fileList)) {
     const withRelPath = file as File & { webkitRelativePath?: string };
     out.push({ path: withRelPath.webkitRelativePath || file.name, file });
