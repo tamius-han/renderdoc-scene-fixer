@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { MovementBindings, WASD_BINDINGS, ESDF_BINDINGS } from './movement-bindings.interface';
+import { Config } from '../config/cls.config';
 
 export type ContextLossHandler = (lost: boolean) => void;
 export type FlyStateHandler = (flying: boolean, speed: number) => void;
@@ -68,7 +69,7 @@ export class SceneManager {
   private scheme: ControlScheme = "esdf";
   private bindings: MovementBindings = ESDF_BINDINGS;
 
-
+  private appConfig = Config.getConfig();
 
   constructor(private container: HTMLElement) {
     // stencil:true is required for the selection outline's mask+ring
@@ -130,6 +131,8 @@ export class SceneManager {
     });
 
     this.animate();
+
+    this.setControlScheme(this.appConfig.config.controls.controlScheme as ControlScheme);
   }
 
   onContextLoss(handler: ContextLossHandler): void {
