@@ -7,9 +7,20 @@ export interface AppConfiguration {
     forceInitialScaleLimit: boolean;
     initialScaleLimit: number;
   };
+  exportOptions: {
+    exportTextures: boolean;
+    splitLooseParts: boolean;
+    fillHoles: boolean;
+    resizeExportedObject: boolean;
+    approximateHeight: number;
+  };
 
   objectFiltering: {
     hideLargestObjectsPercent: number;
+  };
+
+  controls: {
+    controlScheme: 'asdf' | 'esdf';
   };
 
   canRecalculateDistortion: boolean;
@@ -26,9 +37,19 @@ export class Config {
       forceInitialScaleLimit: true, // viewport is this many units across
       initialScaleLimit: 100,
     },
+    exportOptions: {
+      exportTextures: true,
+      splitLooseParts: true,
+      fillHoles: true,
+      resizeExportedObject: true,
+      approximateHeight: 100,
+    },
 
     objectFiltering: {
       hideLargestObjectsPercent: 10,
+    },
+    controls: {
+      controlScheme: 'esdf',
     },
 
     canRecalculateDistortion: true,
@@ -39,6 +60,8 @@ export class Config {
   config: AppConfiguration;
 
   constructor(savedConfig?: AppConfiguration) {
+    console.info('initializing app config. Provided AppConfiguration?', savedConfig);
+
     if (savedConfig) {
       this.config = savedConfig;
     } else {
@@ -51,14 +74,11 @@ export class Config {
    * @returns
    */
   static getConfig(): Config {
-    if (!Config.conf) {
-      const savedConfigJson = localStorage.getItem('app-config');
-      let savedConfig;
-      if (savedConfigJson) {
-        savedConfig = JSON.parse(savedConfigJson);
-      }
+    console.info('[config] getting conf ...');
 
-      Config.conf = new Config(savedConfig);
+    if (!Config.conf) {
+      Config.conf = new Config();
+      Config.loadConfig();
     }
 
     return Config.conf;
@@ -89,15 +109,21 @@ export class Config {
    * does not exist or is invalid, default configuration will be used.
    */
   static loadConfig() {
+    console.info('[config] loading config from localStorage ...');
+
     const savedConfigJson = localStorage.getItem('app-config');
     let savedConfig;
     if (savedConfigJson) {
       savedConfig = JSON.parse(savedConfigJson);
     }
 
+    console.info('[config] saved config:', savedConfig);
+
     if (Config.validateConfig(savedConfig)) {
+      console.info('[config] Configuration validated successfully');
       Config.conf.config = new Config(savedConfig).config;
     } else {
+      console.warn('[config] Configuration validation failed — returning default configuration');
       Config.conf.config = new Config().config;
     }
   }
@@ -106,19 +132,22 @@ export class Config {
    */
   loadConfig() {
     Config.loadConfig();
+
+    return this.config;
   }
 
   /**
    * Resets configuration to default values.
    */
   static resetConfig() {
+    console.warn('App configuration will be reset');
     Config.conf.config = new Config().config;
   }
   /**
    * Resets configuration to default (instance edition)
    */
   resetConfig() {
-    this.config = JSON.parse(JSON.stringify(Config.defaultConfig));
+    Config.resetConfig();
   }
 
   /**
@@ -126,6 +155,7 @@ export class Config {
    */
   static saveConfig() {
     if (Config.conf && Config.conf.config) {
+      console.info('saving configuration to localStorage');
       localStorage.setItem('app-config', JSON.stringify(Config.conf.config));
     }
   }
