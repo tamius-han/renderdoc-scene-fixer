@@ -14,6 +14,7 @@ import {
   type GeometryArrays,
 } from "./scene/mesh-builder";
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
+import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry } from "./types";
 import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
@@ -152,6 +153,20 @@ export class SceneViewerApp {
    * ground-plane tool's own state. */
   private selectAreaShape: THREE.Mesh | null = null;
   private selectAreaKind: "sphere" | "box" | null = null;
+  /** In-scene translate/scale gizmo for selectAreaShape - see
+   * select-area-gizmo.ts. Recreated alongside the shape itself (not a
+   * persistent instance carried across rebuilds - see restoreSelectAreaShape()'s
+   * doc comment for why that wouldn't survive a scene rebuild anyway). */
+  private selectAreaGizmo: SelectAreaGizmo | null = null;
+  /** Which mode the NEXT (and current) gizmo should use - persists across
+   * shape/gizmo recreation (placement, rebuild-triggered recreation) so the
+   * user's last choice sticks, unlike the transient gizmo instance itself. */
+  private selectAreaGizmoMode: GizmoMode = "translate";
+  /** Mirrors SceneManager's fly-mode state (see onFlyStateChange()) purely
+   * so the 'G'/'S' gizmo-mode keyboard shortcuts can avoid firing while
+   * flying - 'S' collides with both movement schemes' own key bindings
+   * there (see movement-bindings.interface.ts). */
+  private isFlying = false;
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
   /** Anchor point for shift-click range selection - the last index selected
@@ -247,7 +262,9 @@ export class SceneViewerApp {
       this.flyModeLabel.textContent = flying ? "Fly cam (first-person)" : "Orbit / pan";
       this.flySpeedIndicator.style.display = flying ? "block" : "none";
       this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
+      this.isFlying = flying;
     });
+    this.sceneManager.onBeforeRender(() => this.updateSelectAreaGizmoTransform());
     this.sceneManager.onControlSchemeChange((scheme) => {
       this.controlSchemeDropdown.value = scheme;
       this.controlSchemeLabel.textContent =
@@ -295,6 +312,12 @@ export class SceneViewerApp {
     this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
     this.selectSphereBtn.addEventListener("click", () => this.toggleSelectAreaTool("sphere"));
     this.selectBoxBtn.addEventListener("click", () => this.toggleSelectAreaTool("box"));
+    // Gizmo drag tracking - window-level, not canvas-level, so an
+    // in-progress drag keeps updating even if the cursor leaves the canvas
+    // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
+    window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
+    window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
+    window.addEventListener("keydown", (e) => this.handleGizmoKeydown(e));
     this.upAxisSelect.addEventListener("change", () => this.applySceneRotation());
     // The tools' own right-click handling (cancel + clear) happens in
     // handleSceneObjectPointer() via pointerdown, which fires before the
@@ -907,21 +930,28 @@ export class SceneViewerApp {
     this.markGroundPlaneBtn.classList.remove("active");
   }
 
-  /** Raycasts the viewport at the given pointer event against mesh surface
-   * only (excluding selection-highlight, ground-plane-marker, and
-   * select-area-shape overlays, via the same userData-tag convention as
-   * pickDrawAtPointer()), returning the world-space hit point, or null if
-   * the ray missed everything. */
-  private raycastMeshSurface(event: PointerEvent): THREE.Vector3 | null {
-    const target = this.sceneManager.renderer.domElement;
-    const rect = target.getBoundingClientRect();
+  /** Builds a Raycaster for the given pointer event, from the camera
+   * through wherever it landed on the canvas in NDC space - the shared
+   * first step behind raycastMeshSurface() and the gizmo hit-testing in
+   * handleSceneObjectPointer()/handleGizmoPointerMove(). */
+  private buildViewportRaycaster(event: PointerEvent): THREE.Raycaster {
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
     const mouse = new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       -((event.clientY - rect.top) / rect.height) * 2 + 1,
     );
-
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.sceneManager.camera);
+    return raycaster;
+  }
+
+  /** Raycasts the viewport at the given pointer event against mesh surface
+   * only (excluding selection-highlight, ground-plane-marker,
+   * select-area-shape, and gizmo-handle overlays, via the same
+   * userData-tag convention as pickDrawAtPointer()), returning the
+   * world-space hit point, or null if the ray missed everything. */
+  private raycastMeshSurface(event: PointerEvent): THREE.Vector3 | null {
+    const raycaster = this.buildViewportRaycaster(event);
     const contentGroup = this.sceneManager.getContentGroup();
     const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
     const hits = raycaster
@@ -930,7 +960,8 @@ export class SceneViewerApp {
         (hit) =>
           !hit.object.userData.isSelectionVisual &&
           !hit.object.userData.isGroundPlaneVisual &&
-          !hit.object.userData.isSelectAreaShape,
+          !hit.object.userData.isSelectAreaShape &&
+          !hit.object.userData.isGizmoHandle,
       );
     return hits.length > 0 ? hits[0].point.clone() : null;
   }
