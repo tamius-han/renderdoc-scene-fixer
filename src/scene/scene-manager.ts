@@ -54,6 +54,12 @@ export class SceneManager {
    * passes onto the same canvas/frame without SceneManager needing to know
    * anything about what those passes are. */
   private afterRenderHandlers: Array<() => void> = [];
+  /** Run every frame, right BEFORE the main scene render call - for
+   * anything that needs its transform brought up to date before that
+   * frame is drawn (e.g. SceneViewerApp's select-area gizmo keeping a
+   * constant apparent screen size as the camera moves) rather than one
+   * frame late, which onAfterRender would cause. */
+  private beforeRenderHandlers: Array<() => void> = [];
 
   // first person/flying mode
   private flying = false;
@@ -138,6 +144,12 @@ export class SceneManager {
    * isn't guaranteed to matter; there's currently only ever one caller. */
   onAfterRender(handler: () => void): void {
     this.afterRenderHandlers.push(handler);
+  }
+
+  /** Registers a callback to run every frame immediately BEFORE the main
+   * scene is rendered - see beforeRenderHandlers' doc comment. */
+  onBeforeRender(handler: () => void): void {
+    this.beforeRenderHandlers.push(handler);
   }
 
   //#region fly mode handling
@@ -524,6 +536,7 @@ export class SceneManager {
 
     if (this.flying) this.updateFlyMovement(deltaSeconds);
 
+    for (const handler of this.beforeRenderHandlers) handler();
     this.renderer.render(this.scene, this.camera);
     for (const handler of this.afterRenderHandlers) handler();
   };
