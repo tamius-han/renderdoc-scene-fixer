@@ -1,0 +1,37 @@
+<div class="overlay-backdrop-blur fixed top-0 left-0 w-[100vw] h-[100dvh] bg-cool-900/75 hidden z-100 flex flex-col items-center justify-center">
+
+  <!-- Window -->
+  <div class="window max-w-[720px] flex flex-col border border-warm-500 pointer-events-none">
+
+    <!-- Titlebar -->
+    <div class="py-2 px-4 bg-warm-200 text-brown-900">
+      Fix & export mesh
+    </div>
+
+    <!-- Content -->
+    <div class="p-8 bg-brown-900 pointer-events-auto">
+      <h3>Export options</h3>
+
+      <div class="field row">
+        <input type="checkbox" id="export-options-export-textures"> Export textures
+      </div>
+      <div class="field row">
+        <input type="checkbox" id="export-options-split-loose-parts"> Split by loose parts
+      </div>
+      <div class="field row">
+        <input type="checkbox" id="export-options-fill-holes"> Fill holes
+      </div>
+      <div class="field row">
+        <input type="checkbox" id="export-options-resize-exported"> Resize exported object
+      </div>
+      <div class="field row">
+        <div>Approximate height of model (units/mm):</div>
+        <input type="number" id="export-options-approximate-height" min="0">
+      </div>
+
+      <div class="w-full flex flex-row justify-center">
+        <button id="export-options-start-export-btn" class="primary">Fix and export ...</button>
+      </div>
+    </div>
+  </div>
+</div>
