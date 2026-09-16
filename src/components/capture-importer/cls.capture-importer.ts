@@ -131,12 +131,15 @@ export class CaptureImporter extends HTMLElement {
     this.elements.captureUnitSize = this.querySelector("#capture-importer-capture-unit-size") as HTMLInputElement;
     this.elements.importSizeFilterSlider = this.querySelector("#capture-importer-import-size-filter-slider") as HTMLInputElement;
     this.elements.importSizeFilterInput = this.querySelector("#capture-importer-import-size-filter-value") as HTMLInputElement;
+    this.elements.enforceMaxSceneSizeCheckbox = this.querySelector("#capture-importer-enforce-max-scene-size") as HTMLInputElement;
     this.elements.maxSceneSizeInput = this.querySelector("#capture-importer-max-scene-size") as HTMLInputElement;
     this.elements.enforceInitialScaleLimitCheckbox = this.querySelector("#capture-importer-enforce-initial-scale-limit") as HTMLInputElement;
     this.elements.initialScaleLimitInput = this.querySelector("#capture-importer-initial-scale-limit") as HTMLInputElement;
 
+    // reconstruct button
+    this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
+    console.log('reconstruct button:', this.elements.reconstructBtn);
 
-    // this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
     // this.elements.recalculateCorrectionBtn = this.querySelector("#capture-importer-recalculate-correction-btn") as HTMLButtonElement;
     // this.elements.resetCamBtn = this.querySelector("#capture-importer-reset-cam-btn") as HTMLButtonElement;
     // this.elements.recenterCamBtn = this.querySelector("#recenter-camera-btn") as HTMLButtonElement;
@@ -156,7 +159,8 @@ export class CaptureImporter extends HTMLElement {
     this.setupDropzones();
     this.setupImportOptionsUI();
 
-    this.elements.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
+    this.elements.reconstructBtn.addEventListener("click", () => this.reconstructScene());
+    console.log('reconstruct button event listener added.');
 
     // this.elements.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
     // this.elements.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
@@ -312,11 +316,14 @@ export class CaptureImporter extends HTMLElement {
         this.appConfig.config.importOptions.initialScaleLimit = Number(this.elements.initialScaleLimitInput.value);
       });
     }
-
-
   }
 
   private async reconstructScene(): Promise<void> {
+    console.log('reconstruct scene clicked.');
+    this.appConfig.saveConfig();
+    console.log('manifest:', this.elements.renderPassList.manifests);
+
+
   // if (!this.loaded) return;
   //   const selected = this.getSelectedFolders();
   //   if (selected.length === 0) {

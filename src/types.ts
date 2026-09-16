@@ -15,6 +15,7 @@ export interface PassIndexEntry {
 /** Per-pass manifest.json, one level inside each pass_NN_tag/ folder. */
 export interface PassManifest {
   draws: DrawEntry[];
+  markedForRender?: boolean;
 }
 
 export interface DrawEntry {

@@ -24,7 +24,7 @@ export class Config {
       forceMaxSceneSize: false,
       maxSceneSize: 10000,
       forceInitialScaleLimit: true, // viewport is this many units across
-      maxViewportScale: 100,
+      initialScaleLimit: 100,
     },
 
     objectFiltering: {

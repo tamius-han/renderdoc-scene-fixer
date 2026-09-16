@@ -84,11 +84,13 @@ export class RenderPassList extends HTMLElement {
       this.passList.appendChild(row);
 
       const cb = row.querySelector<HTMLInputElement>("input")!;
+      cb.checked = !!this.manifests!.passManifests[p.folder]!.markedForRender;
 
       const updateRow = () => {
+        console.log('updating row for folder:', p.folder, 'cb.checked?', cb.checked);
         row.classList.toggle("selected", cb.checked);
+        this.manifests!.passManifests[p.folder]!.markedForRender = cb.checked;
       };
-
       updateRow();
 
       row.addEventListener("click", (event) => {
@@ -122,14 +124,19 @@ export class RenderPassList extends HTMLElement {
 
           for (let j = start; j <= end; j++) {
             checkboxes[j].checked = true;
+            const pass = this.manifests!.root.passes[j];
+            this.manifests!.passManifests[pass.folder]!.markedForRender = true;
           }
         } else if (ctrlOrCmd) {
           // Toggle only this item.
           cb.checked = !cb.checked;
+          this.manifests!.passManifests[p.folder]!.markedForRender = cb.checked;
         } else {
           // Normal click: select only this item.
           checkboxes.forEach((checkbox, j) => {
             checkbox.checked = j === i;
+            const pass = this.manifests!.root.passes[j];
+            this.manifests!.passManifests[pass.folder]!.markedForRender = checkbox.checked;
           });
         }
 
@@ -144,8 +151,6 @@ export class RenderPassList extends HTMLElement {
           });
 
         lastClickedIndex = i;
-
-        // this.updatePoseWarning();
       });
     });
   }
