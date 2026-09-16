@@ -31,15 +31,30 @@
       <export-mesh id="export-overlay"></export-mesh>
 
       <div class="flex flex-row grow shrink overflow-hidden">
-        <div id="sidebar-object-list" class="p-4 h-full overflow-hidden flex flex-col bg-brown-950 border-r border-r-1 border-r-warm-800">
+        <div
+          id="sidebar-object-list"
+          class="
+            p-4
+            h-full w-[420px]
+            flex flex-col
+            bg-brown-950 border-r border-r-1 border-r-warm-800
+            overflow-hidden
+          "
+        >
           <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
 
-          <div>Select region:
-            <button id="select-sphere-btn" title="Sphere select: click the mesh to place a sphere">O</button>
-            <button id="select-box-btn" title="Box select: click the mesh to place a box">[]</button>
+          <div id="object-filter-menu">
+            <div class="field">
+              <div class="label">Hide largest % of objects:</div>
+              <div class="combined-slider-value">
+                <input type="range" id="object-filter-size-slider" min="0" max="100" value="10" />
+                <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="10" />
+              </div>
+            </div>
+            <button class="ghost" id="recenter-camera-btn" style="width: 100%; margin-top: 8px">Re-center camera</button>
           </div>
 
-          <div>
+          <div class="flex flex-col">
             Recalculate transform correction:
             <button id="recalculate-correction-btn">Recalculate</button>
             <button id="mark-ground-plane-btn" title="Click 3 points on the mesh surface to define the ground plane">Mark ground plane</button>
@@ -74,36 +89,66 @@
         <div id="viewport" class="h-full w-full relative">
           <div class="absolute top-0 left-0 z-10 p-1 w-full">
             <div class="flex flex-row gap-2 bg-brown-800/75 px-4 py-2">
-              <button>Select volume</button>
+              <button id="select-volume-btn">Select volume</button>
               &middot;
-              <button>Fix distortion</button>
+              <button id="fix-distortion-btn">Fix distortion</button>
               &middot;
-              <button>Select ground plane</button>
+              <button id="select-ground-plane-btn">Select ground plane</button>
               &middot;
-              <button>Set up axis</button>
+              <button id="set-up-axis-btn">Set up axis</button>
               &middot;
-              <button>Mirror</button>
+              <button id="mirror-btn">Mirror</button>
               &middot;
-              <button>Reset camera</button>
+              <button id="reset-camera-btn">Reset camera</button>
             </div>
-          </div>
 
+            <div id="select-volume-submenu" class="mt-2">
+              <button id="select-sphere-btn" class="ghost" title="Sphere select: click the mesh to place a sphere">O</button>
+              <button id="select-box-btn"    class="ghost" title="Box select: click the mesh to place a box">[]</button>
+            </div>
 
-          <div class="absolute right-4 top-4">
-            <div id="object-filter-menu" class="menu">
-              <div class="field">
-                <div class="label">Hide largest % of objects:</div>
-                <div class="combined-slider-value">
-                  <input type="range" id="object-filter-size-slider" min="0" max="100" value="10" />
-                  <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="10" />
+            <div id="fix-distortion-submenu" class="mt-2">
+              <div class="flex flex-row">
+                <div id="fix-distortion-submenu_no-selection">
+                  Select a landmark to calculate distortion.
+                  <small>
+                    <br/>
+                    Your landmark should be an object that is not rigged or otherwise animated in the game.<br/>
+                    Landmark should also appear the same as it does in the game when viewed from resource preview panel (different rotations are ok).
+                  </small>
+                </div>
+                <button id="fix-distortion-apply"  class="ghost hidden">Apply</button>
+                <button id="fix-distortion-cancel" class="ghost">Cancel</button>
+              </div>
+            </div>
+
+            <div id="select-ground-plane-submenu" class="mt-2">
+              <div id="select-ground-plane_incomplete-selection">
+                Select three points to define the ground (horizontal) plane.
+              </div>
+
+              <div id="select-ground-plane_options">
+                <div id="select-ground-plane_accept-selection">
+                  Confirm plane
+                </div>
+                <div id="select-ground-plane_accept-selection-180">
+                  Flip 180° & confirm
+                </div>
+                <div id="select-ground-plane_cancel-selection">
+                  Cancel
                 </div>
               </div>
-              <button class="ghost" id="recenter-camera-btn" style="width: 100%; margin-top: 8px">Re-center camera</button>
             </div>
+
+            <div id="fly-speed-indicator" class="mt-4 text-outlined hidden"></div>
+          </div>
+
+          <div class="absolute right-4 top-4">
+
             <div id="control-options-menu">
               <div class="field">
                 <div id="fly-mode-label"></div>
-                <div class="sub" id="fly-speed-indicator" style="display: none"></div>
+
               </div>
             </div>
             <div id="select-options-menu"></div>

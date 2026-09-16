@@ -234,7 +234,6 @@ export class SceneViewerApp {
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
-  private resetCamBtn = this.el("reset-cam-btn");
   private recenterCamBtn = this.el("recenter-camera-btn");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
@@ -249,7 +248,6 @@ export class SceneViewerApp {
   private viewportFilterSlider = this.el<HTMLInputElement>("object-filter-size-slider");
   private viewportFilterValue = this.el<HTMLInputElement>("object-filter-size-value");
 
-  private flyModeLabel = this.el("fly-mode-label");
   private flySpeedIndicator = this.el("fly-speed-indicator");
 
 
@@ -272,9 +270,8 @@ export class SceneViewerApp {
     // Keeps the UI toggle/label/speed indicator in sync regardless of
     // whether fly mode was triggered from this checkbox or the 'A' key.
     this.sceneManager.onFlyStateChange((flying, speed) => {
-      this.flyModeLabel.textContent = flying ? "Fly cam (first-person)" : "Orbit / pan";
-      this.flySpeedIndicator.style.display = flying ? "block" : "none";
-      this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
+      this.flySpeedIndicator.classList.toggle('hidden', !flying);
+      this.flySpeedIndicator.textContent = flying ? `Fly cam. Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
       this.isFlying = flying;
     });
     this.sceneManager.onBeforeRender(() => this.updateSelectAreaGizmoTransform());
@@ -344,7 +341,6 @@ export class SceneViewerApp {
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
       if (this.groundPlaneToolActive || this.selectAreaToolActive) event.preventDefault();
     });
-    this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
     // Both filter control pairs (import screen + post-reconstruct viewport
