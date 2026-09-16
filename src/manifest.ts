@@ -18,7 +18,7 @@ export interface LoadedManifests {
 /** Finds the top-level manifest.json (the shallowest one in the tree - a
  * per-pass manifest.json sits one level deeper, inside pass_NN_tag/) and
  * loads every pass's own manifest alongside it. */
-export async function loadManifests(vfs: VirtualFileSystem): Promise<LoadedManifests | null> {
+export async function loadManifests(vfs: VirtualFileSystem): Promise<FakeManifestResult | null> {
   let manifestPath: string | null = null;
   for (const path of vfs.keys()) {
     if (!path.endsWith("manifest.json")) continue;
@@ -61,7 +61,10 @@ export async function loadManifests(vfs: VirtualFileSystem): Promise<LoadedManif
     }
   }
 
-  return { rootPrefix, root, passManifests, failedPassFolders };
+  return {
+    manifests: { rootPrefix, root, passManifests, failedPassFolders },
+    vfs
+  };
 }
 
 export interface FakeManifestResult {

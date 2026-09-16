@@ -15,8 +15,13 @@ import {
 } from "./scene/mesh-builder";
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { TextureManager } from "./scene/texture-manager";
-import type { DrawEntry, PassIndexEntry } from "./types";
+import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
 import { calculateDistortion } from "./mesh-tools/calculator";
+import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
+import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
+import { ObjectsSidebar } from './components/objects-sidebar/cmp.objects-sidebar';
+import { Overlay } from './components/common/overlay/cmp.overlay';
+import { Config } from './config/cls.config';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -45,6 +50,7 @@ export class SceneViewerApp {
   private loaded: LoadedManifests | null = null;
   private textures = new TextureManager();
   private sceneManager: SceneManager;
+  private appConfig: Config;
 
   private materialCache = new Map<string, THREE.Material>();
   private untexturedMaterial: THREE.Material | null = null;
@@ -127,17 +133,23 @@ export class SceneViewerApp {
   private outlineQuadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private outlineQuadMaterial: THREE.ShaderMaterial | null = null;
 
-  private dropzone = this.el("dropzone");
-  private folderInput = this.el<HTMLInputElement>("folder-input");
-  private passSection = this.el("pass-section");
-  private passList = this.el("pass-list");
-  private poseWarning = this.el("pose-warning");
-  private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
+  private elements = {
+    menu: {
+      importScene: this.el("menu-import-scene"),
+      controlOptions: this.el("menu-control-options"),
+      fixExport: this.el("menu-fix-export"),
+    },
+
+    captureImporter: this.el<CaptureImporter>("capture-importer"),
+    loadingScreen: this.el<LoadingScreen>("loading-screen"),
+    controlsOverlay: this.el<Overlay>("controls-overlay"),
+    exportOverlay: this.el<Overlay>("export-overlay"),
+  };
+
+
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
   private applyRotationCheckbox = this.el<HTMLInputElement>("apply-rotation-checkbox");
-  private resetCamBtn = this.el("reset-cam-btn");
   private recenterCamBtn = this.el("recenter-camera-btn");
-  private statusBar = this.el("status-bar");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
   private objectList = this.el('object-list');
@@ -148,21 +160,22 @@ export class SceneViewerApp {
   private resourcePanelMinSize = { width: 360, height: 420 };
   private resourcePanelSize = { ...this.resourcePanelMinSize };
 
-  private importFilterSlider = this.el<HTMLInputElement>("import-filter-size-slider");
-  private importFilterValue = this.el<HTMLInputElement>("import-filter-size-value");
   private viewportFilterSlider = this.el<HTMLInputElement>("object-filter-size-slider");
   private viewportFilterValue = this.el<HTMLInputElement>("object-filter-size-value");
 
-  private flyModeToggle = this.el<HTMLInputElement>("fly-mode-toggle");
   private flyModeLabel = this.el("fly-mode-label");
   private flySpeedIndicator = this.el("fly-speed-indicator");
 
-  private controlSchemeDropdown = this.el<HTMLSelectElement>("control-scheme-dropdown");
-  private controlSchemeLabel = this.el("control-scheme-label");
 
   constructor(viewportEl: HTMLElement) {
+    this.appConfig = Config.getConfig();
+
     this.sceneManager = new SceneManager(viewportEl);
-    this.setupSelectionOutlinePass();
+    try {
+      this.setupSelectionOutlinePass();
+    } catch (e) {
+      console.warn('setupSelectionOutlinePass failed', e);
+    }
     this.sceneManager.onContextLoss((lost) => {
       if (lost) {
         // this.setStatus(
@@ -173,16 +186,14 @@ export class SceneViewerApp {
     // Keeps the UI toggle/label/speed indicator in sync regardless of
     // whether fly mode was triggered from this checkbox or the 'A' key.
     this.sceneManager.onFlyStateChange((flying, speed) => {
-      this.flyModeToggle.checked = flying;
       this.flyModeLabel.textContent = flying ? "Fly cam (first-person)" : "Orbit / pan";
       this.flySpeedIndicator.style.display = flying ? "block" : "none";
       this.flySpeedIndicator.textContent = flying ? `Speed: ${this.formatFlySpeed(speed)} \u00b7 scroll to adjust` : "";
     });
     this.sceneManager.onControlSchemeChange((scheme) => {
-      this.controlSchemeDropdown.value = scheme;
-      this.controlSchemeLabel.textContent =
-        scheme === "wasd" ? "WASD - movement; F: toggle fly mode" : "ESDF - movement; A: toggle fly mode";
+      console.warn('Control scheme change called from scene manager!', scheme);
     });
+    this.setupMenu();
     this.wireEvents();
   }
 
@@ -198,45 +209,45 @@ export class SceneViewerApp {
     return found as T;
   }
 
-  private wireEvents(): void {
-    // this.dropzone.addEventListener("click", () => this.folderInput.click());
-    // this.dropzone.addEventListener("dragover", (e) => {
-    //   e.preventDefault();
-    //   this.dropzone.classList.add("drag");
-    // });
-    // this.dropzone.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
-    // this.dropzone.addEventListener("drop", async (e) => {
-    //   e.preventDefault();
-    //   this.dropzone.classList.remove("drag");
-    //   if (!e.dataTransfer) return;
-    //   this.setStatus("Reading dropped folder...");
-    //   const entries = await collectFromDrop(e.dataTransfer);
-    //   await this.handleFiles(entries);
-    // });
-    // this.folderInput.addEventListener("change", async (e) => {
-    //   const files = (e.target as HTMLInputElement).files;
-    //   if (!files) return;
-    //   this.setStatus("Reading folder...");
-    //   await this.handleFiles(collectFromInput(files));
-    // });
+  private setStatus() {
 
-    this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
-    this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
-    this.controlSchemeDropdown.addEventListener("change", () => {
-      const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
-      this.sceneManager.setControlScheme(scheme);
+  }
+
+  private setupMenu() {
+    this.elements.menu.importScene.addEventListener('click', () => {
+      this.elements.captureImporter.classList.remove('hidden');
     });
+    this.elements.menu.controlOptions.addEventListener('click', () => {
+      console.info('opening control options overlay');
+      this.elements.controlsOverlay.show();
+    });
+    this.elements.controlsOverlay.addEventListener('control-scheme-updated', (e: any) => {
+      console.log('[app] Control scheme updated:', e.detail.controlScheme);
+      this.sceneManager.setControlScheme(e.detail.controlScheme);
+    });
+    this.elements.menu.fixExport.addEventListener('click', () => {
+      console.info('opening export overlay');
+      this.elements.exportOverlay.show();
+    });
+  }
+
+  private wireEvents(): void {
+    this.elements.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
+      console.log('received reconstruct-scene:', e);
+      this.reconstructScene(e.detail);
+    });
+
+
+    this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
     // Both filter control pairs (import screen + post-reconstruct viewport
     // menu) drive the same underlying value and stay in sync with each
     // other - see setHidePercent().
-    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
+    for (const slider of [this.viewportFilterSlider]) {
       slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
     }
-    for (const text of [this.importFilterValue, this.viewportFilterValue]) {
+    for (const text of [this.viewportFilterValue]) {
       text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
     }
 
@@ -246,38 +257,9 @@ export class SceneViewerApp {
   private setHidePercent(value: number): void {
     const clamped = Math.min(100, Math.max(0, Math.round(Number.isFinite(value) ? value : 0)));
     this.hidePercent = clamped;
-    for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) slider.value = String(clamped);
-    for (const text of [this.importFilterValue, this.viewportFilterValue]) text.value = String(clamped);
+    for (const slider of [this.viewportFilterSlider]) slider.value = String(clamped);
+    for (const text of [this.viewportFilterValue]) text.value = String(clamped);
     if (this.loadedDraws.length > 0) this.rebuildVisibleScene();
-  }
-
-  private getSelectedFolders(): string[] {
-    return Array.from(this.passList.querySelectorAll<HTMLInputElement>("input:checked")).map(
-      (cb) => cb.dataset.folder as string,
-    );
-  }
-
-  private updatePoseWarning(): void {
-    if (!this.loaded) return;
-    const selected = this.getSelectedFolders();
-    const anyPosed = selected.some((f) => (this.loaded!.passManifests[f]?.draws ?? []).some((d) => d.posedMesh));
-
-    if (!anyPosed) {
-      this.showWarning(
-        "None of the selected passes have posed mesh data (this export may have been done without \u201cwith posed meshes\u201d) - falling back to bind pose, piled near the origin.",
-      );
-    } else if (selected.length > 1) {
-      this.showWarning(
-        "Multiple passes selected: posed geometry is relative to whatever camera was active for that pass. Different passes may use different cameras and won't necessarily align spatially when combined.",
-      );
-    } else {
-      this.poseWarning.style.display = "none";
-    }
-  }
-
-  private showWarning(message: string): void {
-    this.poseWarning.style.display = "block";
-    this.poseWarning.textContent = message;
   }
 
   private getUntexturedMaterial(): THREE.Material {
@@ -383,15 +365,30 @@ export class SceneViewerApp {
     return wrap;
   }
 
-  private async reconstructScene(): Promise<void> {
-    if (!this.loaded) return;
-    const selected = this.getSelectedFolders();
-    if (selected.length === 0) {
-      // this.setStatus("Select at least one pass first.");
+  private async reconstructScene({vfs, manifests, importOptions }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: any }): Promise<void> {
+    this.loaded = manifests;
+    if (!this.loaded || !vfs) {
+      console.info('No manifests loaded — doing nothing.');
       return;
     }
 
-    this.reconstructBtn.disabled = true;
+    const selected: string[] = [];
+    for (const f in this.loaded.passManifests) {
+      if (this.loaded.passManifests[f].markedForRender) {
+        selected.push(f);
+      }
+    }
+
+    if (selected.length === 0) {
+      console.info('No passes selected — doing nothing.');
+      return;
+    }
+    this.vfs = vfs;
+    this.elements.captureImporter.classList.add('hidden');
+    this.elements.loadingScreen.show();
+    this.elements.loadingScreen.log("Starting reconstruction...");
+
+
     this.emptyHint.style.display = "none";
     this.hud.style.display = "block";
     // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
@@ -424,6 +421,8 @@ export class SceneViewerApp {
       let loggedMissingMesh = false;
 
       for (const folder of selected) {
+        const logLine = this.elements.loadingScreen.log(`Processing pass "${folder}"...`);
+
         const manifest = this.loaded.passManifests[folder];
         if (!manifest) {
           if (!loggedMissingManifest) {
@@ -433,11 +432,13 @@ export class SceneViewerApp {
             );
             loggedMissingManifest = true;
           }
+          logLine.updateLogItem(`No manifest found for pass "${folder}"; skipping`);
           continue;
         }
         const passDir = joinPath(this.loaded.rootPrefix, folder);
 
         for (const draw of manifest.draws) {
+          logLine.updateLogItem(`Processing pass "${folder}" ...`, { current: processed, total: manifest.draws.length });
           processed++;
           try {
             const outcome = await this.loadDraw(draw, passDir);
@@ -452,6 +453,7 @@ export class SceneViewerApp {
                     `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
                 );
                 loggedMissingMesh = true;
+                this.elements.loadingScreen.log(`Mesh file not found for eid${draw.eventId}`);
               }
             } else {
               // Global index into loadedDraws (loadDraw() just pushed this
@@ -470,13 +472,16 @@ export class SceneViewerApp {
           } catch (e) {
             exceptionCount++;
             console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
+            this.elements.loadingScreen.log(`Exception loading draw eid${draw.eventId}`);
           }
           if (processed % 50 === 0) {
-            this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
+            // this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         }
       }
+
+      this.elements.loadingScreen.log(`Finished processing all passes. Calculating scale and/or initial scale ...`);
 
       // Normalization scale is computed ONCE here, from every loaded draw
       // regardless of the size filter, and then held fixed - see
@@ -497,13 +502,16 @@ export class SceneViewerApp {
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
       this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
+      this.elements.loadingScreen.log(`Rebuilding visible scene...`);
       this.rebuildVisibleScene();
+      this.elements.loadingScreen.log(`Visible scene rebuilt.`);
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
-      this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
-    } finally {
-      this.reconstructBtn.disabled = false;
+      // this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
+      this.elements.loadingScreen.log(`Reconstruction failed.`);
     }
+
+    this.elements.loadingScreen.hide();
   }
 
   /** Rebuilds the rendered scene from this.loadedDraws according to both
@@ -761,7 +769,7 @@ export class SceneViewerApp {
     // currentDistance = fitDistance * zoomRatio - keeping the user's zoom as
     // a RATIO (rather than an absolute distance) means resizing the panel
     // (which changes fitDistance, see resize() below) preserves how far
-    // they'd zoomed in/out instead of resetting it.
+    // // they'd zoomed in/out instead of resetting it.
     let zoomRatio = 1;
     let currentDistance = fitDistance;
 
