@@ -150,6 +150,9 @@ p {
     }
   }
 
+  &:has(.disabled) {
+    @apply opacity-50 pointer-events-none;
+  }
 
 }
 
@@ -211,9 +214,11 @@ code {
 }
 
 #sidebar {
-  width: 340px; min-width: 340px; background: var(--bg-panel);
-  border-right: 1px solid var(--line); display: flex; flex-direction: column;
-  overflow: hidden;
+  /* width: 340px; min-width: 340px; max-width: 440px; */
+  @apply w-[340px] flex flex-col
+    bg-brown-900
+    border-r border-r-1 border-r-warm-500
+    overflow-hidden;
 }
 #sidebar-scroll { overflow-y: auto; padding: 18px 16px 16px; flex: 1; }
 
@@ -261,16 +266,11 @@ code {
 }
 
 
-/* .dropzone.drag { border-color: var(--accent); background: rgba(110, 231, 200, 0.06); color: var(--text); } */
-/* .dropzone strong { color: var(--text); font-weight: 600; } */
-/* .dropzone .hint { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); } */ */
-
 .section-label {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-dim); margin: 22px 0 8px;
 }
 
-/* .pass-list { display: flex; flex-direction: column; gap: 6px; } */
 .pass-row {
   @apply cursor-pointer py-1 pl-2 pr-4 flex gap-2 items-start bg-brown-700 text-warm-200;
 
@@ -474,13 +474,20 @@ code {
 .switch input:checked + .slider { background: var(--accent-dim); }
 .switch input:checked + .slider::before { transform: translateX(15px); background: var(--accent); }
 
-button.primary {
-  width: 100%; margin-top: 16px; padding: 10px; border-radius: 8px; border: none;
-  background: var(--accent); color: #0b1512; font-weight: 600; font-size: 13px;
-  cursor: pointer; transition: opacity .15s;
+button {
+  &.primary {
+    @apply mt-8 bg-warm-200 text-brown-900 py-2 px-8 w-full font-semibold cursor-pointer;
+
+    &:not(.disabled):hover {
+      @apply bg-warm-100;
+    }
+  }
+
+  &.disabled {
+    @apply pointer-events-none;
+    cursor: not-allowed;
+  }
 }
-button.primary:disabled { opacity: 0.35; cursor: not-allowed; }
-button.primary:not(:disabled):hover { opacity: 0.88; }
 
 button.ghost {
   background: none; border: 1px solid var(--line); color: var(--text-dim);
@@ -517,3 +524,5 @@ input[type="file"] { display: none; }
 ::-webkit-scrollbar { width: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+.overlay-backdrop-blur { backdrop-filter: blur(1rem); }
