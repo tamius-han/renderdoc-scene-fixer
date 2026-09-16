@@ -1,5 +1,5 @@
 import { collectFromDrop, collectFromInput, dirname, joinPath, VirtualFileSystem } from "../../filesystem";
-import { loadManifests, type LoadedManifests } from "../../manifest";
+import { fakeManifest, loadManifests, type LoadedManifests } from "../../manifest";
 import { UNIT_CONVERSION } from '../../util/const.unit-conversion';
 import template from './cls.capture-importer.html?raw';
 import { RenderPassList } from '../common/cmp.render-pass-list';
@@ -398,7 +398,9 @@ export class CaptureImporter extends HTMLElement {
    * @param file
    */
   private updateIntelGPADropzone(dropzone: IntelGPADropzone, file: File) {
-    this.intelGPADropzones[dropzone].dropzone.innerHTML = file.name;
+    const type = dropzone.split('.')[0].replace('-', ' ');
+
+    this.intelGPADropzones[dropzone].dropzone.innerHTML = `<span class="text-warm-500">${type}:</span> ${file.name}`;
     this.intelGPADropzones[dropzone].dropzone.classList.add('has-file');
   }
 
@@ -408,7 +410,8 @@ export class CaptureImporter extends HTMLElement {
    */
   private resetIntelGPADropzone(dropzone: IntelGPADropzone) {
     this.intelGPADropzones[dropzone].dropzone.innerHTML = `<div>Drop your <strong>${dropzone}.obj</strong> here</div>`;
-    this.intelGPADropzones[dropzone].dropzone.classList.remove('has-file');
+    this.intelGPADropzones[dropzone].dropzone.classList.remove('has-file', 'drag');
+    this.intelGPAImports[dropzone] = null;
   }
 
   /**
@@ -433,13 +436,20 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
+    const loaded = await fakeManifest(this.intelGPAImports['scene']!);
+
+    if (!loaded) {
+      this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
+      return;
+    }
+
+    this.renderPassList.manifests = loaded.manifests;
+    this.importProcessingSection.style.display = "block";
 
     // reset all dropzones on successful import
     for (const dropzone in this.intelGPADropzones) {
       this.resetIntelGPADropzone(dropzone as IntelGPADropzone);
     }
-
-    alert('TODO: implement loading');
   }
 
   /**

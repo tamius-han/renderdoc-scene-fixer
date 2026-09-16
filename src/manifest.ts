@@ -137,8 +137,8 @@ export async function fakeManifest(sceneObj: File): Promise<FakeManifestResult> 
     return {
       eventId: i,
       name: `${sceneObj.name} part ${i}`,
+      posedMesh: meshFile,
       mesh: meshFile,
-      posedMesh: null,
       textures: [],
     };
   });
