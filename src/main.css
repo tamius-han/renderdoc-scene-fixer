@@ -120,6 +120,17 @@ p {
 .field {
   @apply flex flex-col gap-2 my-2 w-full;
 
+  &.row {
+    @apply my-4 flex flex-row items-center gap-4
+      border-b border-b-1 border-b-warm-500 border-dotted;
+
+    .label, .input {
+      @apply flex-1;
+    }
+  }
+
+
+
   input[type="text"] {
     @apply border-b border-b-1 border-b-amber-300 px-2
   }
@@ -140,6 +151,12 @@ p {
   }
 
 
+}
+
+.disabled {
+  @apply opacity-50 pointer-events-none;
+
+  filter: grayscale(100%);
 }
 
 h1, h2, h3, h4, h5, h6 {

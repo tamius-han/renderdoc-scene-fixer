@@ -6,6 +6,7 @@ import { RenderPassList } from '../common/cmp.render-pass-list';
 import { guessIntelGPAImportTargetFromFilename, guessIntelGPAImportTargetsFromFilenames, identifyIntelGPAImport } from './intel-gpa-import-helpers';
 import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
+import { Config } from '../../config/cls.config';
 
 enum ImportType {
   Unknown = 0,
@@ -15,28 +16,66 @@ enum ImportType {
 }
 
 export class CaptureImporter extends HTMLElement {
+
+  private appConfig: Config;
+
   constructor() {
     super();
+
+    this.appConfig = Config.getConfig();
+    this.elements = ({} as any);
   }
 
-  private dropzoneOuter!: HTMLElement;
-  private dropzone!: HTMLElement;
-  private folderInput!: HTMLInputElement;
+  private elements: {
+    dropzoneOuter: HTMLElement;
+    dropzone: HTMLElement;
+    folderInput: HTMLInputElement;
 
-  private importProcessingSection!: HTMLElement;
+    importProcessingSection: HTMLElement;
 
-  private reconstructBtn: HTMLButtonElement;
-  private recalculateCorrectionBtn: HTMLButtonElement;
-  private resetCamBtn: HTMLButtonElement;
-  private recenterCamBtn: HTMLButtonElement;
-  private flyModeToggle: HTMLInputElement;
-  private controlSchemeDropdown: HTMLSelectElement;
-  private importFilterSlider: HTMLInputElement;
-  private viewportFilterSlider: HTMLInputElement;
-  private importFilterValue: HTMLInputElement;
-  private viewportFilterValue: HTMLInputElement;
-  private statusBar!: HTMLElement;
-  private renderPassList!: RenderPassList;
+    // import options
+    captureUnitUnit: HTMLSelectElement;
+    captureUnitSize: HTMLInputElement;
+    importSizeFilterSlider: HTMLInputElement;
+    importSizeFilterInput: HTMLInputElement;
+    enforceMaxSceneSizeCheckbox: HTMLInputElement;
+    maxSceneSizeInput: HTMLInputElement;
+    enforceInitialScaleLimitCheckbox: HTMLInputElement;
+    initialScaleLimitInput: HTMLInputElement;
+
+
+    reconstructBtn: HTMLButtonElement;
+    recalculateCorrectionBtn: HTMLButtonElement;
+    resetCamBtn: HTMLButtonElement;
+    recenterCamBtn: HTMLButtonElement;
+    flyModeToggle: HTMLInputElement;
+    controlSchemeDropdown: HTMLSelectElement;
+    importFilterSlider: HTMLInputElement;
+    viewportFilterSlider: HTMLInputElement;
+    importFilterValue: HTMLInputElement;
+    viewportFilterValue: HTMLInputElement;
+    statusBar: HTMLElement;
+    renderPassList: RenderPassList;
+  };
+
+  // private dropzoneOuter!: HTMLElement;
+  // private dropzone!: HTMLElement;
+  // private folderInput!: HTMLInputElement;
+
+  // private importProcessingSection!: HTMLElement;
+
+  // private reconstructBtn: HTMLButtonElement;
+  // private recalculateCorrectionBtn: HTMLButtonElement;
+  // private resetCamBtn: HTMLButtonElement;
+  // private recenterCamBtn: HTMLButtonElement;
+  // private flyModeToggle: HTMLInputElement;
+  // private controlSchemeDropdown: HTMLSelectElement;
+  // private importFilterSlider: HTMLInputElement;
+  // private viewportFilterSlider: HTMLInputElement;
+  // private importFilterValue: HTMLInputElement;
+  // private viewportFilterValue: HTMLInputElement;
+  // private statusBar!: HTMLElement;
+  // private renderPassList!: RenderPassList;
 
   private intelGPADropzones!: {
     [key in IntelGPADropzone]: {
@@ -62,11 +101,11 @@ export class CaptureImporter extends HTMLElement {
    * Puts all relevant HTML elements into class properties for convenient access.
    */
   private registerElements() {
-    this.dropzoneOuter = this.querySelector("#capture-importer-container") as HTMLElement;
+    this.elements.dropzoneOuter = this.querySelector("#capture-importer-container") as HTMLElement;
 
     // individual dropzones and file inputs
-    this.dropzone = this.querySelector("#capture-importer-dropzone") as HTMLElement;
-    this.folderInput = this.querySelector("#capture-importer-folder-input") as HTMLInputElement;
+    this.elements.dropzone = this.querySelector("#capture-importer-dropzone") as HTMLElement;
+    this.elements.folderInput = this.querySelector("#capture-importer-folder-input") as HTMLInputElement;
     this.intelGPADropzones = {
       'landmark-source': {
         dropzone: this.querySelector("#capture-importer-landmark-source-obj") as HTMLElement,
@@ -82,21 +121,31 @@ export class CaptureImporter extends HTMLElement {
       }
     }
 
-    this.importProcessingSection = this.querySelector("#capture-importer-import-processing-section") as HTMLElement;
-    this.renderPassList = this.querySelector(".render-pass-list") as RenderPassList;
+    this.elements.importProcessingSection = this.querySelector("#capture-importer-import-processing-section") as HTMLElement;
+    this.elements.renderPassList = this.querySelector(".render-pass-list") as RenderPassList;
 
-    this.statusBar = this.querySelector("#status-bar") as HTMLElement;
+    this.elements.statusBar = this.querySelector("#status-bar") as HTMLElement;
 
-    this.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
-    this.recalculateCorrectionBtn = this.querySelector("#capture-importer-recalculate-correction-btn") as HTMLButtonElement;
-    this.resetCamBtn = this.querySelector("#capture-importer-reset-cam-btn") as HTMLButtonElement;
-    this.recenterCamBtn = this.querySelector("#recenter-camera-btn") as HTMLButtonElement;
-    this.flyModeToggle = this.querySelector("#fly-mode-toggle") as HTMLInputElement;
-    this.controlSchemeDropdown = this.querySelector("#control-scheme-dropdown") as HTMLSelectElement;
-    this.importFilterSlider = this.querySelector("#capture-importer-import-filter-size-slider") as HTMLInputElement;
-    this.viewportFilterSlider = this.querySelector("#object-filter-size-slider") as HTMLInputElement;
-    this.importFilterValue = this.querySelector("#capture-importer-import-filter-size-value") as HTMLInputElement;
-    this.viewportFilterValue = this.querySelector("#object-filter-size-value") as HTMLInputElement;
+    // import options
+    this.elements.captureUnitUnit = this.querySelector("#capture-importer-capture-unit-unit") as HTMLSelectElement;
+    this.elements.captureUnitSize = this.querySelector("#capture-importer-capture-unit-size") as HTMLInputElement;
+    this.elements.importSizeFilterSlider = this.querySelector("#capture-importer-import-size-filter-slider") as HTMLInputElement;
+    this.elements.importSizeFilterInput = this.querySelector("#capture-importer-import-size-filter-value") as HTMLInputElement;
+    this.elements.maxSceneSizeInput = this.querySelector("#capture-importer-max-scene-size") as HTMLInputElement;
+    this.elements.enforceInitialScaleLimitCheckbox = this.querySelector("#capture-importer-enforce-initial-scale-limit") as HTMLInputElement;
+    this.elements.initialScaleLimitInput = this.querySelector("#capture-importer-initial-scale-limit") as HTMLInputElement;
+
+
+    // this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
+    // this.elements.recalculateCorrectionBtn = this.querySelector("#capture-importer-recalculate-correction-btn") as HTMLButtonElement;
+    // this.elements.resetCamBtn = this.querySelector("#capture-importer-reset-cam-btn") as HTMLButtonElement;
+    // this.elements.recenterCamBtn = this.querySelector("#recenter-camera-btn") as HTMLButtonElement;
+    // this.elements.flyModeToggle = this.querySelector("#fly-mode-toggle") as HTMLInputElement;
+    // this.elements.controlSchemeDropdown = this.querySelector("#control-scheme-dropdown") as HTMLSelectElement;
+    // this.elements.importFilterSlider = this.querySelector("#capture-importer-import-filter-size-slider") as HTMLInputElement;
+    // this.elements.viewportFilterSlider = this.querySelector("#object-filter-size-slider") as HTMLInputElement;
+    // this.elements.importFilterValue = this.querySelector("#capture-importer-import-filter-size-value") as HTMLInputElement;
+    // this.elements.viewportFilterValue = this.querySelector("#object-filter-size-value") as HTMLInputElement;
 
   }
 
@@ -105,64 +154,60 @@ export class CaptureImporter extends HTMLElement {
    */
   private setupEvents() {
     this.setupDropzones();
+    this.setupImportOptionsUI();
 
-    this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
+    this.elements.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
 
-    // this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    // this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.flyModeToggle.checked));
-    // this.controlSchemeDropdown.addEventListener("change", () => {
-    //   const scheme = this.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
+    // this.elements.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    // this.elements.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    // this.elements.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    // this.elements.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.elements.flyModeToggle.checked));
+    // this.elements.controlSchemeDropdown.addEventListener("change", () => {
+    //   const scheme = this.elements.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
     //   this.sceneManager.setControlScheme(scheme);
     // });
 
     // // Both filter control pairs (import screen + post-reconstruct viewport
     // // menu) drive the same underlying value and stay in sync with each
     // // other - see setHidePercent().
-    // for (const slider of [this.importFilterSlider, this.viewportFilterSlider]) {
-    //   slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
-    // }
-    // for (const text of [this.importFilterValue, this.viewportFilterValue]) {
-    //   text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
-    // }
+
 
     // this.setupObjectList();
   }
 
   private setupDropzones() {
     // For the time being, we don't change classes when mouse hovers over global dropzone
-    // this.dropzoneOuter.addEventListener("dragover", (e) => {
+    // this.elements.dropzoneOuter.addEventListener("dragover", (e) => {
     //   e.preventDefault();
-    //   this.dropzone.classList.add("drag");
+    //   this.elements.dropzone.classList.add("drag");
     // });
-    // this.dropzoneOuter.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
+    // this.elements.dropzoneOuter.addEventListener("dragleave", () => this.elements.dropzone.classList.remove("drag"));
 
-    this.dropzoneOuter.addEventListener("drop", async (e) => {
+    this.elements.dropzoneOuter.addEventListener("drop", async (e) => {
       e.preventDefault();
-      this.dropzone.classList.remove("drag");
+      this.elements.dropzone.classList.remove("drag");
       if (!e.dataTransfer) return;
       this.setStatus("[global dropzone] Reading dropped files ...");
       const entries = await collectFromDrop(e.dataTransfer);
       await this.handleFiles(entries);
     });
-    this.dropzone.addEventListener("dragover", (e) => {
+    this.elements.dropzone.addEventListener("dragover", (e) => {
       e.stopPropagation();
       e.preventDefault();
-      this.dropzone.classList.add("drag");
+      this.elements.dropzone.classList.add("drag");
     });
-    this.dropzone.addEventListener("dragleave", () => this.dropzone.classList.remove("drag"));
-    this.dropzone.addEventListener("drop", async (e) => {
+    this.elements.dropzone.addEventListener("dragleave", () => this.elements.dropzone.classList.remove("drag"));
+    this.elements.dropzone.addEventListener("drop", async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.dropzone.classList.remove("drag");
+      this.elements.dropzone.classList.remove("drag");
       if (!e.dataTransfer) return;
       this.setStatus("[renderdoc dropzone] Reading dropped folder...");
       const entries = await collectFromDrop(e.dataTransfer);
       await this.handleFiles(entries);
     });
-    this.dropzone.addEventListener("click", () => this.folderInput.click());
-    this.folderInput.addEventListener("change", async (e) => {
+    this.elements.dropzone.addEventListener("click", () => this.elements.folderInput.click());
+    this.elements.folderInput.addEventListener("change", async (e) => {
       const files = (e.target as HTMLInputElement).files;
       if (!files) return;
       this.setStatus("[renderdoc folder input] Reading folder...");
@@ -198,6 +243,77 @@ export class CaptureImporter extends HTMLElement {
         await this.handleFiles(collectFromInput(files), target as IntelGPADropzone);
       });
     }
+  }
+
+  private setupImportOptionsUI() {
+    // load initial values
+    this.elements.captureUnitSize.value = this.appConfig.config.importOptions.captureUnitSize as any;
+    this.elements.captureUnitUnit.value = this.appConfig.config.importOptions.captureUnitUnit;
+
+    this.elements.importSizeFilterSlider.value = this.appConfig.config.objectFiltering.hideLargestObjectsPercent as any;
+    this.elements.importSizeFilterInput.value = this.appConfig.config.objectFiltering.hideLargestObjectsPercent as any;
+
+    this.elements.maxSceneSizeInput.value = this.appConfig.config.importOptions.maxSceneSize as any;
+    this.elements.enforceMaxSceneSizeCheckbox.checked = this.appConfig.config.importOptions.forceMaxSceneSize;
+    this.elements.enforceInitialScaleLimitCheckbox.checked = this.appConfig.config.importOptions.forceInitialScaleLimit;
+    this.elements.initialScaleLimitInput.value = this.appConfig.config.importOptions.initialScaleLimit as any;
+
+    // disable appropriate fields
+    {
+      if (!this.elements.enforceMaxSceneSizeCheckbox.checked) {
+        this.elements.maxSceneSizeInput.classList.add("disabled");
+      } else {
+        this.elements.maxSceneSizeInput.classList.remove("disabled");
+      }
+
+      if (!this.elements.enforceInitialScaleLimitCheckbox.checked) {
+        this.elements.initialScaleLimitInput.classList.add("disabled");
+      } else {
+        this.elements.initialScaleLimitInput.classList.remove("disabled");
+      }
+    }
+
+    // setup event listeners
+    {
+      this.elements.captureUnitSize.addEventListener("change", () => {
+        this.appConfig.config.importOptions.captureUnitSize = Number(this.elements.captureUnitSize.value);
+      });
+      this.elements.captureUnitUnit.addEventListener("change", () => {
+        this.appConfig.config.importOptions.captureUnitUnit = this.elements.captureUnitUnit.value;
+      });
+      this.elements.importSizeFilterSlider.addEventListener("input", () => {
+        this.appConfig.config.objectFiltering.hideLargestObjectsPercent = Number(this.elements.importSizeFilterSlider.value);
+        this.elements.importSizeFilterInput.value = this.elements.importSizeFilterSlider.value;
+      });
+      this.elements.importSizeFilterInput.addEventListener("change", () => {
+        this.appConfig.config.objectFiltering.hideLargestObjectsPercent = Number(this.elements.importSizeFilterInput.value);
+        this.elements.importSizeFilterSlider.value = this.elements.importSizeFilterInput.value;
+      });
+      this.elements.enforceMaxSceneSizeCheckbox.addEventListener("change", () => {
+        this.appConfig.config.importOptions.forceMaxSceneSize = this.elements.enforceMaxSceneSizeCheckbox.checked;
+        if (!this.elements.enforceMaxSceneSizeCheckbox.checked) {
+          this.elements.maxSceneSizeInput.classList.add("disabled");
+        } else {
+          this.elements.maxSceneSizeInput.classList.remove("disabled");
+        }
+      });
+      this.elements.maxSceneSizeInput.addEventListener("change", () => {
+        this.appConfig.config.importOptions.maxSceneSize = Number(this.elements.maxSceneSizeInput.value);
+      });
+      this.elements.enforceInitialScaleLimitCheckbox.addEventListener("change", () => {
+        this.appConfig.config.importOptions.forceInitialScaleLimit = this.elements.enforceInitialScaleLimitCheckbox.checked;
+        if (!this.elements.enforceInitialScaleLimitCheckbox.checked) {
+          this.elements.initialScaleLimitInput.classList.add("disabled");
+        } else {
+          this.elements.initialScaleLimitInput.classList.remove("disabled");
+        }
+      });
+      this.elements.initialScaleLimitInput.addEventListener("change", () => {
+        this.appConfig.config.importOptions.initialScaleLimit = Number(this.elements.initialScaleLimitInput.value);
+      });
+    }
+
+
   }
 
   private async reconstructScene(): Promise<void> {
@@ -324,7 +440,7 @@ export class CaptureImporter extends HTMLElement {
   }
 
   private setStatus(message: string): void {
-    this.statusBar.textContent = message;
+    this.elements.statusBar.textContent = message;
   }
 
   /**
@@ -443,8 +559,8 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
-    this.renderPassList.manifests = loaded.manifests;
-    this.importProcessingSection.style.display = "block";
+    this.elements.renderPassList.manifests = loaded.manifests;
+    this.elements.importProcessingSection.style.display = "block";
 
     // reset all dropzones on successful import
     for (const dropzone in this.intelGPADropzones) {
@@ -507,11 +623,11 @@ export class CaptureImporter extends HTMLElement {
 
     console.log("Loaded manifests:", loaded);
 
-    this.renderPassList.manifests = loaded;
-    this.importProcessingSection.style.display = "block";
+    this.elements.renderPassList.manifests = loaded;
+    this.elements.importProcessingSection.style.display = "block";
 
     // this.loaded = loaded;
-    // this.renderPassList();
+    // this.elements.renderPassList();
     const failedNote = loaded.failedPassFolders.length
       ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
       : "";
