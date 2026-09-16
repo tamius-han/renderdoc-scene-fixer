@@ -1,12 +1,12 @@
-import { collectFromDrop, collectFromInput, dirname, joinPath, VirtualFileSystem } from "../../filesystem";
-import { fakeManifest, loadManifests, type LoadedManifests } from "../../manifest";
-import { UNIT_CONVERSION } from '../../util/const.unit-conversion';
-import template from './cls.capture-importer.html?raw';
-import { RenderPassList } from '../common/cmp.render-pass-list';
+import { UNITS } from '../../util/const.unit-conversion';
+import { fakeManifest, loadManifests } from "../../manifest";
+import template from './cmp.capture-importer.html?raw';
+import { RenderPassList } from '../common/render-pass/cmp.render-pass-list';
 import { guessIntelGPAImportTargetFromFilename, guessIntelGPAImportTargetsFromFilenames, identifyIntelGPAImport } from './intel-gpa-import-helpers';
 import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
+import { collectFromDrop, VirtualFileSystem } from '../../filesystem';
 
 enum ImportType {
   Unknown = 0,
@@ -18,13 +18,7 @@ enum ImportType {
 export class CaptureImporter extends HTMLElement {
 
   private appConfig: Config;
-
-  constructor() {
-    super();
-
-    this.appConfig = Config.getConfig();
-    this.elements = ({} as any);
-  }
+  private vfs!: VirtualFileSystem;
 
   private elements: {
     dropzoneOuter: HTMLElement;
@@ -58,6 +52,14 @@ export class CaptureImporter extends HTMLElement {
     renderPassList: RenderPassList;
   };
 
+
+  constructor() {
+    super();
+
+    this.appConfig = Config.getConfig();
+    this.elements = ({} as any);
+  }
+
   // private dropzoneOuter!: HTMLElement;
   // private dropzone!: HTMLElement;
   // private folderInput!: HTMLInputElement;
@@ -84,7 +86,7 @@ export class CaptureImporter extends HTMLElement {
     }
   }
 
-  private intelGPAImports: { [key in IntelGPADropzone]: File | null } = {
+  private intelGPAImports: { [key in IntelGPADropzone]: FileInfo | null } = {
     'landmark-source': null,
     'landmark-output': null,
     'scene': null
@@ -138,18 +140,6 @@ export class CaptureImporter extends HTMLElement {
 
     // reconstruct button
     this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
-    console.log('reconstruct button:', this.elements.reconstructBtn);
-
-    // this.elements.recalculateCorrectionBtn = this.querySelector("#capture-importer-recalculate-correction-btn") as HTMLButtonElement;
-    // this.elements.resetCamBtn = this.querySelector("#capture-importer-reset-cam-btn") as HTMLButtonElement;
-    // this.elements.recenterCamBtn = this.querySelector("#recenter-camera-btn") as HTMLButtonElement;
-    // this.elements.flyModeToggle = this.querySelector("#fly-mode-toggle") as HTMLInputElement;
-    // this.elements.controlSchemeDropdown = this.querySelector("#control-scheme-dropdown") as HTMLSelectElement;
-    // this.elements.importFilterSlider = this.querySelector("#capture-importer-import-filter-size-slider") as HTMLInputElement;
-    // this.elements.viewportFilterSlider = this.querySelector("#object-filter-size-slider") as HTMLInputElement;
-    // this.elements.importFilterValue = this.querySelector("#capture-importer-import-filter-size-value") as HTMLInputElement;
-    // this.elements.viewportFilterValue = this.querySelector("#object-filter-size-value") as HTMLInputElement;
-
   }
 
   /**
@@ -157,36 +147,22 @@ export class CaptureImporter extends HTMLElement {
    */
   private setupEvents() {
     this.setupDropzones();
+    this.buildImportUnitDropdown();
     this.setupImportOptionsUI();
 
     this.elements.reconstructBtn.addEventListener("click", () => this.reconstructScene());
-    console.log('reconstruct button event listener added.');
-
-    // this.elements.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    // this.elements.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.elements.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
-    // this.elements.flyModeToggle.addEventListener("change", () => this.sceneManager.setFlying(this.elements.flyModeToggle.checked));
-    // this.elements.controlSchemeDropdown.addEventListener("change", () => {
-    //   const scheme = this.elements.controlSchemeDropdown.value === "wasd" ? "wasd" : "esdf";
-    //   this.sceneManager.setControlScheme(scheme);
-    // });
-
-    // // Both filter control pairs (import screen + post-reconstruct viewport
-    // // menu) drive the same underlying value and stay in sync with each
-    // // other - see setHidePercent().
-
-
-    // this.setupObjectList();
+    this.elements.renderPassList.addEventListener("selection-changed", () => {
+      this.elements.reconstructBtn.classList.toggle(
+        'disabled',
+        !this.elements.renderPassList.manifests.root.passes.some(p => this.elements.renderPassList.manifests.passManifests[p.folder]?.markedForRender)
+      )
+    });
   }
 
+  /**
+   * Sets up handlers for drag-and-drop target zones.
+   */
   private setupDropzones() {
-    // For the time being, we don't change classes when mouse hovers over global dropzone
-    // this.elements.dropzoneOuter.addEventListener("dragover", (e) => {
-    //   e.preventDefault();
-    //   this.elements.dropzone.classList.add("drag");
-    // });
-    // this.elements.dropzoneOuter.addEventListener("dragleave", () => this.elements.dropzone.classList.remove("drag"));
-
     this.elements.dropzoneOuter.addEventListener("drop", async (e) => {
       e.preventDefault();
       this.elements.dropzone.classList.remove("drag");
@@ -249,6 +225,19 @@ export class CaptureImporter extends HTMLElement {
     }
   }
 
+  private buildImportUnitDropdown() {
+    this.elements.captureUnitUnit.innerHTML = "";
+    for (const unit of UNITS) {
+      const option = document.createElement("option");
+      option.value = unit;
+      option.textContent = unit;
+      this.elements.captureUnitUnit.appendChild(option);
+    }
+  }
+
+  /**
+   * Sets up the import options form.
+   */
   private setupImportOptionsUI() {
     // load initial values
     this.elements.captureUnitSize.value = this.appConfig.config.importOptions.captureUnitSize as any;
@@ -318,132 +307,28 @@ export class CaptureImporter extends HTMLElement {
     }
   }
 
+  /**
+   * Emits reconstruct-scene event.
+   * Reconstructing scene should be done in the main app, not in this component.
+   */
   private async reconstructScene(): Promise<void> {
-    console.log('reconstruct scene clicked.');
     this.appConfig.saveConfig();
     console.log('manifest:', this.elements.renderPassList.manifests);
-
-
-  // if (!this.loaded) return;
-  //   const selected = this.getSelectedFolders();
-  //   if (selected.length === 0) {
-  //     // this.setStatus("Select at least one pass first.");
-  //     return;
-  //   }
-
-  //   this.reconstructBtn.disabled = true;
-  //   this.emptyHint.style.display = "none";
-  //   this.hud.style.display = "block";
-  //   // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
-
-  //   try {
-  //     this.clearSelectionVisuals();
-  //     this.sceneManager.clear();
-  //     // Full reload: previous draws/materials/textures are genuinely done
-  //     // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
-  //     // which reuses all of this.
-  //     for (const material of this.materialCache.values()) material.dispose();
-  //     this.materialCache.clear();
-  //     if (this.untexturedMaterial) {
-  //       this.untexturedMaterial.dispose();
-  //       this.untexturedMaterial = null;
-  //     }
-  //     this.textures.disposeAll();
-  //     this.loadedDraws = [];
-  //     this.objectList.innerHTML = "";
-  //     this.selectedIndices.clear();
-  //     this.hiddenDrawIndices.clear();
-  //     this.manuallyHiddenIndices.clear();
-  //     this.lastClickedIndex = null;
-
-  //     let noMeshPathCount = 0;
-  //     let meshNotFoundCount = 0;
-  //     let exceptionCount = 0;
-  //     let processed = 0;
-  //     let loggedMissingManifest = false;
-  //     let loggedMissingMesh = false;
-
-  //     for (const folder of selected) {
-  //       const manifest = this.loaded.passManifests[folder];
-  //       if (!manifest) {
-  //         if (!loggedMissingManifest) {
-  //           console.error(
-  //             `[reconstruct] No manifest data for pass "${folder}" - it either failed to load ` +
-  //               `(check the warning when the folder was dropped) or was never fetched.`,
-  //           );
-  //           loggedMissingManifest = true;
-  //         }
-  //         continue;
-  //       }
-  //       const passDir = joinPath(this.loaded.rootPrefix, folder);
-
-  //       for (const draw of manifest.draws) {
-  //         processed++;
-  //         try {
-  //           const outcome = await this.loadDraw(draw, passDir);
-  //           if (outcome === "no-mesh-path") {
-  //             noMeshPathCount++;
-  //           } else if (outcome === "mesh-not-found") {
-  //             meshNotFoundCount++;
-  //             if (!loggedMissingMesh) {
-  //               const meshRel = draw.posedMesh ? draw.posedMesh : draw.mesh;
-  //               console.error(
-  //                 `[reconstruct] Mesh file not found for eid${draw.eventId}: tried "${joinPath(passDir, meshRel ?? "")}". ` +
-  //                   `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
-  //               );
-  //               loggedMissingMesh = true;
-  //             }
-  //           } else {
-  //             // Global index into loadedDraws (loadDraw() just pushed this
-  //             // draw onto it) - NOT the per-pass manifest index, which
-  //             // would collide across multiple selected passes since each
-  //             // pass's manifest.draws restarts at 0.
-  //             const globalIndex = this.loadedDraws.length - 1;
-  //             const loadedDraw = this.loadedDraws[globalIndex];
-  //             const stats = {
-  //               vertices: Math.max(0, loadedDraw.geometryData.positions.length / 3),
-  //               faces: Math.max(0, loadedDraw.geometryData.positions.length / 9),
-  //               size: loadedDraw.diagonal,
-  //             };
-  //             this.objectList.appendChild(this.createDrawItem(draw, globalIndex, stats));
-  //           }
-  //         } catch (e) {
-  //           exceptionCount++;
-  //           console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
-  //         }
-  //         if (processed % 50 === 0) {
-  //           this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
-  //           await new Promise((resolve) => setTimeout(resolve, 0));
-  //         }
-  //       }
-  //     }
-
-  //     // Normalization scale is computed ONCE here, from every loaded draw
-  //     // regardless of the size filter, and then held fixed - see
-  //     // computeNormalizationScale() and rebuildVisibleScene().
-  //     this.fixedScale = 1;
-  //     if (this.loadedDraws.length > 0) {
-  //       let overall: Bounds = this.loadedDraws[0].bounds;
-  //       for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
-  //       const size = overall.max.clone().sub(overall.min);
-  //       const maxDim = Math.max(size.x, size.y, size.z);
-  //       this.fixedScale = computeNormalizationScale(maxDim);
-  //       console.log("[reconstruct] scene bounds", { min: overall.min, max: overall.max, size, scale: this.fixedScale });
-  //     }
-
-  //     const problems: string[] = [];
-  //     if (meshNotFoundCount) problems.push(`${meshNotFoundCount} mesh file(s) not found`);
-  //     if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
-  //     if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
-  //     this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
-
-  //     this.rebuildVisibleScene();
-  //   } catch (e) {
-  //     console.error("[reconstruct] Reconstruction failed", e);
-  //     this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
-  //   } finally {
-  //     this.reconstructBtn.disabled = false;
-  //   }
+    this.dispatchEvent(
+      new CustomEvent(
+        'reconstruct-scene',
+        {
+          detail: {
+            vfs: this.vfs,
+            manifests: this.elements.renderPassList.manifests,
+            importOptions: this.appConfig.config.importOptions
+          },
+          bubbles: true,
+          composed: true
+        }
+      )
+    );
+    console.log('event dispatched.')
   }
 
   private setStatus(message: string): void {
@@ -543,7 +428,7 @@ export class CaptureImporter extends HTMLElement {
   private async processIntelGPAImport() {
     // bail out unless all files are present
     for (const importTarget in this.intelGPAImports) {
-      if (!this.intelGPAImports[importTarget]) {
+      if (!this.intelGPAImports[importTarget as IntelGPADropzone]) {
         return;
       }
     }
@@ -559,13 +444,13 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
-    const loaded = await fakeManifest(this.intelGPAImports['scene']!);
+    const loaded = await fakeManifest(this.intelGPAImports['scene']!.file);
 
     if (!loaded) {
       this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
       return;
     }
-
+    this.vfs = loaded.vfs;
     this.elements.renderPassList.manifests = loaded.manifests;
     this.elements.importProcessingSection.style.display = "block";
 
@@ -595,12 +480,12 @@ export class CaptureImporter extends HTMLElement {
 
     if (importType === ImportType.IntelGPAExportPartial) {
       if (target && target !== 'renderdoc-export') {
-        this.intelGPAImports[target] = entries[0].file;
+        this.intelGPAImports[target] = entries[0];
         this.updateIntelGPADropzone(target as IntelGPADropzone, entries[0].file);
       } else {
         const guessedTarget = guessIntelGPAImportTargetFromFilename(entries[0]);
         if (guessedTarget) {
-          this.intelGPAImports[guessedTarget] = entries[0].file;
+          this.intelGPAImports[guessedTarget] = entries[0];
           this.updateIntelGPADropzone(guessedTarget as IntelGPADropzone, entries[0].file);
         }
       }
@@ -611,8 +496,8 @@ export class CaptureImporter extends HTMLElement {
     if (importType === ImportType.IntelGPAExportFull) {
       const guessedTargets = guessIntelGPAImportTargetsFromFilenames(entries);
       for (const key in guessedTargets) {
-        this.intelGPAImports[key] = guessedTargets[key];
-        this.updateIntelGPADropzone(key as IntelGPADropzone, guessedTargets[key].file);
+        this.intelGPAImports[key as IntelGPADropzone] = guessedTargets[key as IntelGPADropzone];
+        this.updateIntelGPADropzone(key as IntelGPADropzone, guessedTargets[key as IntelGPADropzone].file);
       }
       this.processIntelGPAImport();
       return;
@@ -620,25 +505,28 @@ export class CaptureImporter extends HTMLElement {
 
     // if we came this far, this should be a Renderdoc Scene Exporter folder.
     const vfs = new VirtualFileSystem();
-    for (const { path, file } of entries) vfs.set(path, file);
+    for (const { path, file } of entries) {
+     vfs.set(path, file);
+    }
 
     const loaded = await loadManifests(vfs);
     if (!loaded) {
       this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
       return;
     }
+    this.vfs = loaded.vfs;
 
     console.log("Loaded manifests:", loaded);
 
-    this.elements.renderPassList.manifests = loaded;
+    this.elements.renderPassList.manifests = loaded.manifests;
     this.elements.importProcessingSection.style.display = "block";
 
     // this.loaded = loaded;
     // this.elements.renderPassList();
-    const failedNote = loaded.failedPassFolders.length
-      ? ` (WARNING: ${loaded.failedPassFolders.length} pass manifest(s) failed to load - see console)`
+    const failedNote = loaded.manifests.failedPassFolders.length
+      ? ` (WARNING: ${loaded.manifests.failedPassFolders.length} pass manifest(s) failed to load - see console)`
       : "";
-    this.setStatus(`Loaded manifest: ${loaded.root.passes.length} pass(es) found.${failedNote}`);
+    this.setStatus(`Loaded manifest: ${loaded.manifests.root.passes.length} pass(es) found.${failedNote}`);
 
     for (const dropzone in this.intelGPADropzones) {
       this.resetIntelGPADropzone(dropzone as IntelGPADropzone);

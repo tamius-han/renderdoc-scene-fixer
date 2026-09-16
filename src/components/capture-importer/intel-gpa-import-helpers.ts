@@ -80,10 +80,10 @@ export function guessIntelGPAImportTargetsFromFilenames(entries: FileInfo[]): { 
  * @param sceneFile we suspect this is scene output
  * @returns correct file-role mapping, or undefined if we couldn't determine which file belongs to which role
  */
-export async function identifyIntelGPAImport(landmarkSourceFile: File, landmarkOutputFile: File, sceneFile: File) {
-  const landmarkSourceGeometry = parseOBJ(await landmarkSourceFile.text());
-  const landmarkOutputGeometry = parseOBJ(await landmarkOutputFile.text());
-  const sceneGeometry = parseOBJ(await sceneFile.text());
+export async function identifyIntelGPAImport(landmarkSourceFile: FileInfo, landmarkOutputFile: FileInfo, sceneFile: FileInfo) {
+  const landmarkSourceGeometry = parseOBJ(await landmarkSourceFile.file.text());
+  const landmarkOutputGeometry = parseOBJ(await landmarkOutputFile.file.text());
+  const sceneGeometry = parseOBJ(await sceneFile.file.text());
 
   if (
     landmarkSourceGeometry.positions.length === landmarkOutputGeometry.positions.length &&

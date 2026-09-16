@@ -151,6 +151,9 @@ export class RenderPassList extends HTMLElement {
           });
 
         lastClickedIndex = i;
+
+        // notify parent about the change
+        this.dispatchEvent(new CustomEvent("selection-changed"));
       });
     });
   }

@@ -1,3 +1,5 @@
+export const UNITS = ['m', 'cm', 'mm', 'in', 'ft', 'yd']
+
 export const UNIT_CONVERSION = {
   m: 1,
   cm: 0.01,
