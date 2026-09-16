@@ -135,6 +135,23 @@ export class SceneViewerApp {
    * the auto-detected worldUpAxis-to-Y rotation - see
    * getActiveSceneRotation(). */
   private manualUpRotation: THREE.Quaternion | null = null;
+  /** Which select-area tool ("sphere" or "box") is currently armed and
+   * waiting for its single placement click, if any - see
+   * startSelectAreaTool()/handleSelectAreaClick(). Left-click in the
+   * viewport places the shape while this is set (see
+   * handleSceneObjectPointer()); right-click cancels, same convention as
+   * the ground-plane tool. Mutually exclusive with groundPlaneToolActive -
+   * arming either tool cancels the other. */
+  private selectAreaToolActive: "sphere" | "box" | null = null;
+  /** The current select-area shape, if one has been placed - a child of
+   * the content group, positioned/scaled in its LOCAL space (see
+   * placeSelectAreaShape()), so it moves/rotates with the mesh like the
+   * ground-plane markers do. Only one shape exists at a time: placing a
+   * new one (of either kind) replaces it - see clearSelectAreaShape().
+   * Cleared on any fresh reconstruct or scene rebuild, same as the
+   * ground-plane tool's own state. */
+  private selectAreaShape: THREE.Mesh | null = null;
+  private selectAreaKind: "sphere" | "box" | null = null;
   /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
   /** Anchor point for shift-click range selection - the last index selected
@@ -183,6 +200,9 @@ export class SceneViewerApp {
   private reconstructBtn = this.el<HTMLButtonElement>("reconstruct-btn");
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
   private markGroundPlaneBtn = this.el<HTMLButtonElement>("mark-ground-plane-btn");
+  private selectSphereBtn = this.el<HTMLButtonElement>("select-sphere-btn");
+  private selectBoxBtn = this.el<HTMLButtonElement>("select-box-btn");
+  private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
   private resetCamBtn = this.el("reset-cam-btn");
@@ -273,13 +293,15 @@ export class SceneViewerApp {
     this.reconstructBtn.addEventListener("click", () => void this.reconstructScene());
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
     this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
+    this.selectSphereBtn.addEventListener("click", () => this.toggleSelectAreaTool("sphere"));
+    this.selectBoxBtn.addEventListener("click", () => this.toggleSelectAreaTool("box"));
     this.upAxisSelect.addEventListener("change", () => this.applySceneRotation());
-    // The tool's own right-click handling (cancel + clear) happens in
+    // The tools' own right-click handling (cancel + clear) happens in
     // handleSceneObjectPointer() via pointerdown, which fires before the
     // browser's native contextmenu event - this just stops that native
     // menu from popping up over the viewport afterwards.
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
-      if (this.groundPlaneToolActive) event.preventDefault();
+      if (this.groundPlaneToolActive || this.selectAreaToolActive) event.preventDefault();
     });
     this.resetCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
     this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
@@ -511,11 +533,14 @@ export class SceneViewerApp {
     try {
       this.clearSelectionVisuals();
       // A fresh reconstruct starts a genuinely new scene - any in-progress
-      // or previously-completed ground-plane marking belonged to the old
-      // one and no longer means anything against new geometry.
+      // or previously-completed ground-plane marking, and any placed
+      // select-area shape, belonged to the old one and no longer mean
+      // anything against new geometry.
       this.cancelGroundPlaneTool();
       this.manualUpRotation = null;
       if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
+      this.cancelSelectAreaTool();
+      this.clearSelectAreaShape();
       this.sceneManager.clear();
       // Full reload: previous draws/materials/textures are genuinely done
       // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
@@ -688,10 +713,27 @@ export class SceneViewerApp {
     // owns directly, not these app-level Points markers.
     this.clearSelectionVisuals();
     this.clearGroundPlaneVisuals();
+    // The select-area shape (unlike the ground-plane tool's markers) is
+    // user-configured, persistent data, not a transient in-progress tool
+    // artifact - a filter/visibility change shouldn't silently discard it -
+    // so its kind/position/scale are captured here and re-applied to a
+    // freshly-created shape in the new content group below, rather than
+    // just clearing it outright.
+    const previousShape = this.selectAreaKind
+      ? {
+          kind: this.selectAreaKind,
+          position: this.selectAreaShape?.position.clone(),
+          scale: this.selectAreaShape?.scale.clone(),
+        }
+      : null;
+    this.clearSelectAreaShape();
     this.sceneManager.clear();
     const contentGroup = this.sceneManager.addContent(meshes, this.fixedScale);
     contentGroup.quaternion.copy(this.getActiveSceneRotation());
     this.updateSelectionVisuals();
+    if (previousShape?.position && previousShape.scale) {
+      this.restoreSelectAreaShape(previousShape.kind, previousShape.position, previousShape.scale);
+    }
 
     const visibleCount = this.loadedDraws.length - excludedCount;
     const triCount = Math.round(builder.totalVertexCount / 3);
@@ -843,6 +885,7 @@ export class SceneViewerApp {
       this.setStatus("Reconstruct a scene first.");
       return;
     }
+    this.cancelSelectAreaTool(); // mutually exclusive with the select-area tools
     this.groundPlaneToolActive = true;
     this.groundPlanePoints = [];
     this.clearGroundPlaneVisuals();
@@ -865,9 +908,10 @@ export class SceneViewerApp {
   }
 
   /** Raycasts the viewport at the given pointer event against mesh surface
-   * only (excluding selection-highlight and ground-plane-marker overlays,
-   * via the same userData-tag convention as pickDrawAtPointer()), returning
-   * the world-space hit point, or null if the ray missed everything. */
+   * only (excluding selection-highlight, ground-plane-marker, and
+   * select-area-shape overlays, via the same userData-tag convention as
+   * pickDrawAtPointer()), returning the world-space hit point, or null if
+   * the ray missed everything. */
   private raycastMeshSurface(event: PointerEvent): THREE.Vector3 | null {
     const target = this.sceneManager.renderer.domElement;
     const rect = target.getBoundingClientRect();
@@ -882,7 +926,12 @@ export class SceneViewerApp {
     const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
     const hits = raycaster
       .intersectObjects(roots, true)
-      .filter((hit) => !hit.object.userData.isSelectionVisual && !hit.object.userData.isGroundPlaneVisual);
+      .filter(
+        (hit) =>
+          !hit.object.userData.isSelectionVisual &&
+          !hit.object.userData.isGroundPlaneVisual &&
+          !hit.object.userData.isSelectAreaShape,
+      );
     return hits.length > 0 ? hits[0].point.clone() : null;
   }
 
@@ -950,6 +999,16 @@ export class SceneViewerApp {
     this.setStatus("Ground plane marked - scene reoriented (Up axis: Manual).");
   }
 
+  /** Unions every loaded draw's LOCAL (pre-scale) bounds together - the
+   * space groundPlanePoints/select-area shape positions all live in.
+   * Shared by groundPlaneMarkerSize() and the select-area tool's slider
+   * ranges (see renderSelectAreaOptionsPanel()). */
+  private overallLocalBounds(): Bounds {
+    let overall: Bounds = this.loadedDraws[0].bounds;
+    for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+    return overall;
+  }
+
   /** Marker/dash size for the ground-plane tool's dotted connector lines: a
    * small fraction of the whole loaded scene's local-space (pre-scale)
    * bounding diagonal - the same space groundPlanePoints live in - so
@@ -959,9 +1018,7 @@ export class SceneViewerApp {
    * this.) */
   private groundPlaneMarkerSize(): number {
     if (this.loadedDraws.length === 0) return 1;
-    let overall: Bounds = this.loadedDraws[0].bounds;
-    for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
-    return Math.max(boundsDiagonal(overall) * 0.015, 1e-6);
+    return Math.max(boundsDiagonal(this.overallLocalBounds()) * 0.015, 1e-6);
   }
 
   /** Lazily-built, shared texture for the ground-plane cross markers: a
@@ -1077,6 +1134,305 @@ export class SceneViewerApp {
     }
     this.groundPlaneVisuals = [];
   }
+
+  //#region select-area tool (sphere/box)
+
+  /** Placeholder cursor icons for the two select-area tools - each a small
+   * inline SVG data URI (orange outline shape, transparent background), so
+   * the tool is fully functional out of the box. REPLACE these two data
+   * URIs (or swap in `url("/path/to/real-image.png") 0 0, crosshair`
+   * instead) once the real cursor images are provided - per spec, the
+   * click/hotspot point is the UPPER-LEFT corner (0 0) of each image, which
+   * is why both are built with their "clickable" corner at (0,0) rather
+   * than centered. */
+  private static readonly SELECT_AREA_CURSORS: Record<"sphere" | "box", string> = {
+    sphere:
+      `url('data:image/svg+xml;utf8,` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">` +
+      `<circle cx="12" cy="12" r="10" fill="none" stroke="black" stroke-width="4"/>` +
+      `<circle cx="12" cy="12" r="10" fill="none" stroke="orange" stroke-width="2"/>` +
+      `</svg>') 0 0, crosshair`,
+    box:
+      `url('data:image/svg+xml;utf8,` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">` +
+      `<rect x="2" y="2" width="20" height="20" fill="none" stroke="black" stroke-width="4"/>` +
+      `<rect x="2" y="2" width="20" height="20" fill="none" stroke="orange" stroke-width="2"/>` +
+      `</svg>') 0 0, crosshair`,
+  };
+
+  /** Arms/disarms one of the select-area tools - see
+   * startSelectAreaTool()/cancelSelectAreaTool(). Clicking the currently-
+   * armed tool's own button again disarms it. */
+  private toggleSelectAreaTool(kind: "sphere" | "box"): void {
+    if (this.selectAreaToolActive === kind) this.cancelSelectAreaTool();
+    else this.startSelectAreaTool(kind);
+  }
+
+  /** Arms the given select-area tool: swaps the viewport cursor for that
+   * tool's custom image (see SELECT_AREA_CURSORS) and waits for the next
+   * left-click on mesh surface to place the shape (see
+   * handleSceneObjectPointer()/handleSelectAreaClick()). */
+  private startSelectAreaTool(kind: "sphere" | "box"): void {
+    if (this.loadedDraws.length === 0) {
+      this.setStatus("Reconstruct a scene first.");
+      return;
+    }
+    this.cancelGroundPlaneTool(); // mutually exclusive with the ground-plane tool
+    this.selectAreaToolActive = kind;
+    this.sceneManager.renderer.domElement.style.cursor = SceneViewerApp.SELECT_AREA_CURSORS[kind];
+    this.selectSphereBtn.classList.toggle("active", kind === "sphere");
+    this.selectBoxBtn.classList.toggle("active", kind === "box");
+    const shapeName = kind === "sphere" ? "Sphere" : "Box";
+    this.setStatus(`${shapeName} select: click the mesh surface to place it (right-click to cancel).`);
+  }
+
+  /** Disarms whichever select-area tool is active (if any) without placing
+   * anything - restores the normal cursor. Does NOT remove an
+   * already-placed shape (see clearSelectAreaShape() for that); harmless to
+   * call when no tool is active. */
+  private cancelSelectAreaTool(): void {
+    this.selectAreaToolActive = null;
+    this.sceneManager.renderer.domElement.style.cursor = "";
+    this.selectSphereBtn.classList.remove("active");
+    this.selectBoxBtn.classList.remove("active");
+  }
+
+  /** Handles one left-click while a select-area tool is armed: raycasts for
+   * mesh surface under the cursor (ignored if it missed), places the shape
+   * there, then disarms the tool - this is a single-click placement, unlike
+   * the ground-plane tool's three. */
+  private handleSelectAreaClick(event: PointerEvent): void {
+    const kind = this.selectAreaToolActive;
+    if (!kind) return;
+
+    const worldHit = this.raycastMeshSurface(event);
+    if (worldHit) this.placeSelectAreaShape(kind, worldHit);
+    this.cancelSelectAreaTool();
+  }
+
+  /** Places (replacing any existing one - see clearSelectAreaShape()) a
+   * new select-area shape centered on worldHit, sized so it initially
+   * covers 10% of the viewport's width. */
+  private placeSelectAreaShape(kind: "sphere" | "box", worldHit: THREE.Vector3): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    // "10% of the viewport width" is a SCREEN-space fraction, which (under
+    // a perspective camera) corresponds to a different WORLD size
+    // depending on how far away the clicked point is - convert via the
+    // camera's horizontal FOV at that distance, then divide out the
+    // content group's own (uniform) scale to get back to the LOCAL size
+    // the shape's geometry/scale need to be specified in.
+    const camera = this.sceneManager.camera;
+    const distance = Math.max(camera.position.distanceTo(worldHit), 1e-6);
+    const vFov = (camera.fov * Math.PI) / 180;
+    const viewportWorldWidth = 2 * distance * Math.tan(vFov / 2) * camera.aspect;
+    const worldDiameter = viewportWorldWidth * 0.1;
+    const groupScale = group.scale.x || 1;
+    const localHalfExtent = Math.max(worldDiameter / groupScale / 2, 1e-6);
+
+    const localPosition = group.worldToLocal(worldHit.clone());
+    const localScale = new THREE.Vector3(localHalfExtent, localHalfExtent, localHalfExtent);
+    this.restoreSelectAreaShape(kind, localPosition, localScale);
+    this.setStatus(`${kind === "sphere" ? "Sphere" : "Box"} select area placed.`);
+  }
+
+  /** Builds and adds the actual select-area shape mesh at an already-known
+   * LOCAL position/scale (replacing any existing shape - see
+   * clearSelectAreaShape()), as a child of the content group so it
+   * moves/rotates with the mesh exactly like the ground-plane tool's own
+   * markers. Split out from placeSelectAreaShape() so rebuildVisibleScene()
+   * can recreate the shape (from its previous position/scale) in the new
+   * content group after a filter/visibility rebuild, without re-running the
+   * viewport-width sizing math or requiring a fresh click. */
+  private restoreSelectAreaShape(kind: "sphere" | "box", localPosition: THREE.Vector3, localScale: THREE.Vector3): void {
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+    this.clearSelectAreaShape();
+
+    // Unit shapes (radius/half-extent 1, i.e. spanning -1..1 per axis) so
+    // mesh.scale directly IS each axis' half-extent in local space -
+    // that's what the per-axis "Scale" sliders (see
+    // renderSelectAreaOptionsPanel()) edit.
+    const geometry = kind === "sphere" ? new THREE.SphereGeometry(1, 24, 16) : new THREE.BoxGeometry(2, 2, 2);
+    const flatGeometry = geometry.toNonIndexed();
+    flatGeometry.computeVertexNormals();
+    this.applyFlatFaceVertexColors(flatGeometry);
+
+    const material = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const shape = new THREE.Mesh(flatGeometry, material);
+    shape.position.copy(localPosition);
+    shape.scale.copy(localScale);
+    shape.userData.isSelectAreaShape = true;
+    shape.renderOrder = 998;
+
+    group.add(shape);
+    this.selectAreaShape = shape;
+    this.selectAreaKind = kind;
+    this.renderSelectAreaOptionsPanel();
+  }
+
+  /** Bakes a per-triangle (genuinely flat/faceted, not smoothed) "shaded"
+   * look into vertex colors for use with an UNLIT material
+   * (MeshBasicMaterial + vertexColors:true). The main scene has no lights
+   * at all - every other mesh in it uses MeshBasicMaterial too (see
+   * resolveMaterial()/getUntexturedMaterial()) - so a normally-LIT material
+   * like MeshStandardMaterial would just render pitch black here instead of
+   * visibly faceted; this fakes the same "flat per-face" look without
+   * needing any scene lighting. Expects geometry.toNonIndexed() +
+   * computeVertexNormals() to already have been called (see
+   * placeSelectAreaShape()), so each triangle's 3 vertices are unique to it
+   * and share exactly that triangle's face normal - meaning all 3 get
+   * exactly the same baked color, i.e. a uniform, flat-shaded face. */
+  private applyFlatFaceVertexColors(geometry: THREE.BufferGeometry): void {
+    const normalAttr = geometry.getAttribute("normal");
+    const count = normalAttr.count;
+    const colors = new Float32Array(count * 3);
+
+    // Arbitrary fixed pseudo-light direction - not tied to any real light
+    // or the camera, just needs to vary with face normal enough to read as
+    // "faceted" rather than a single flat color.
+    const lightDir = new THREE.Vector3(0.4, 0.8, 0.5).normalize();
+    const minBrightness = 0.45;
+
+    for (let i = 0; i < count; i++) {
+      const nDotL = Math.max(
+        0,
+        normalAttr.getX(i) * lightDir.x + normalAttr.getY(i) * lightDir.y + normalAttr.getZ(i) * lightDir.z,
+      );
+      const brightness = minBrightness + (1 - minBrightness) * nDotL;
+      colors[i * 3] = SELECTION_COLOR.r * brightness;
+      colors[i * 3 + 1] = SELECTION_COLOR.g * brightness;
+      colors[i * 3 + 2] = SELECTION_COLOR.b * brightness;
+    }
+
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  }
+
+  /** Removes, disposes, and un-tracks the current select-area shape (if
+   * any), and clears its options panel. Safe to call with nothing placed. */
+  private clearSelectAreaShape(): void {
+    const group = this.sceneManager.getContentGroup();
+    if (this.selectAreaShape) {
+      group?.remove(this.selectAreaShape);
+      this.selectAreaShape.geometry.dispose();
+      const material = this.selectAreaShape.material;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material.dispose();
+    }
+    this.selectAreaShape = null;
+    this.selectAreaKind = null;
+    this.renderSelectAreaOptionsPanel();
+  }
+
+  /** Rebuilds the "select area" options panel (#select-options-menu) from
+   * scratch to match the current selectAreaShape - empty/hidden when
+   * there's no shape placed, otherwise a small panel with a Remove button
+   * and 6 combined slider+number-input rows (Translate/Scale x X/Y/Z),
+   * each wired to directly drive the shape's own position/scale on input.
+   * Called on every placement and removal - there's no persistent DOM to
+   * keep in sync incrementally, so it's simplest to just rebuild. */
+  private renderSelectAreaOptionsPanel(): void {
+    const shape = this.selectAreaShape;
+    const kind = this.selectAreaKind;
+    if (!shape || !kind) {
+      this.selectOptionsMenu.classList.remove("menu");
+      this.selectOptionsMenu.innerHTML = "";
+      return;
+    }
+
+    const diagonal = boundsDiagonal(this.overallLocalBounds());
+    const center = boundsCenter(this.overallLocalBounds());
+    const translateRange = Math.max(diagonal * 1.5, 1e-6);
+    const scaleMin = Math.max(diagonal * 0.0005, 1e-9);
+    const scaleMax = Math.max(diagonal * 0.5, scaleMin * 2);
+
+    type Axis = "x" | "y" | "z";
+    type Group = "translate" | "scale";
+    const axes: Axis[] = ["x", "y", "z"];
+    const ranges: Record<Group, Record<Axis, [number, number]>> = {
+      translate: {
+        x: [center.x - translateRange, center.x + translateRange],
+        y: [center.y - translateRange, center.y + translateRange],
+        z: [center.z - translateRange, center.z + translateRange],
+      },
+      scale: {
+        x: [scaleMin, scaleMax],
+        y: [scaleMin, scaleMax],
+        z: [scaleMin, scaleMax],
+      },
+    };
+    const currentValue = (group: Group, axis: Axis): number =>
+      group === "translate" ? shape.position[axis] : shape.scale[axis];
+
+    const row = (group: Group, axis: Axis): string => {
+      const [min, max] = ranges[group][axis];
+      const value = currentValue(group, axis);
+      const label = `${group === "translate" ? "Translate" : "Scale"} ${axis.toUpperCase()}`;
+      const step = (max - min) / 1000 || 0.001;
+      return `
+        <div class="field">
+          <div class="label">${label}</div>
+          <div class="combined-slider-value">
+            <input type="range" data-select-area="${group}-${axis}-slider" min="${min}" max="${max}" step="${step}" value="${value}" />
+            <input type="text" class="input-number" data-select-area="${group}-${axis}-value" value="${value.toFixed(3)}" />
+          </div>
+        </div>`;
+    };
+
+    this.selectOptionsMenu.classList.add("menu");
+    this.selectOptionsMenu.innerHTML = `
+      <div class="flex flex-row items-center justify-between">
+        <b class="text-white">${kind === "sphere" ? "Sphere" : "Box"} select area</b>
+        <button class="ghost" data-select-area="remove">Remove</button>
+      </div>
+      ${axes.map((axis) => row("translate", axis)).join("")}
+      ${axes.map((axis) => row("scale", axis)).join("")}
+    `;
+
+    const setAxisValue = (group: Group, axis: Axis, raw: number): void => {
+      const s = this.selectAreaShape;
+      if (!s) return;
+      const [min, max] = ranges[group][axis];
+      const clamped = Math.min(max, Math.max(min, Number.isFinite(raw) ? raw : min));
+      if (group === "translate") s.position[axis] = clamped;
+      else s.scale[axis] = clamped;
+
+      const slider = this.selectOptionsMenu.querySelector<HTMLInputElement>(
+        `[data-select-area="${group}-${axis}-slider"]`,
+      );
+      const text = this.selectOptionsMenu.querySelector<HTMLInputElement>(
+        `[data-select-area="${group}-${axis}-value"]`,
+      );
+      if (slider) slider.value = String(clamped);
+      if (text) text.value = clamped.toFixed(3);
+    };
+
+    for (const group of ["translate", "scale"] as Group[]) {
+      for (const axis of axes) {
+        const slider = this.selectOptionsMenu.querySelector<HTMLInputElement>(
+          `[data-select-area="${group}-${axis}-slider"]`,
+        );
+        const text = this.selectOptionsMenu.querySelector<HTMLInputElement>(
+          `[data-select-area="${group}-${axis}-value"]`,
+        );
+        slider?.addEventListener("input", () => setAxisValue(group, axis, Number(slider.value)));
+        text?.addEventListener("change", () => setAxisValue(group, axis, Number(text.value)));
+      }
+    }
+
+    this.selectOptionsMenu
+      .querySelector<HTMLButtonElement>('[data-select-area="remove"]')
+      ?.addEventListener("click", () => this.clearSelectAreaShape());
+  }
+
+  //#endregion
 
   /** Runs the matrix-based transform-correction fit independently for EVERY
    * loaded draw (including hidden ones - hiddenness only affects
@@ -1733,6 +2089,11 @@ export class SceneViewerApp {
     if (this.groundPlaneToolActive) {
       if (event.button === 2) this.cancelGroundPlaneTool();
       else if (event.button === 0) this.handleGroundPlaneClick(event);
+      return;
+    }
+    if (this.selectAreaToolActive) {
+      if (event.button === 2) this.cancelSelectAreaTool();
+      else if (event.button === 0) this.handleSelectAreaClick(event);
       return;
     }
     if (event.button === 1) return;

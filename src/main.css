@@ -93,6 +93,10 @@ p {
 
         }
       }
+
+      &.input-number {
+        @apply !w-20 text-right;
+      }
     }
   }
 
@@ -355,7 +359,7 @@ button.ghost {
 }
 button.ghost:hover { border-color: var(--accent-dim); color: var(--text); }
 
-#mark-ground-plane-btn.active {
+#mark-ground-plane-btn.active, #select-sphere-btn.active, #select-box-btn.active {
   border-color: var(--accent); color: var(--accent); background: rgba(110, 231, 200, 0.12);
 }
 
