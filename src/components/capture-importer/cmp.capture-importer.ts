@@ -60,25 +60,6 @@ export class CaptureImporter extends HTMLElement {
     this.elements = ({} as any);
   }
 
-  // private dropzoneOuter!: HTMLElement;
-  // private dropzone!: HTMLElement;
-  // private folderInput!: HTMLInputElement;
-
-  // private importProcessingSection!: HTMLElement;
-
-  // private reconstructBtn: HTMLButtonElement;
-  // private recalculateCorrectionBtn: HTMLButtonElement;
-  // private resetCamBtn: HTMLButtonElement;
-  // private recenterCamBtn: HTMLButtonElement;
-  // private flyModeToggle: HTMLInputElement;
-  // private controlSchemeDropdown: HTMLSelectElement;
-  // private importFilterSlider: HTMLInputElement;
-  // private viewportFilterSlider: HTMLInputElement;
-  // private importFilterValue: HTMLInputElement;
-  // private viewportFilterValue: HTMLInputElement;
-  // private statusBar!: HTMLElement;
-  // private renderPassList!: RenderPassList;
-
   private intelGPADropzones!: {
     [key in IntelGPADropzone]: {
       dropzone: HTMLElement;
