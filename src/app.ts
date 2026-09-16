@@ -1197,6 +1197,75 @@ export class SceneViewerApp {
     this.selectBoxBtn.classList.remove("active");
   }
 
+  /** Called every frame (see SceneManager.onBeforeRender()) to keep the
+   * gizmo's transform current - a no-op whenever there's nothing to
+   * update. */
+  private updateSelectAreaGizmoTransform(): void {
+    const gizmo = this.selectAreaGizmo;
+    const group = this.sceneManager.getContentGroup();
+    if (!gizmo || !group) return;
+    gizmo.update(this.sceneManager.camera, group.quaternion, group.scale.x || 1);
+  }
+
+  /** Switches the gizmo's mode (and remembers the choice for the next
+   * shape/gizmo too - see selectAreaGizmoMode's doc comment), then
+   * refreshes the options panel so its Move/Scale buttons reflect it. */
+  private setSelectAreaGizmoMode(mode: GizmoMode): void {
+    this.selectAreaGizmoMode = mode;
+    this.selectAreaGizmo?.setMode(mode);
+    this.renderSelectAreaOptionsPanel();
+  }
+
+  private isTypingInFormField(): boolean {
+    const el = document.activeElement;
+    return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+  }
+
+  /** 'G' (translate) / 'S' (scale) gizmo-mode shortcuts, matching Blender's
+   * own grab/scale keys - only while there's actually a shape/gizmo to
+   * affect, and guarded against typing in a form field and against fly
+   * mode (where 'S' is already a movement key in both control schemes -
+   * see movement-bindings.interface.ts). */
+  private handleGizmoKeydown(event: KeyboardEvent): void {
+    if (event.repeat || this.isTypingInFormField() || this.isFlying || !this.selectAreaShape) return;
+    if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
+    else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
+  }
+
+  /** Drives both an in-progress gizmo drag (if any) and hover highlighting
+   * (if not) - see wireEvents()'s window-level "pointermove" listener. */
+  private handleGizmoPointerMove(event: PointerEvent): void {
+    const gizmo = this.selectAreaGizmo;
+    if (!gizmo) return;
+    const group = this.sceneManager.getContentGroup();
+    if (!group) return;
+
+    if (gizmo.isDragging()) {
+      const raycaster = this.buildViewportRaycaster(event);
+      gizmo.updateDrag(raycaster, this.sceneManager.camera, group.quaternion, group.scale.x || 1, event.clientX, event.clientY);
+      return;
+    }
+
+    // Hover feedback only - never while a placement tool is armed (those
+    // take priority over the gizmo entirely - see handleSceneObjectPointer()),
+    // and only while the cursor is actually over the canvas.
+    if (this.groundPlaneToolActive || this.selectAreaToolActive) {
+      gizmo.setHighlight(null);
+      return;
+    }
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+      gizmo.setHighlight(null);
+      return;
+    }
+    gizmo.setHighlight(gizmo.hitTest(this.buildViewportRaycaster(event)));
+  }
+
+  private handleGizmoPointerUp(event: PointerEvent): void {
+    if (event.button !== 0 || !this.selectAreaGizmo?.isDragging()) return;
+    this.selectAreaGizmo.endDrag();
+  }
+
   /** Handles one left-click while a select-area tool is armed: raycasts for
    * mesh surface under the cursor (ignored if it missed), places the shape
    * there, then disarms the tool - this is a single-click placement, unlike
@@ -1275,6 +1344,18 @@ export class SceneViewerApp {
     group.add(shape);
     this.selectAreaShape = shape;
     this.selectAreaKind = kind;
+
+    // A fresh gizmo INSTANCE (not a persisted/reattached one) - it's a
+    // child of this same content group, which gets fully torn down and
+    // rebuilt (see SceneManager.clear()) on every filter/visibility
+    // change, so nothing about a previous instance could survive that
+    // anyway. Sized (minScale) from the whole scene's own diagonal so
+    // dragging a scale handle to near-zero can't collapse the shape
+    // entirely, same reasoning the old slider UI's scaleMin used.
+    this.selectAreaGizmo = new SelectAreaGizmo(shape, this.selectAreaGizmoMode);
+    this.selectAreaGizmo.setMinScale(Math.max(boundsDiagonal(this.overallLocalBounds()) * 0.0005, 1e-9));
+    group.add(this.selectAreaGizmo.object3d);
+
     this.renderSelectAreaOptionsPanel();
   }
 
@@ -1315,10 +1396,16 @@ export class SceneViewerApp {
     geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   }
 
-  /** Removes, disposes, and un-tracks the current select-area shape (if
-   * any), and clears its options panel. Safe to call with nothing placed. */
+  /** Removes, disposes, and un-tracks the current select-area shape and its
+   * gizmo (if any), and clears the options panel. Safe to call with
+   * nothing placed. */
   private clearSelectAreaShape(): void {
     const group = this.sceneManager.getContentGroup();
+    if (this.selectAreaGizmo) {
+      group?.remove(this.selectAreaGizmo.object3d);
+      this.selectAreaGizmo.dispose();
+      this.selectAreaGizmo = null;
+    }
     if (this.selectAreaShape) {
       group?.remove(this.selectAreaShape);
       this.selectAreaShape.geometry.dispose();
@@ -2027,6 +2114,32 @@ export class SceneViewerApp {
   }
 
   private handleSceneObjectPointer(event: PointerEvent): void {
+    // Gizmo handles take priority over everything else EXCEPT an armed
+    // placement tool (ground-plane/select-area) - those already fully
+    // claim left-click for their own purposes while active, so skip gizmo
+    // hit-testing entirely rather than risk a stray gizmo drag starting
+    // mid-placement.
+    if (event.button === 0 && this.selectAreaGizmo && !this.groundPlaneToolActive && !this.selectAreaToolActive) {
+      const group = this.sceneManager.getContentGroup();
+      if (group) {
+        const raycaster = this.buildViewportRaycaster(event);
+        const handle = this.selectAreaGizmo.hitTest(raycaster);
+        if (handle) {
+          event.preventDefault();
+          this.selectAreaGizmo.beginDrag(
+            handle,
+            raycaster,
+            this.sceneManager.camera,
+            group.quaternion,
+            group.scale.x || 1,
+            this.sceneManager.renderer.domElement.getBoundingClientRect(),
+            event.clientX,
+            event.clientY,
+          );
+          return;
+        }
+      }
+    }
     if (this.groundPlaneToolActive) {
       if (event.button === 2) this.cancelGroundPlaneTool();
       else if (event.button === 0) this.handleGroundPlaneClick(event);
