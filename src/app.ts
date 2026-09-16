@@ -351,14 +351,26 @@ export class SceneViewerApp {
     const size = stats?.size ?? 0;
 
     const div = document.createElement("div");
-    div.className = "draw-item";
+    div.className = "draw-item flex flex-col w-full";
     div.dataset.index = String(drawIndex);
     div.innerHTML = `
-      <b>Draw #${drawIndex}</b> <small>(eid ${draw.eventId})</small>
-      &nbsp; &nbsp; vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}">[ ]</button>
-      &nbsp; sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button>
+      <div class="flex flex-row justify-between items-baseline">
+        <div>
+          <b class="name">Draw #${drawIndex}</b> <small class="role">(eid ${draw.eventId})</small>
+        </div>
+        <div class="flex flex-row">
+          <div>vis: <button class="check-like" data-action="visibility" data-index="${drawIndex}">[ ]</button></div>
+          <div>sel: <button class="check-like" data-action="selection" data-index="${drawIndex}">[ ]</button></div>
+        </div>
+      </div>
+      <div>
+        <small>v: ${vertices}, f: ${faces}, size: ${size.toFixed(2)}</small>
+      </div>
+
+      <div class="hidden">
       &nbsp; is ref: <button class="check-like" data-action="landmark" data-index="${drawIndex}">[ ]</button>
-      <small>v: ${vertices}, f: ${faces}, size: ${size.toFixed(2)}</small> &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+       &nbsp; <button data-action="resources" data-index="${drawIndex}">res</button>
+      </div>
     `;
 
     wrap.appendChild(div);

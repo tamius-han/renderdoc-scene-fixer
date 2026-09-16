@@ -271,7 +271,7 @@ code {
   color: var(--text-dim); margin: 22px 0 8px;
 }
 
-.pass-row {
+.pass-row, .draw-item {
   @apply cursor-pointer py-1 pl-2 pr-4 flex gap-2 items-start bg-brown-700 text-warm-200;
 
   user-select: none;
@@ -295,7 +295,7 @@ code {
     @apply text-[0.8rem] text-warm-400;
   }
 
-  &.selected {
+  &.selected, &.is-selected {
     @apply bg-warm-200 text-warm-900;
 
     &:hover {
@@ -324,13 +324,35 @@ code {
 }
 
 .draw-item {
-  background: var(--bg-card); border: 1px solid var(--line); border-radius: 6px;
+  /* background: var(--bg-card); border: 1px solid var(--line); border-radius: 6px;
   padding: 6px 8px; cursor: pointer; font-size: 12px; user-select: none;
-  flex: 1 1 auto; min-width: 0;
+  flex: 1 1 auto; min-width: 0; */
+
+  @apply border border-warm-800;
+
+  .name {
+    @apply !text-warm-100;
+  }
+
+  &.is-selected {
+    .name {
+      @apply !text-brown-900;
+    }
+  }
+
+  &:hover {
+    @apply border-warm-400;
+  }
+
+  &.is-hidden-by-filter {
+    @apply bg-brown-900 border-brown-600 text-warm-500 pointer-events-none;
+    cursor: not-allowed;
+
+    .name {
+      @apply !text-warm-500;
+    }
+  }
 }
-.draw-item:hover { background: var(--bg-card-hover); }
-.draw-item.is-selected { border-color: var(--accent); background: rgba(110, 231, 200, 0.08); }
-.draw-item.is-hidden-by-filter { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
 
 .resource-panel {
   position: absolute;
@@ -454,12 +476,27 @@ code {
 }
 
 .check-like {
-  font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 4px;
-  border: 1px solid var(--line); background: var(--bg-panel); color: var(--text-dim);
+  /* font-family: var(--mono);  border-radius: 4px; */
+  /* border: 1px solid var(--line); background: var(--bg-panel); color: var(--text-dim); */
+
+  @apply border border-warm-900 bg-brown-900 text-warm-400;
+
+  font-size: 11px;
+  padding: 1px 6px;
+
+  &.active {
+    @apply bg-warm-800 text-amber-200 border-amber-200;
+  }
+
+  &.state-hidden {
+    @apply bg-warm-800 text-amber-200 border-amber-200;
+  }
+
+  &:disabled {
+    @apply opacity-50;
+    cursor: not-allowed;
+  }
 }
-.check-like.active { border-color: var(--accent); color: var(--accent); background: rgba(110, 231, 200, 0.12); }
-.check-like.state-hidden { border-color: var(--warn); color: var(--warn); background: rgba(232, 176, 75, 0.12); }
-.check-like:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; padding: 8px 2px; }
 .toggle-row .lbl { color: var(--text); }
