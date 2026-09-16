@@ -345,22 +345,30 @@ export class SceneManager {
     this.camera.quaternion.premultiply(yawQuat);
 
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
-    const pitchAngle = -dy * ROTATE_SENSITIVITY;
-    const pitchQuat = new THREE.Quaternion().setFromAxisAngle(right, pitchAngle);
+    const requestedPitchAngle = -dy * ROTATE_SENSITIVITY;
 
-    // Apply, then check the resulting angle from world-up - if pitching
-    // this far would flip the camera past straight-up/straight-down,
-    // revert just the pitch (yaw above still applies). This is the offset-
-    // model equivalent of the old phi clamp.
+    // Clamp against the CAMERA'S OWN forward direction, not the offset
+    // (camera position relative to the pivot) - once the pivot has been
+    // re-centered under the cursor (see repivotAtMouse) it's often no
+    // longer anywhere near the center of the view, so offset's angle from
+    // world-up can stay well clear of the poles while the camera itself
+    // keeps pitching straight through vertical, flipping it upside down.
+    // Reading the limit off the camera's actual forward vector is correct
+    // no matter where the pivot sits on screen. As with fly mode's pitch
+    // clamp, only the ALLOWED portion of this drag's pitch is applied (not
+    // a hard revert-to-zero), so the camera still eases up to the limit
+    // smoothly instead of sticking the instant a drag would cross it -
+    // and offset gets that same allowed angle, not the full requested one,
+    // so it keeps rotating in lockstep with the orientation.
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const currentPitch = Math.asin(THREE.MathUtils.clamp(forward.y, -1, 1));
+    const pitchLimit = Math.PI / 2 - 0.01;
+    const clampedPitch = THREE.MathUtils.clamp(currentPitch + requestedPitchAngle, -pitchLimit, pitchLimit);
+    const pitchAngle = clampedPitch - currentPitch;
+
+    const pitchQuat = new THREE.Quaternion().setFromAxisAngle(right, pitchAngle);
     this.offset.applyQuaternion(pitchQuat);
-    const newDistance = this.offset.length() || 1;
-    const newPhi = Math.acos(Math.max(-1, Math.min(1, this.offset.y / newDistance)));
-    if (newPhi < 0.05 || newPhi > Math.PI - 0.05) {
-      const inversePitch = pitchQuat.clone().invert();
-      this.offset.applyQuaternion(inversePitch);
-    } else {
-      this.camera.quaternion.premultiply(pitchQuat);
-    }
+    this.camera.quaternion.premultiply(pitchQuat);
 
     this.updateCamera();
   }
