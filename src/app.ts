@@ -1252,8 +1252,8 @@ export class SceneViewerApp {
 
     // Unit shapes (radius/half-extent 1, i.e. spanning -1..1 per axis) so
     // mesh.scale directly IS each axis' half-extent in local space -
-    // that's what the per-axis "Scale" sliders (see
-    // renderSelectAreaOptionsPanel()) edit.
+    // that's what the gizmo's per-axis scale handles edit (see
+    // select-area-gizmo.ts).
     const geometry = kind === "sphere" ? new THREE.SphereGeometry(1, 24, 16) : new THREE.BoxGeometry(2, 2, 2);
     const flatGeometry = geometry.toNonIndexed();
     flatGeometry.computeVertexNormals();
@@ -1333,102 +1333,43 @@ export class SceneViewerApp {
 
   /** Rebuilds the "select area" options panel (#select-options-menu) from
    * scratch to match the current selectAreaShape - empty/hidden when
-   * there's no shape placed, otherwise a small panel with a Remove button
-   * and 6 combined slider+number-input rows (Translate/Scale x X/Y/Z),
-   * each wired to directly drive the shape's own position/scale on input.
-   * Called on every placement and removal - there's no persistent DOM to
+   * there's no shape placed, otherwise a small panel with Move/Scale
+   * gizmo-mode buttons (reflecting selectAreaGizmoMode) and a Remove
+   * button. Actual translating/scaling happens via the in-scene gizmo
+   * itself (see select-area-gizmo.ts) or the 'G'/'S' shortcuts
+   * (handleGizmoKeydown()), not through this panel. Called on every
+   * placement, mode switch, and removal - there's no persistent DOM to
    * keep in sync incrementally, so it's simplest to just rebuild. */
   private renderSelectAreaOptionsPanel(): void {
-    const shape = this.selectAreaShape;
     const kind = this.selectAreaKind;
-    if (!shape || !kind) {
+    if (!kind) {
       this.selectOptionsMenu.classList.remove("menu");
       this.selectOptionsMenu.innerHTML = "";
       return;
     }
 
-    const diagonal = boundsDiagonal(this.overallLocalBounds());
-    const center = boundsCenter(this.overallLocalBounds());
-    const translateRange = Math.max(diagonal * 1.5, 1e-6);
-    const scaleMin = Math.max(diagonal * 0.0005, 1e-9);
-    const scaleMax = Math.max(diagonal * 0.5, scaleMin * 2);
-
-    type Axis = "x" | "y" | "z";
-    type Group = "translate" | "scale";
-    const axes: Axis[] = ["x", "y", "z"];
-    const ranges: Record<Group, Record<Axis, [number, number]>> = {
-      translate: {
-        x: [center.x - translateRange, center.x + translateRange],
-        y: [center.y - translateRange, center.y + translateRange],
-        z: [center.z - translateRange, center.z + translateRange],
-      },
-      scale: {
-        x: [scaleMin, scaleMax],
-        y: [scaleMin, scaleMax],
-        z: [scaleMin, scaleMax],
-      },
-    };
-    const currentValue = (group: Group, axis: Axis): number =>
-      group === "translate" ? shape.position[axis] : shape.scale[axis];
-
-    const row = (group: Group, axis: Axis): string => {
-      const [min, max] = ranges[group][axis];
-      const value = currentValue(group, axis);
-      const label = `${group === "translate" ? "Translate" : "Scale"} ${axis.toUpperCase()}`;
-      const step = (max - min) / 1000 || 0.001;
-      return `
-        <div class="field">
-          <div class="label">${label}</div>
-          <div class="combined-slider-value">
-            <input type="range" data-select-area="${group}-${axis}-slider" min="${min}" max="${max}" step="${step}" value="${value}" />
-            <input type="text" class="input-number" data-select-area="${group}-${axis}-value" value="${value.toFixed(3)}" />
-          </div>
-        </div>`;
-    };
-
+    const mode = this.selectAreaGizmoMode;
     this.selectOptionsMenu.classList.add("menu");
     this.selectOptionsMenu.innerHTML = `
-      <div class="flex flex-row items-center justify-between">
+      <div class="flex flex-row items-center justify-between gap-2">
         <b class="text-white">${kind === "sphere" ? "Sphere" : "Box"} select area</b>
-        <button class="ghost" data-select-area="remove">Remove</button>
+        <div class="flex flex-row gap-2">
+          <button class="${mode === "translate" ? "active" : ""}" data-select-area="mode-translate" title="Translate (G)">Move</button>
+          <button class="${mode === "scale" ? "active" : ""}" data-select-area="mode-scale" title="Scale (S)">Scale</button>
+          <button class="ghost" data-select-area="remove">Remove</button>
+        </div>
       </div>
-      ${axes.map((axis) => row("translate", axis)).join("")}
-      ${axes.map((axis) => row("scale", axis)).join("")}
+      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move or scale it. Press G/S to switch modes.</p>
     `;
 
-    const setAxisValue = (group: Group, axis: Axis, raw: number): void => {
-      const s = this.selectAreaShape;
-      if (!s) return;
-      const [min, max] = ranges[group][axis];
-      const clamped = Math.min(max, Math.max(min, Number.isFinite(raw) ? raw : min));
-      if (group === "translate") s.position[axis] = clamped;
-      else s.scale[axis] = clamped;
-
-      const slider = this.selectOptionsMenu.querySelector<HTMLInputElement>(
-        `[data-select-area="${group}-${axis}-slider"]`,
-      );
-      const text = this.selectOptionsMenu.querySelector<HTMLInputElement>(
-        `[data-select-area="${group}-${axis}-value"]`,
-      );
-      if (slider) slider.value = String(clamped);
-      if (text) text.value = clamped.toFixed(3);
-    };
-
-    for (const group of ["translate", "scale"] as Group[]) {
-      for (const axis of axes) {
-        const slider = this.selectOptionsMenu.querySelector<HTMLInputElement>(
-          `[data-select-area="${group}-${axis}-slider"]`,
-        );
-        const text = this.selectOptionsMenu.querySelector<HTMLInputElement>(
-          `[data-select-area="${group}-${axis}-value"]`,
-        );
-        slider?.addEventListener("input", () => setAxisValue(group, axis, Number(slider.value)));
-        text?.addEventListener("change", () => setAxisValue(group, axis, Number(text.value)));
-      }
-    }
-
     this.selectOptionsMenu
-      .querySelector<HTMLButtonElement>('[data-select-area="remove"]')
+      .querySelector('[data-select-area="mode-translate"]')
+      ?.addEventListener("click", () => this.setSelectAreaGizmoMode("translate"));
+    this.selectOptionsMenu
+      .querySelector('[data-select-area="mode-scale"]')
+      ?.addEventListener("click", () => this.setSelectAreaGizmoMode("scale"));
+    this.selectOptionsMenu
+      .querySelector('[data-select-area="remove"]')
       ?.addEventListener("click", () => this.clearSelectAreaShape());
   }
 
