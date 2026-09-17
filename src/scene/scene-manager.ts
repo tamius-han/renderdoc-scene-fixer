@@ -10,6 +10,29 @@ export type ControlSchemeHandler = (scheme: ControlScheme) => void;
 export type CameraProjection = "perspective" | "orthographic";
 export type CameraProjectionHandler = (projection: CameraProjection) => void;
 
+const VIEW_TRANSITION_DURATION_MS = 500;
+
+/** In-flight animated transition to a numpad-triggered view (see
+ * startViewTransition()/setAxisView()/viewOppositeDirection()) - `target`
+ * never moves during one of these, only offset/quaternion/up, so it's not
+ * captured here. */
+interface ViewTransition {
+  fromOffset: THREE.Vector3;
+  toOffset: THREE.Vector3;
+  fromQuat: THREE.Quaternion;
+  toQuat: THREE.Quaternion;
+  fromUp: THREE.Vector3;
+  toUp: THREE.Vector3;
+  startTime: number;
+}
+
+/** Smooth start/end, matching the CSS ease-in-out most UI motion already
+ * reads as "natural" - a sharp linear snap over 0.5s reads as mechanical
+ * for a camera move this size. */
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
 
 
 // We need scene size limits, otherwise there can be issues with camera and clipping
@@ -60,6 +83,13 @@ export class SceneManager {
   // offset) and orientation (camera.quaternion) fully independent, so
   // repivoting can never, by construction, touch orientation.
   private offset = new THREE.Vector3(0, 0, 10);
+  /** Non-null while a numpad view snap (see setAxisView()/
+   * viewOppositeDirection()) is animating - advanced each frame in
+   * animate(). Any manual camera input (drag-rotate/pan, wheel zoom, fly
+   * mode) cancels it outright rather than blending with it - see the
+   * cancellations at the top of the pointerdown/onWheel/enterFlyMode
+   * handlers. */
+  private viewTransition: ViewTransition | null = null;
   private contentGroup: THREE.Group | null = null;
   private raycaster = new THREE.Raycaster();
 
@@ -135,6 +165,8 @@ export class SceneManager {
     this.renderer.domElement.addEventListener("pointerdown", (e) => {
       if (this.flying || e.button !== 1) return;
       e.preventDefault(); // stops the browser's middle-click autoscroll icon
+      // Manual input always wins over an in-flight numpad view animation.
+      this.viewTransition = null;
       // Re-pivot to whatever's under the cursor RIGHT NOW, once, at the
       // start of this drag - not continuously during it (see
       // repivotAtMouse's doc comment for why).
@@ -280,22 +312,52 @@ export class SceneManager {
     });
   }
 
+  /** Kicks off a VIEW_TRANSITION_DURATION_MS animated move to the given
+   * offset/up, leaving `target` untouched - advanced each frame in
+   * animate(). The target orientation is worked out via a scratch
+   * camera's lookAt() (mirroring exactly what the old instant version
+   * did), purely so there's a quaternion to slerp towards; the scratch
+   * object itself is discarded immediately; it's never part of the scene. */
+  private startViewTransition(targetOffset: THREE.Vector3, targetUp: THREE.Vector3): void {
+    // Deliberately THREE.Camera, not THREE.Object3D: Object3D.lookAt()
+    // special-cases cameras/lights to point -Z at the target (the
+    // convention this.camera itself relies on); for anything else it
+    // swaps eye/target under the hood so that object's +Z faces the
+    // target instead - a fine convention for e.g. billboarding a sprite,
+    // but it hands back a quaternion rotated 180 degrees from what a real
+    // camera needs, which used to send the camera facing away from the
+    // scene entirely. THREE.Camera is cheap and gets isCamera right.
+    const scratch = new THREE.Camera();
+    scratch.up.copy(targetUp);
+    scratch.position.copy(this.target).add(targetOffset);
+    scratch.lookAt(this.target);
+
+    this.viewTransition = {
+      fromOffset: this.offset.clone(),
+      toOffset: targetOffset.clone(),
+      fromQuat: this.camera.quaternion.clone(),
+      toQuat: scratch.quaternion.clone(),
+      fromUp: this.camera.up.clone(),
+      toUp: targetUp.clone(),
+      startTime: performance.now(),
+    };
+  }
+
   /** Snaps to a fixed axis-aligned view, keeping the current orbit
    * distance and target - a deliberate reorientation (like
-   * frameOnScene()), so an unconditional lookAt() is correct here. `up`
-   * is set explicitly (rather than left however a previous snap left it)
-   * since e.g. top/bottom views need a horizontal up vector to produce a
-   * sane, non-degenerate lookAt(). Also switches to orthographic, since
-   * that's what these axis-aligned views are for - measuring/comparing
-   * without perspective foreshortening (standard CAD/Blender behavior);
-   * viewOppositeDirection() deliberately does NOT do this, since it can
-   * be used from a non-axis-aligned view too. */
+   * frameOnScene()). `up` is specified explicitly (rather than left
+   * however a previous snap left it) since e.g. top/bottom views need a
+   * horizontal up vector to produce a sane, non-degenerate orientation.
+   * Also switches to orthographic, since that's what these axis-aligned
+   * views are for - measuring/comparing without perspective
+   * foreshortening (standard CAD/Blender behavior); viewOppositeDirection()
+   * deliberately does NOT do this, since it can be used from a
+   * non-axis-aligned view too. The move itself is animated - see
+   * startViewTransition(). */
   private setAxisView(direction: THREE.Vector3, up: THREE.Vector3): void {
     const distance = this.offset.length() || 10;
-    this.offset.copy(direction).normalize().multiplyScalar(distance);
-    this.camera.up.copy(up);
-    this.updateCamera();
-    this.camera.lookAt(this.target);
+    const targetOffset = direction.clone().normalize().multiplyScalar(distance);
+    this.startViewTransition(targetOffset, up);
     this.setCameraProjection("orthographic");
   }
 
@@ -313,14 +375,14 @@ export class SceneManager {
 
   /** Orbits 180 degrees around the target, i.e. looks at the same point
    * from exactly the opposite side - works from ANY current view, not
-   * just the three axis-aligned ones above, and (since `up` is left
-   * untouched) doing this from an axis view lands exactly on that axis's
-   * opposite (front<->back, right<->left, top<->bottom) with no
-   * incidental roll. */
+   * just the three axis-aligned ones above, and (since `up` is passed
+   * through unchanged) doing this from an axis view lands exactly on that
+   * axis's opposite (front<->back, right<->left, top<->bottom) with no
+   * incidental roll. The move itself is animated - see
+   * startViewTransition(). */
   viewOppositeDirection(): void {
-    this.offset.negate();
-    this.updateCamera();
-    this.camera.lookAt(this.target);
+    const targetOffset = this.offset.clone().negate();
+    this.startViewTransition(targetOffset, this.camera.up.clone());
   }
   //#endregion
 
@@ -403,6 +465,10 @@ export class SceneManager {
   private enterFlyMode(): void {
     this.flying = true;
     this.heldKeys.clear();
+    // Manual input (of which "start flying" counts as one) wins over an
+    // in-flight view animation - whatever position/orientation it had
+    // reached becomes fly mode's seed below, same as any other orbit state.
+    this.viewTransition = null;
     // Fly mode is always perspective - remember whatever projection was
     // active so handOffFlyToOrbit() can restore it on the way out.
     this.preFlyCameraProjection = this.cameraProjection;
@@ -579,6 +645,7 @@ export class SceneManager {
     // repivotAtMouse() only ever touches target/offset, never
     // camera.quaternion - so this can't cause the view to rotate, only to
     // dolly toward/away from wherever the cursor is pointing.
+    this.viewTransition = null; // manual input wins over an in-flight view animation
     this.repivotAtMouse(e.clientX, e.clientY);
     const newLength = Math.max(0.01, this.offset.length() * (1 + e.deltaY * 0.0012));
     this.offset.setLength(newLength);
@@ -640,6 +707,25 @@ export class SceneManager {
     this.camera.position.copy(this.target).add(this.offset);
   }
 
+  /** Advances the in-flight numpad view animation, if any - called once a
+   * frame. `target` is never touched (see ViewTransition's doc comment);
+   * only offset/quaternion/up are interpolated, then updateCamera() folds
+   * the new offset back into camera.position the same way every other
+   * camera-moving method here does. */
+  private updateViewTransition(): void {
+    const transition = this.viewTransition;
+    if (!transition) return;
+    const t = Math.min((performance.now() - transition.startTime) / VIEW_TRANSITION_DURATION_MS, 1);
+    const eased = easeInOutCubic(t);
+
+    this.offset.lerpVectors(transition.fromOffset, transition.toOffset, eased);
+    this.camera.quaternion.slerpQuaternions(transition.fromQuat, transition.toQuat, eased);
+    this.camera.up.lerpVectors(transition.fromUp, transition.toUp, eased).normalize();
+    this.updateCamera();
+
+    if (t >= 1) this.viewTransition = null;
+  }
+
   //#endregion
 
   resize(): void {
@@ -685,6 +771,9 @@ export class SceneManager {
   frameOnScene(): void {
     const box = new THREE.Box3().setFromObject(this.scene);
     if (box.isEmpty()) return;
+    // Reframing is itself an instant, unconditional move - cancel any
+    // in-flight numpad view animation rather than have it fight this.
+    this.viewTransition = null;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -728,6 +817,7 @@ export class SceneManager {
     this.lastFrameTime = now;
 
     if (this.flying) this.updateFlyMovement(deltaSeconds);
+    this.updateViewTransition();
     this.syncOrthographicCamera();
     this.orientationGizmo.update(this.activeCamera);
 
