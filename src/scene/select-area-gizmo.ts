@@ -27,6 +27,26 @@ const HIGHLIGHT_COLOR = 0xffff00;
  * shape's own scale, matching how game-engine gizmos usually behave. */
 const SCREEN_FRACTION = 0.14;
 const AXIS_LEN = 1;
+
+/** World-space height visible at the given distance from the camera - the
+ * common piece of math behind both "keep this gizmo a constant fraction of
+ * the viewport regardless of distance" (see update()) and the scale-mode
+ * drag's screen-space reference point. Works for either camera type: for
+ * perspective this is the standard fov-based frustum height; for
+ * orthographic there's no fov, so it's read directly off the frustum
+ * (divided by zoom, in case that's ever not 1). SceneManager keeps its
+ * orthographic camera's frustum defined as distance*tan(fov/2) (see
+ * syncOrthographicCamera()'s doc comment) specifically so this function
+ * gives the same answer either way at any given moment - i.e. so nothing
+ * here needs to care which projection is actually active. */
+function visibleHeightAt(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera, distance: number): number {
+  if (camera instanceof THREE.OrthographicCamera) {
+    return (camera.top - camera.bottom) / camera.zoom;
+  }
+  const vFov = (camera.fov * Math.PI) / 180;
+  return 2 * distance * Math.tan(vFov / 2);
+}
+
 // Half as thick as before (was 0.045) - drives the arrow shaft/cone radius,
 // the scale-mode box tip size, and the center ring's tube thickness (see
 // buildHandles() below) all at once, without touching any of the LENGTHS
@@ -158,13 +178,12 @@ export class SelectAreaGizmo {
    * rotation/(uniform) scale - passed in rather than looked up here so
    * this class doesn't need to know about SceneManager/contentGroup at
    * all. */
-  update(camera: THREE.PerspectiveCamera, groupQuat: THREE.Quaternion, groupScale: number): void {
+  update(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera, groupQuat: THREE.Quaternion, groupScale: number): void {
     this.object3d.position.copy(this.target.position);
 
     const worldPos = this.target.position.clone().applyQuaternion(groupQuat).multiplyScalar(groupScale);
     const distance = Math.max(camera.position.distanceTo(worldPos), 1e-6);
-    const vFov = (camera.fov * Math.PI) / 180;
-    const desiredWorldSize = 2 * distance * Math.tan(vFov / 2) * SCREEN_FRACTION;
+    const desiredWorldSize = visibleHeightAt(camera, distance) * SCREEN_FRACTION;
     this.object3d.scale.setScalar(desiredWorldSize / Math.max(groupScale, 1e-9));
 
     const ring = this.handles.find((handle) => handle.kind.type === "center")?.mesh;
@@ -210,7 +229,7 @@ export class SelectAreaGizmo {
   beginDrag(
     handle: GizmoHandle,
     raycaster: THREE.Raycaster,
-    camera: THREE.PerspectiveCamera,
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
     groupQuat: THREE.Quaternion,
     groupScale: number,
     canvasRect: DOMRect,
@@ -273,7 +292,7 @@ export class SelectAreaGizmo {
    * target's position/scale directly. */
   updateDrag(
     raycaster: THREE.Raycaster,
-    camera: THREE.PerspectiveCamera,
+    _camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
     groupQuat: THREE.Quaternion,
     groupScale: number,
     mouseClientX: number,

@@ -1,11 +1,14 @@
 import * as THREE from "three";
 import { MovementBindings, WASD_BINDINGS, ESDF_BINDINGS } from './movement-bindings.interface';
 import { Config } from '../config/cls.config';
+import { OrientationGizmo } from './orientation-gizmo';
 
 export type ContextLossHandler = (lost: boolean) => void;
 export type FlyStateHandler = (flying: boolean, speed: number) => void;
 export type ControlScheme = "esdf" | "wasd";
 export type ControlSchemeHandler = (scheme: ControlScheme) => void;
+export type CameraProjection = "perspective" | "orthographic";
+export type CameraProjectionHandler = (projection: CameraProjection) => void;
 
 
 
@@ -28,7 +31,22 @@ export function computeNormalizationScale(maxDim: number): number {
  * since Three.js's example add-ons aren't part of the core npm package. */
 export class SceneManager {
   readonly scene: THREE.Scene;
+  /** The "control" camera - every orbit/pan/fly/view-snap interaction in
+   * this class reads and writes this camera directly, and it's ALWAYS
+   * perspective. Orthographic mode (see cameraProjection) doesn't touch
+   * any of that: it just mirrors this camera's transform onto a second,
+   * purely cosmetic orthographic camera (see syncOrthographicCamera())
+   * and renders through that instead - see activeCamera. This means
+   * switching projection can never perturb the underlying orbit
+   * target/offset state, and flipping back is always exact. */
   readonly camera: THREE.PerspectiveCamera;
+  private readonly orthographicCamera: THREE.OrthographicCamera;
+  private cameraProjection: CameraProjection = "perspective";
+  private cameraProjectionHandlers: CameraProjectionHandler[] = [];
+  /** Whatever cameraProjection was set to just before fly mode was
+   * entered - restored on exit. See enterFlyMode()/handOffFlyToOrbit(). */
+  private preFlyCameraProjection: CameraProjection = "perspective";
+  private orientationGizmo: OrientationGizmo;
   readonly renderer: THREE.WebGLRenderer;
 
   private target = new THREE.Vector3(0, 0, 0);
@@ -91,6 +109,9 @@ export class SceneManager {
     this.scene.background = new THREE.Color(0x0b0e13);
 
     this.camera = new THREE.PerspectiveCamera(55, 1, 0.01, 100000);
+    // Bounds are recomputed every frame from the control camera (see
+    // syncOrthographicCamera()) - the constructor values are placeholders.
+    this.orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100000);
     // Initial view angle, matching the old default (theta=pi/4, phi=0.35pi).
     // A one-time lookAt() here is fine - unlike everywhere else in this
     // class, there's no prior orientation to preserve at construction time.
@@ -103,6 +124,10 @@ export class SceneManager {
     );
     this.updateCamera();
     this.camera.lookAt(this.target);
+
+    this.orientationGizmo = new OrientationGizmo();
+    this.orientationGizmo.setProjectionLabel("Perspective");
+    container.appendChild(this.orientationGizmo.element);
 
     window.addEventListener("resize", () => this.resize());
     this.resize();
@@ -125,6 +150,7 @@ export class SceneManager {
     this.renderer.domElement.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
 
     this.setupFlyMode();
+    this.setupViewControls();
 
     // needed to handle cases where we run out of GPU memory, or other
     // canvas/context related issues
@@ -158,6 +184,145 @@ export class SceneManager {
   onBeforeRender(handler: () => void): void {
     this.beforeRenderHandlers.push(handler);
   }
+
+  //#region camera projection (perspective/orthographic) and view snapping
+  /** The camera that's actually rendered/raycast against right now -
+   * unlike `camera`, which stays perspective at all times, this reflects
+   * whichever projection is currently active (see setCameraProjection()).
+   * External code that needs to reason about what's actually on screen
+   * (raycasting, the outline render pass, the select-area gizmo's
+   * screen-space math) should use this rather than `camera`. */
+  get activeCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
+    return this.cameraProjection === "orthographic" ? this.orthographicCamera : this.camera;
+  }
+
+  onCameraProjectionChange(handler: CameraProjectionHandler): void {
+    this.cameraProjectionHandlers.push(handler);
+    handler(this.cameraProjection);
+  }
+
+  private notifyCameraProjection(): void {
+    for (const handler of this.cameraProjectionHandlers) handler(this.cameraProjection);
+  }
+
+  setCameraProjection(projection: CameraProjection): void {
+    if (projection === this.cameraProjection) return;
+    this.cameraProjection = projection;
+    this.orientationGizmo.setProjectionLabel(projection === "orthographic" ? "Orthographic" : "Perspective");
+    this.notifyCameraProjection();
+  }
+
+  toggleCameraProjection(): void {
+    this.setCameraProjection(this.cameraProjection === "orthographic" ? "perspective" : "orthographic");
+  }
+
+  /** Recomputes the orthographic camera's position/orientation/frustum
+   * from the control camera - called every frame (cheap: a couple of
+   * vector copies plus some trig) so it's always ready the instant
+   * setCameraProjection() switches to it, with no one-frame lag/pop.
+   * The frustum's half-height is deliberately derived the same way a
+   * perspective camera's visible height at that distance would be
+   * (distance * tan(fov/2)) - this is what makes switching projection
+   * keep the same apparent framing instead of jump-cutting to some
+   * unrelated default zoom, and it's also why callers elsewhere (e.g.
+   * SelectAreaGizmo's constant-screen-size scaling, or pan()'s
+   * world-units-per-pixel calc) can keep doing their fov-based math
+   * against the perspective `camera` unconditionally, without caring
+   * which projection is actually on screen - the two are kept
+   * mathematically equivalent by construction. */
+  private syncOrthographicCamera(): void {
+    const ortho = this.orthographicCamera;
+    ortho.position.copy(this.camera.position);
+    ortho.quaternion.copy(this.camera.quaternion);
+    ortho.up.copy(this.camera.up);
+
+    const distance = this.offset.length() || 1;
+    const halfHeight = distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+    const halfWidth = halfHeight * this.camera.aspect;
+    ortho.left = -halfWidth;
+    ortho.right = halfWidth;
+    ortho.top = halfHeight;
+    ortho.bottom = -halfHeight;
+    ortho.near = this.camera.near;
+    ortho.far = this.camera.far;
+    ortho.updateProjectionMatrix();
+  }
+
+  private setupViewControls(): void {
+    window.addEventListener("keydown", (e) => {
+      // View-snapping and the ortho/persp toggle only make sense for the
+      // orbit camera - while flying, the numpad is left alone entirely
+      // (fly mode has its own notion of "where you're looking" that
+      // isn't the target/offset model these act on).
+      if (e.repeat || this.isTypingInFormField() || this.flying) return;
+      switch (e.code) {
+        case "Numpad1":
+          e.preventDefault();
+          this.viewFront();
+          break;
+        case "Numpad3":
+          e.preventDefault();
+          this.viewRightSide();
+          break;
+        case "Numpad7":
+          e.preventDefault();
+          this.viewTop();
+          break;
+        case "Numpad9":
+          e.preventDefault();
+          this.viewOppositeDirection();
+          break;
+        case "Numpad5":
+          e.preventDefault();
+          this.toggleCameraProjection();
+          break;
+      }
+    });
+  }
+
+  /** Snaps to a fixed axis-aligned view, keeping the current orbit
+   * distance and target - a deliberate reorientation (like
+   * frameOnScene()), so an unconditional lookAt() is correct here. `up`
+   * is set explicitly (rather than left however a previous snap left it)
+   * since e.g. top/bottom views need a horizontal up vector to produce a
+   * sane, non-degenerate lookAt(). Also switches to orthographic, since
+   * that's what these axis-aligned views are for - measuring/comparing
+   * without perspective foreshortening (standard CAD/Blender behavior);
+   * viewOppositeDirection() deliberately does NOT do this, since it can
+   * be used from a non-axis-aligned view too. */
+  private setAxisView(direction: THREE.Vector3, up: THREE.Vector3): void {
+    const distance = this.offset.length() || 10;
+    this.offset.copy(direction).normalize().multiplyScalar(distance);
+    this.camera.up.copy(up);
+    this.updateCamera();
+    this.camera.lookAt(this.target);
+    this.setCameraProjection("orthographic");
+  }
+
+  viewFront(): void {
+    this.setAxisView(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 1, 0));
+  }
+
+  viewRightSide(): void {
+    this.setAxisView(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0));
+  }
+
+  viewTop(): void {
+    this.setAxisView(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1));
+  }
+
+  /** Orbits 180 degrees around the target, i.e. looks at the same point
+   * from exactly the opposite side - works from ANY current view, not
+   * just the three axis-aligned ones above, and (since `up` is left
+   * untouched) doing this from an axis view lands exactly on that axis's
+   * opposite (front<->back, right<->left, top<->bottom) with no
+   * incidental roll. */
+  viewOppositeDirection(): void {
+    this.offset.negate();
+    this.updateCamera();
+    this.camera.lookAt(this.target);
+  }
+  //#endregion
 
   //#region fly mode handling
   onFlyStateChange(handler: FlyStateHandler): void {
@@ -238,6 +403,10 @@ export class SceneManager {
   private enterFlyMode(): void {
     this.flying = true;
     this.heldKeys.clear();
+    // Fly mode is always perspective - remember whatever projection was
+    // active so handOffFlyToOrbit() can restore it on the way out.
+    this.preFlyCameraProjection = this.cameraProjection;
+    this.setCameraProjection("perspective");
     // Seed fly position/orientation from wherever the orbit camera
     // currently is, so toggling into fly mode doesn't cause a visual jump.
     this.flyPosition.copy(this.camera.position);
@@ -307,6 +476,10 @@ export class SceneManager {
     this.offset.copy(this.camera.position).sub(this.target);
     this.heldKeys.clear();
     this.updateCamera();
+    // Restore whatever projection was active before fly mode forced
+    // perspective (see enterFlyMode()) - a no-op if it was already
+    // perspective.
+    this.setCameraProjection(this.preFlyCameraProjection);
   }
 
   //#region orbit/pan mode handling
@@ -450,7 +623,7 @@ export class SceneManager {
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
-    this.raycaster.setFromCamera(ndc, this.camera);
+    this.raycaster.setFromCamera(ndc, this.activeCamera);
 
     const targets = group.children.filter((child) => !child.userData?.isSelectionVisual);
     const hits = this.raycaster.intersectObjects(targets, true);
@@ -525,6 +698,11 @@ export class SceneManager {
       distance * Math.cos(phi),
       distance * Math.sin(phi) * Math.cos(theta),
     );
+    // A view-snap (setAxisView(), for the numpad top/bottom views) may
+    // have left `up` pointing along a horizontal axis - reset it before
+    // this lookAt() so this always reproduces the same default framing
+    // regardless of whatever view was active beforehand.
+    this.camera.up.set(0, 1, 0);
     this.updateCamera();
     this.camera.lookAt(this.target);
   }
@@ -550,9 +728,11 @@ export class SceneManager {
     this.lastFrameTime = now;
 
     if (this.flying) this.updateFlyMovement(deltaSeconds);
+    this.syncOrthographicCamera();
+    this.orientationGizmo.update(this.activeCamera);
 
     for (const handler of this.beforeRenderHandlers) handler();
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, this.activeCamera);
     for (const handler of this.afterRenderHandlers) handler();
   };
 }
