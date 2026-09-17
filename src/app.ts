@@ -142,6 +142,13 @@ export class SceneViewerApp {
    * the auto-detected worldUpAxis-to-Y rotation - see
    * getActiveSceneRotation(). */
   private manualUpRotation: THREE.Quaternion | null = null;
+  /** Snapshot of (manualUpRotation, upAxisSelect.value) taken the moment
+   * the ground-plane tool is armed (see startGroundPlaneTool()) - restored
+   * verbatim if the user clicks Cancel (see cancelGroundPlaneTool()),
+   * whether that happens mid-placement or during the accept/cancel review
+   * step after the 3rd point. null whenever the tool isn't in the middle
+   * of a run, i.e. there's nothing to revert to. */
+  private groundPlaneRotationSnapshot: { manualUpRotation: THREE.Quaternion | null; upAxisValue: string } | null = null;
   /** Which select-area tool ("sphere" or "box") is currently armed and
    * waiting for its single placement click, if any - see
    * startSelectAreaTool()/handleSelectAreaClick(). Left-click in the
@@ -247,6 +254,15 @@ export class SceneViewerApp {
         hint: this.el("select-landmark-submenu_no-selection"),
         selectLandmarkApplyBtn: this.el("select-landmark-apply"),
         selectLandmarkCancelBtn: this.el("select-landmark-cancel"),
+      },
+
+      selectGroundPlaneSubmenu: {
+        menu: this.el("select-ground-plane-submenu"),
+        hint: this.el("select-ground-plane_incomplete-selection"),
+        actions: this.el('select-ground-plane_options'),
+        selectGroundPlaneApplyBtn: this.el("select-ground-plane_accept-selection"),
+        selectGroundPlaneApply180Btn: this.el("select-ground-plane_accept-selection-180"),
+        selectGroundPlaneCancelBtn: this.el("select-ground-plane_cancel-selection"),
       }
     },
 
@@ -258,7 +274,6 @@ export class SceneViewerApp {
 
 
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
-  private markGroundPlaneBtn = this.el<HTMLButtonElement>("mark-ground-plane-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
@@ -327,7 +342,6 @@ export class SceneViewerApp {
 
   }
 
-
   private setupMenu() {
     this.elements.menu.importScene.addEventListener('click', () => {
       this.elements.captureImporter.classList.remove('hidden');
@@ -372,7 +386,18 @@ export class SceneViewerApp {
           Config.sessionConfig.tools.activeTool = null;
         }
       });
-      // TODO: merge in ground plane select button
+      this.elements.toolsMenu.selectGroundPlaneBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        if (Config.sessionConfig.tools.activeTool !== 'select-ground-plane') {
+          Config.sessionConfig.tools.activeTool = 'select-ground-plane';
+          this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.remove('hidden');
+          this.startGroundPlaneTool();
+        } else {
+          this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add('hidden');
+          Config.sessionConfig.tools.activeTool = null;
+        }
+      });
       this.elements.toolsMenu.setUpAxisBtn.addEventListener('click', () => {
         this.hideAllToolSubmenus();
         this.cancelAllTools();
@@ -411,6 +436,19 @@ export class SceneViewerApp {
       this.elements.toolsMenu.selectVolumeSubmenu.selectRemoveBtn.addEventListener("click", () => this.applyVolumeSelection("remove"));
       this.elements.toolsMenu.selectVolumeSubmenu.selectCancelBtn.addEventListener("click", () => this.cancelSelectByVolumeTool());
     }
+
+    // setup submenu: select ground plane
+    {
+      this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneApplyBtn.addEventListener("click", () =>
+        this.acceptGroundPlaneTool(false),
+      );
+      this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneApply180Btn.addEventListener("click", () =>
+        this.acceptGroundPlaneTool(true),
+      );
+      this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneCancelBtn.addEventListener("click", () =>
+        this.cancelSelectGroundPlaneTool(),
+      );
+    }
   }
 
   private wireEvents(): void {
@@ -421,8 +459,6 @@ export class SceneViewerApp {
 
 
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    this.markGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
-
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
     // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
@@ -456,10 +492,11 @@ export class SceneViewerApp {
   private hideAllToolSubmenus() {
     this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.add("hidden");
     this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add("hidden");
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add("hidden");
   }
   private cancelAllTools() {
     this.cancelVolumeSelectTool();
-
+    this.cancelGroundPlaneTool();
   }
   /**
    * Toggles visibility of resource panel.
@@ -651,6 +688,8 @@ export class SceneViewerApp {
       // or previously-completed ground-plane marking, and any placed
       // select-area shape, belonged to the old one and no longer mean
       // anything against new geometry.
+      this.hideAllToolSubmenus();
+      Config.sessionConfig.tools.activeTool = null;
       this.cancelGroundPlaneTool();
       this.manualUpRotation = null;
       if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
@@ -924,13 +963,6 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /**
-   * Mirrors the entire scene along the X axis.
-   */
-  private mirrorSceneAlongX(): {
-
-  }
-
   /** Best-effort heuristic for which world-space axis is "up": the axis
    * with the SMALLEST extent across the whole scene's combined bounding
    * box. Most captured scenes (game levels, rooms, even most single
@@ -1001,43 +1033,108 @@ export class SceneViewerApp {
     group.quaternion.copy(this.getActiveSceneRotation());
   }
 
-  /** Arms/disarms the "Mark ground plane" tool - see
-   * startGroundPlaneTool()/cancelGroundPlaneTool(). */
-  private toggleGroundPlaneTool(): void {
-    if (this.groundPlaneToolActive) this.cancelGroundPlaneTool();
-    else this.startGroundPlaneTool();
-  }
-
-  /** Arms the ground-plane tool: switches the viewport cursor to a
-   * crosshair and starts collecting the next 3 left-clicks on mesh surface
-   * (see handleSceneObjectPointer()/handleGroundPlaneClick()). Left-clicks
+  /** Arms the ground-plane tool: shows the submenu's "select 3 points" hint
+   * (with the accept/cancel actions row hidden - see showGroundPlaneHint()),
+   * snapshots the rotation state so Cancel can restore it later, and
+   * switches the viewport cursor to a crosshair to start collecting the
+   * next 3 left-clicks on mesh surface (see
+   * handleSceneObjectPointer()/handleGroundPlaneClick()). Left-clicks
    * elsewhere while armed are effectively no-ops (see raycastMeshSurface())
-   * rather than falling through to normal object selection. */
+   * rather than falling through to normal object selection. Showing/hiding
+   * the submenu ITSELF, and Config.sessionConfig.tools.activeTool, are the
+   * caller's job (see setupToolsMenu()'s top-level dispatcher) - this only
+   * handles the tool's own internal state. */
   private startGroundPlaneTool(): void {
-    if (this.loadedDraws.length === 0) {
-      this.setStatus("Reconstruct a scene first.");
-      return;
-    }
-    this.cancelVolumeSelectTool(); // mutually exclusive with the select-area tools
+    if (this.loadedDraws.length === 0) return;
+    this.groundPlaneRotationSnapshot = { manualUpRotation: this.manualUpRotation, upAxisValue: this.upAxisSelect.value };
     this.groundPlaneToolActive = true;
     this.groundPlanePoints = [];
     this.clearGroundPlaneVisuals();
     this.sceneManager.renderer.domElement.style.cursor = "crosshair";
-    this.markGroundPlaneBtn.classList.add("active");
-    this.setStatus("Mark ground plane: click 3 points on the mesh surface (right-click to cancel).");
+    this.showGroundPlaneHint();
   }
 
-  /** Disarms the ground-plane tool and clears any points/markers placed so
-   * far without computing a rotation - used both for an explicit
-   * right-click cancel and for toggling the button off mid-placement.
-   * Harmless to call when the tool isn't active (e.g. from
-   * reconstructScene()'s per-reconstruct reset). */
+  /** Aborts the ground-plane tool and restores whatever rotation was active
+   * before it was armed (see groundPlaneRotationSnapshot's doc comment) if
+   * a preview was pending - used for a right-click abort mid-placement,
+   * cancelAllTools() (switching to a different top-level tool or toggling
+   * this one off via its own button), and reconstructScene()'s
+   * per-reconstruct reset. Doesn't touch the submenu's own open/closed
+   * state or Config.sessionConfig.tools.activeTool - see
+   * cancelSelectGroundPlaneTool() for the submenu's own Cancel button,
+   * which wraps this plus that bookkeeping. Harmless to call when the tool
+   * isn't active/pending - there's simply nothing to restore in that
+   * case. */
   private cancelGroundPlaneTool(): void {
+    if (this.groundPlaneRotationSnapshot) {
+      this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
+      this.upAxisSelect.value = this.groundPlaneRotationSnapshot.upAxisValue;
+      this.applySceneRotation();
+      this.groundPlaneRotationSnapshot = null;
+    }
     this.groundPlaneToolActive = false;
     this.groundPlanePoints = [];
     this.clearGroundPlaneVisuals();
     this.sceneManager.renderer.domElement.style.cursor = "";
-    this.markGroundPlaneBtn.classList.remove("active");
+    this.showGroundPlaneHint();
+  }
+
+  /** The ground-plane submenu's own "Cancel" button: cancelGroundPlaneTool()
+   * (whether that's abandoning mid-placement or reverting a pending
+   * preview) plus closing the submenu and clearing
+   * Config.sessionConfig.tools.activeTool - the "I'm done with the
+   * ground-plane tool for now" exit, matching cancelSelectByVolumeTool()'s
+   * role for the volume-select submenu. */
+  private cancelSelectGroundPlaneTool(): void {
+    this.cancelGroundPlaneTool();
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add("hidden");
+    if (Config.sessionConfig.tools.activeTool === "select-ground-plane") {
+      Config.sessionConfig.tools.activeTool = null;
+    }
+  }
+
+  /** Keeps the previewed rotation from the just-completed 3-click marking
+   * (see finishGroundPlaneTool()) - the Accept button, or (with
+   * flip180Depth) the "Accept, flipped 180°" button for when the auto-
+   * picked normal direction came out upside down. The flip is applied
+   * AFTER the leveling rotation (a world-space, i.e. post-leveling,
+   * rotation about Z - the resulting scene's own depth axis at that point)
+   * so it both corrects the up/down mistake and spins the scene half a
+   * turn to match, rather than just negating Y on its own. Also closes the
+   * submenu and clears activeTool, same as the Cancel button. */
+  private acceptGroundPlaneTool(flip180Depth: boolean): void {
+    if (flip180Depth && this.manualUpRotation) {
+      const flipDepth = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+      this.manualUpRotation.premultiply(flipDepth);
+      this.applySceneRotation();
+    }
+    this.groundPlaneRotationSnapshot = null; // committed - nothing left to revert to
+    this.groundPlaneToolActive = false;
+    this.groundPlanePoints = [];
+    this.clearGroundPlaneVisuals();
+    this.sceneManager.renderer.domElement.style.cursor = "";
+    this.showGroundPlaneHint();
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add("hidden");
+    if (Config.sessionConfig.tools.activeTool === "select-ground-plane") {
+      Config.sessionConfig.tools.activeTool = null;
+    }
+  }
+
+  /** Shows the ground-plane submenu's "select 3 points" hint and hides its
+   * accept/cancel actions row - the state the submenu starts in each time
+   * the tool is (re)armed, before 3 points have been placed. */
+  private showGroundPlaneHint(): void {
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.hint.classList.remove("hidden");
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.actions.classList.add("hidden");
+  }
+
+  /** Swaps the ground-plane submenu from its hint over to the accept/cancel
+   * actions row - called once the 3rd point is placed and the preview
+   * rotation has already been computed and applied (see
+   * finishGroundPlaneTool()). */
+  private showGroundPlaneActions(): void {
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.hint.classList.add("hidden");
+    this.elements.toolsMenu.selectGroundPlaneSubmenu.actions.classList.remove("hidden");
   }
 
   /** Builds a Raycaster for the given pointer event, from the camera
@@ -1096,18 +1193,20 @@ export class SceneViewerApp {
       const previous = this.groundPlanePoints[this.groundPlanePoints.length - 2];
       this.addGroundPlaneDottedLine(previous, local);
     }
-    this.setStatus(`Mark ground plane: ${this.groundPlanePoints.length}/3 points placed (right-click to cancel).`);
 
     if (this.groundPlanePoints.length === 3) this.finishGroundPlaneTool();
   }
 
   /** Called once the third point is placed: fits the plane through all
    * three marked points, computes the rotation that makes that plane
-   * horizontal (its normal vertical), stores it as manualUpRotation,
-   * switches "Up axis" to "Manual" and applies the rotation immediately,
-   * then disarms the tool. The three crosses/dashes are left in place as a
-   * visual record of what was marked - they're cleared the next time the
-   * tool is (re)started or the scene is rebuilt. */
+   * horizontal (its normal vertical), previews it as manualUpRotation
+   * (switching "Up axis" to "Manual" and applying it immediately so the
+   * result is visible right away), then swaps the submenu over to its
+   * accept/cancel row - see showGroundPlaneActions(). The rotation isn't
+   * final yet: it only sticks if the user clicks Accept (or "Accept,
+   * flipped 180°"); Cancel reverts it (see cancelGroundPlaneTool()). The
+   * three crosses/dashes stay up throughout the review step, and are only
+   * cleared once that's resolved either way. */
   private finishGroundPlaneTool(): void {
     const [p0, p1, p2] = this.groundPlanePoints;
     const edgeA = p1.clone().sub(p0);
@@ -1115,8 +1214,12 @@ export class SceneViewerApp {
     const normal = edgeA.cross(edgeB);
 
     if (normal.lengthSq() < 1e-12) {
-      this.setStatus("Mark ground plane: those three points are collinear - couldn't compute a plane. Try again.");
-      this.cancelGroundPlaneTool();
+      // Collinear points can't define a plane - clear everything and stay
+      // armed so the user can just place 3 fresh points, rather than
+      // silently closing the tool on them with no feedback (setStatus() is
+      // currently a no-op, so there's no message we could show instead).
+      this.groundPlanePoints = [];
+      this.clearGroundPlaneVisuals();
       return;
     }
     normal.normalize();
@@ -1124,20 +1227,19 @@ export class SceneViewerApp {
     // Keep whichever side is currently "up" up, rather than risking an
     // arbitrary flip depending on the order the three points happened to
     // be clicked in - compares against the LOCAL-space direction that
-    // currently renders as world-up.
+    // currently renders as world-up. (If this guess comes out wrong
+    // anyway, that's exactly what the "Accept, flipped 180°" button is
+    // for - see acceptGroundPlaneTool().)
     const currentLocalUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.getActiveSceneRotation().clone().invert());
     if (normal.dot(currentLocalUp) < 0) normal.negate();
 
     this.manualUpRotation = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
     this.upAxisSelect.value = "manual";
+    this.applySceneRotation();
 
     this.groundPlaneToolActive = false;
-    this.groundPlanePoints = [];
     this.sceneManager.renderer.domElement.style.cursor = "";
-    this.markGroundPlaneBtn.classList.remove("active");
-
-    this.applySceneRotation();
-    this.setStatus("Ground plane marked - scene reoriented (Up axis: Manual).");
+    this.showGroundPlaneActions();
   }
 
   /** Unions every loaded draw's LOCAL (pre-scale) bounds together - the
