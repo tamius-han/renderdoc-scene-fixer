@@ -22,6 +22,7 @@ import { CaptureImporter } from './components/capture-importer/cmp.capture-impor
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
 import { Config } from './config/cls.config';
+import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -404,6 +405,11 @@ export class SceneViewerApp {
 
       this.elements.toolsMenu.selectVolumeSubmenu.selectInsideBtn.addEventListener("click", () => this.setVolumeSelectMode("inside"));
       this.elements.toolsMenu.selectVolumeSubmenu.selectOutsideBtn.addEventListener("click", () => this.setVolumeSelectMode("outside"));
+
+      this.elements.toolsMenu.selectVolumeSubmenu.selectReplaceBtn.addEventListener("click", () => this.applyVolumeSelection("replace"));
+      this.elements.toolsMenu.selectVolumeSubmenu.selectAddBtn.addEventListener("click", () => this.applyVolumeSelection("add"));
+      this.elements.toolsMenu.selectVolumeSubmenu.selectRemoveBtn.addEventListener("click", () => this.applyVolumeSelection("remove"));
+      this.elements.toolsMenu.selectVolumeSubmenu.selectCancelBtn.addEventListener("click", () => this.cancelSelectByVolumeTool());
     }
   }
 
@@ -1353,6 +1359,219 @@ export class SceneViewerApp {
     this.sceneManager.renderer.domElement.style.cursor = "";
     this.elements.toolsMenu.selectVolumeSubmenu.selectSphereBtn.classList.remove("active");
     this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.remove("active");
+  }
+
+  /** The submenu's "Cancel" button: abandons the select-by-volume tool
+   * entirely - disarms placement if a shape is still waiting to be placed
+   * (cancelVolumeSelectTool()), discards any already-placed shape and its
+   * gizmo/options panel (clearSelectAreaShape()), and closes the submenu.
+   * No selection change. Distinct from right-clicking mid-placement (which
+   * only disarms placement, leaving a previously-placed shape alone) -
+   * this is the "I'm done with volume-select for now" exit, matching the
+   * top-level tool button's own toggle-off branch plus shape cleanup. */
+  private cancelSelectByVolumeTool(): void {
+    this.cancelVolumeSelectTool();
+    this.clearSelectAreaShape();
+    this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.add("hidden");
+    if (Config.sessionConfig.tools.activeTool === "select-by-volume") {
+      Config.sessionConfig.tools.activeTool = null;
+    }
+  }
+
+  /** Tests whether a LOCAL-space point (content-group space - see
+   * findDrawsWithinSelectAreaShape()'s doc comment) falls within the given
+   * select-area shape. Sphere: unit sphere generally scaled non-uniformly
+   * (a user can drag a single axis handle - see select-area-gizmo.ts), so
+   * this is really an ellipsoid test. Box: axis-aligned, since the shape
+   * never rotates (only translates/scales - same doc comment) and
+   * BoxGeometry(2,2,2) means shape.scale directly IS each axis'
+   * half-extent, same convention the gizmo's own per-axis scale handles
+   * use. */
+  private static pointInSelectAreaShape(
+    x: number,
+    y: number,
+    z: number,
+    kind: "sphere" | "box",
+    center: THREE.Vector3,
+    scale: THREE.Vector3,
+  ): boolean {
+    if (kind === "sphere") {
+      const dx = (x - center.x) / (scale.x || 1e-9);
+      const dy = (y - center.y) / (scale.y || 1e-9);
+      const dz = (z - center.z) / (scale.z || 1e-9);
+      return dx * dx + dy * dy + dz * dz <= 1;
+    }
+    return (
+      Math.abs(x - center.x) <= scale.x &&
+      Math.abs(y - center.y) <= scale.y &&
+      Math.abs(z - center.z) <= scale.z
+    );
+  }
+
+  /** Extracts the placed select-area shape's own triangles (its geometry
+   * is already non-indexed - see restoreSelectAreaShape() - so every 3
+   * consecutive vertices form one triangle directly), transformed by its
+   * position/scale into the same content-group-local space everything
+   * else here works in. Only needed for "outside" mode's surface-crossing
+   * fallback (see findDrawsWithinSelectAreaShape()) - callers should build
+   * this lazily and reuse it across draws rather than per-draw, since a
+   * sphere's geometry alone is a few hundred triangles. */
+  private static buildSelectAreaShapeTriangles(shape: THREE.Mesh): THREE.Triangle[] {
+    const posAttr = shape.geometry.getAttribute("position");
+    const triangles: THREE.Triangle[] = [];
+    for (let i = 0; i + 2 < posAttr.count; i += 3) {
+      const a = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).multiply(shape.scale).add(shape.position);
+      const b = new THREE.Vector3(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1)).multiply(shape.scale).add(shape.position);
+      const c = new THREE.Vector3(posAttr.getX(i + 2), posAttr.getY(i + 2), posAttr.getZ(i + 2)).multiply(shape.scale).add(shape.position);
+      triangles.push(new THREE.Triangle(a, b, c));
+    }
+    return triangles;
+  }
+
+  /** Returns the indices (into loadedDraws) of every currently-visible draw
+   * considered "within" the placed select-area shape, per
+   * Config.sessionConfig.tools.selectAreaMode:
+   *  - "inside" ("Fully" in the UI): ALL of the draw's vertices must fall
+   *    within the shape.
+   *  - "outside" ("Partially" in the UI): the draw merely has to intersect
+   *    the shape - resolved cheaply by "does any vertex fall inside it"
+   *    first (the overwhelming majority of real cases), falling back to an
+   *    exact triangle/triangle test against the shape's own surface (see
+   *    buildSelectAreaShapeTriangles()) only when that's inconclusive -
+   *    e.g. a large flat mesh passing through a small shape without any of
+   *    its own vertices happening to land inside it.
+   *
+   * draw.geometryData.positions and the shape's position/scale are both
+   * already expressed in the SAME content-group-local space (draws are
+   * added to the content group with no further per-object transform - see
+   * rebuildVisibleScene() - and the shape's LOCAL position comes from
+   * exactly that space too - see placeSelectAreaShape()'s
+   * group.worldToLocal() call), so none of this needs any coordinate
+   * conversion. Hidden draws (filtered out or manually hidden, matching
+   * every other selection path's own combined check) are skipped. */
+  private findDrawsWithinSelectAreaShape(): number[] {
+    const shape = this.selectAreaShape;
+    const kind = this.selectAreaKind;
+    if (!shape || !kind) return [];
+
+    const mode = Config.sessionConfig.tools.selectAreaMode;
+    const center = shape.position;
+    const scale = shape.scale;
+
+    // Conservative local-space AABB for the shape itself, to cheaply skip
+    // draws whose own bounds can't possibly overlap it at all before doing
+    // any per-vertex work. Exact for the box (axis-aligned by
+    // construction); a bounding box around the ellipsoid for the sphere.
+    const sphereExtent = Math.max(scale.x, scale.y, scale.z);
+    const shapeMin =
+      kind === "sphere"
+        ? new THREE.Vector3(center.x - sphereExtent, center.y - sphereExtent, center.z - sphereExtent)
+        : new THREE.Vector3(center.x - scale.x, center.y - scale.y, center.z - scale.z);
+    const shapeMax =
+      kind === "sphere"
+        ? new THREE.Vector3(center.x + sphereExtent, center.y + sphereExtent, center.z + sphereExtent)
+        : new THREE.Vector3(center.x + scale.x, center.y + scale.y, center.z + scale.z);
+
+    let shapeTriangles: THREE.Triangle[] | null = null;
+
+    const matches: number[] = [];
+    const va = new THREE.Vector3();
+    const vb = new THREE.Vector3();
+    const vc = new THREE.Vector3();
+
+    for (let index = 0; index < this.loadedDraws.length; index++) {
+      if (this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) continue;
+      const draw = this.loadedDraws[index];
+
+      if (
+        draw.bounds.max.x < shapeMin.x || draw.bounds.min.x > shapeMax.x ||
+        draw.bounds.max.y < shapeMin.y || draw.bounds.min.y > shapeMax.y ||
+        draw.bounds.max.z < shapeMin.z || draw.bounds.min.z > shapeMax.z
+      ) {
+        continue;
+      }
+
+      const positions = draw.geometryData.positions;
+      if (positions.length === 0) continue;
+
+      if (mode === "inside") {
+        let allInside = true;
+        for (let i = 0; i + 2 < positions.length; i += 3) {
+          if (!SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+            allInside = false;
+            break;
+          }
+        }
+        if (allInside) matches.push(index);
+        continue;
+      }
+
+      // mode === "outside": cheap pass first - any vertex actually inside.
+      let anyInside = false;
+      for (let i = 0; i + 2 < positions.length; i += 3) {
+        if (SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+          anyInside = true;
+          break;
+        }
+      }
+      if (anyInside) {
+        matches.push(index);
+        continue;
+      }
+
+      // Fallback: exact surface-crossing test against the shape's own
+      // triangles (built lazily, once, and reused across every draw that
+      // needs it).
+      if (!shapeTriangles) shapeTriangles = SceneViewerApp.buildSelectAreaShapeTriangles(shape);
+      let crosses = false;
+      for (let i = 0; i + 8 < positions.length && !crosses; i += 9) {
+        va.set(positions[i], positions[i + 1], positions[i + 2]);
+        vb.set(positions[i + 3], positions[i + 4], positions[i + 5]);
+        vc.set(positions[i + 6], positions[i + 7], positions[i + 8]);
+        const meshTri = new THREE.Triangle(va.clone(), vb.clone(), vc.clone());
+        for (const shapeTri of shapeTriangles) {
+          if (trianglesIntersect(meshTri, shapeTri)) {
+            crosses = true;
+            break;
+          }
+        }
+      }
+      if (crosses) matches.push(index);
+    }
+
+    return matches;
+  }
+
+  /** The submenu's Replace/Add/Remove buttons: applies the current
+   * select-area shape (see findDrawsWithinSelectAreaShape()) to the object
+   * selection. No-op (including no status message) when no shape has been
+   * placed yet, so it's harmless to wire up unconditionally. Leaves the
+   * shape/gizmo/submenu in place afterwards - unlike "Cancel" - so the
+   * shape can be nudged and the operation repeated. */
+  private applyVolumeSelection(op: "replace" | "add" | "remove"): void {
+    if (!this.selectAreaShape || !this.selectAreaKind) return;
+
+    const matches = this.findDrawsWithinSelectAreaShape();
+
+    if (op === "replace") {
+      this.selectedIndices.clear();
+      for (const index of matches) this.selectedIndices.add(index);
+    } else if (op === "add") {
+      for (const index of matches) this.selectedIndices.add(index);
+    } else {
+      for (const index of matches) this.selectedIndices.delete(index);
+    }
+
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+
+    const message =
+      op === "replace"
+        ? `Selection replaced: ${matches.length} object(s) selected.`
+        : op === "add"
+          ? `Added ${matches.length} object(s) to selection.`
+          : `Removed ${matches.length} object(s) from selection.`;
+    this.setStatus(message);
   }
 
   /** Called every frame (see SceneManager.onBeforeRender()) to keep the
