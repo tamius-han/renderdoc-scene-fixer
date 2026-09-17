@@ -27,7 +27,12 @@ const HIGHLIGHT_COLOR = 0xffff00;
  * shape's own scale, matching how game-engine gizmos usually behave. */
 const SCREEN_FRACTION = 0.14;
 const AXIS_LEN = 1;
-const HANDLE_RADIUS = 0.045;
+// Half as thick as before (was 0.045) - drives the arrow shaft/cone radius,
+// the scale-mode box tip size, and the center ring's tube thickness (see
+// buildHandles() below) all at once, without touching any of the LENGTHS
+// (AXIS_LEN, PLANE_SIZE/OFFSET, RING_RADIUS) - so the gizmo's overall reach
+// on screen is unchanged, just visually thinner.
+const HANDLE_RADIUS = 0.0225;
 const PLANE_SIZE = AXIS_LEN * 0.22;
 const PLANE_OFFSET = AXIS_LEN * 0.32;
 const RING_RADIUS = AXIS_LEN * 0.18;
