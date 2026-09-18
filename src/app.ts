@@ -109,6 +109,19 @@ export class SceneViewerApp {
    * of through the manual scale-reference-object flow, and the "Fix
    * distortion" tool is hidden since there's nothing left for it to do. */
   private intelGpaDistortion: AffineDistortionResult | null = null;
+  /** The distortion last actually applied to the scene - either
+   * intelGpaDistortion (applied automatically, see reconstructScene()) or
+   * one fitted by recalculateTransformCorrection() from a marked
+   * scale-reference object. Source of truth for the "raw / corrected
+   * import" toggle button (see toggleRawImport()): null means no
+   * correction has been computed yet for the current scene, so the button
+   * stays hidden. Kept even while showingRawImport is true, so toggling
+   * back to "corrected" doesn't need to re-fit anything. */
+  private appliedDistortion: AffineDistortionResult | null = null;
+  /** True after toggleRawImport() has switched the scene to show
+   * draw.originalPosedPositions untouched, instead of appliedDistortion's
+   * correction. Only meaningful while appliedDistortion is non-null. */
+  private showingRawImport = false;
   /** Rotation applied to the whole scene's content group (not to individual
    * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
    * (filter/visibility changes tear down and recreate the content group).
@@ -258,6 +271,7 @@ export class SceneViewerApp {
     toolsMenu: {
       selectVolumeBtn: this.el("select-volume-btn"),
       fixDistortionBtn: this.el("fix-distortion-btn"),
+      toggleRawImportBtn: this.el("toggle-raw-import-btn"),
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
       setUpAxisBtn: this.el("set-up-axis-btn"),
       mirrorBtn: this.el("mirror-scene-btn"),
@@ -415,6 +429,7 @@ export class SceneViewerApp {
           Config.sessionConfig.tools.activeTool = null;
         }
       });
+      this.elements.toolsMenu.toggleRawImportBtn.addEventListener('click', () => this.toggleRawImport());
       this.elements.toolsMenu.selectGroundPlaneBtn.addEventListener('click', () => {
         this.hideAllToolSubmenus();
         this.cancelAllTools();
@@ -777,6 +792,13 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
+      // A fresh reconstruct means no distortion has been applied to it
+      // yet - any previous scene's correction (and raw/corrected toggle
+      // state) doesn't carry over. The IntelGPA auto-apply block further
+      // down sets appliedDistortion again if this import has one.
+      this.appliedDistortion = null;
+      this.showingRawImport = false;
+      this.updateToggleRawImportBtn();
       // loadedDraws is about to be wiped, so anything the panel was
       // pointing at is gone - just drop it, same as any other "nothing
       // selected" case. Its dragged position is left alone, though, since
@@ -2119,27 +2141,80 @@ export class SceneViewerApp {
     }
 
     if (corrected > 0) {
-      let overall: Bounds = this.loadedDraws[0].bounds;
-      for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
-      const size = overall.max.clone().sub(overall.min);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      // Same unit-conversion + optional max-scene-size clamp as the
-      // initial import (see reconstructScene()) - distortion correction
-      // reshapes geometry, so the bounds (and therefore this) can change,
-      // but the import options that drove the original scale haven't.
-      const importOpts = this.appConfig.config.importOptions;
-      const unitScale =
-        (importOpts.captureUnitSize || 1) * ((UNIT_CONVERSION as Record<string, number>)[importOpts.captureUnitUnit] ?? 1);
-      const clampScale = computeNormalizationScale(maxDim * unitScale, {
-        forceMax: importOpts.forceMaxSceneSize,
-        maxSpan: importOpts.maxSceneSize,
-      });
-      this.fixedScale = unitScale * clampScale;
+      this.recomputeFixedScale();
+      this.appliedDistortion = distortion;
+      this.showingRawImport = false;
+      this.updateToggleRawImportBtn();
 
       if (options.rebuild ?? true) this.rebuildVisibleScene();
     }
 
     return { corrected, skipped };
+  }
+
+  /** Recomputes fixedScale from the CURRENT union of every loadedDraw's
+   * bounds - the same unit-conversion + optional max-scene-size clamp used
+   * whenever scale needs re-establishing after the underlying geometry
+   * changes shape (after a distortion correction - see
+   * applyDistortionToScene() - and after toggling raw/corrected import -
+   * see toggleRawImport()). No-op if there are no loaded draws. */
+  private recomputeFixedScale(): void {
+    if (this.loadedDraws.length === 0) return;
+    let overall: Bounds = this.loadedDraws[0].bounds;
+    for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
+    const size = overall.max.clone().sub(overall.min);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const importOpts = this.appConfig.config.importOptions;
+    const unitScale =
+      (importOpts.captureUnitSize || 1) * ((UNIT_CONVERSION as Record<string, number>)[importOpts.captureUnitUnit] ?? 1);
+    const clampScale = computeNormalizationScale(maxDim * unitScale, {
+      forceMax: importOpts.forceMaxSceneSize,
+      maxSpan: importOpts.maxSceneSize,
+    });
+    this.fixedScale = unitScale * clampScale;
+  }
+
+  /** Flips the whole scene between the RAW imported posed geometry
+   * (draw.originalPosedPositions, exactly as loaded) and the last-applied
+   * distortion correction (appliedDistortion - set by
+   * applyDistortionToScene(), whether that ran automatically for an
+   * IntelGPA import or manually via "Recalculate correction"). Lets you
+   * compare the two without re-fitting or re-dropping files each time.
+   * No-op if no correction has been computed yet for the current scene. */
+  private toggleRawImport(): void {
+    console.log('toggling raw import ... applied distortion:', this.appliedDistortion);
+
+    if (!this.appliedDistortion || this.loadedDraws.length === 0) return;
+
+    if (this.showingRawImport) {
+      // Re-applies the SAME distortion object (calculateDistortionMatrix
+      // isn't re-run) - just restores the corrected positions.
+      this.applyDistortionToScene(this.appliedDistortion);
+      return;
+    }
+
+    for (const draw of this.loadedDraws) {
+      if (draw.originalPosedPositions === null) continue;
+      draw.geometryData.positions = draw.originalPosedPositions.slice();
+      draw.bounds = computeBounds(draw.geometryData.positions);
+      draw.diagonal = boundsDiagonal(draw.bounds);
+    }
+    this.recomputeFixedScale();
+    this.rebuildVisibleScene();
+    this.showingRawImport = true;
+    this.updateToggleRawImportBtn();
+  }
+
+  /** Syncs the toggle button's visibility/label/pressed state to
+   * appliedDistortion/showingRawImport - called whenever either changes
+   * (applyDistortionToScene(), toggleRawImport(), and the full-reload
+   * reset in reconstructScene()). */
+  private updateToggleRawImportBtn(): void {
+    const btn = this.elements.toolsMenu.toggleRawImportBtn;
+    // const hasDistortion = this.appliedDistortion !== null;
+    // btn.classList.toggle("hidden", !hasDistortion);
+    // btn.classList.toggle("active", this.showingRawImport);
+    btn.textContent = this.showingRawImport ? "Enable distortion correction" : "Disable distortion correction";
   }
 
   /** Fits the matrix-based transform-correction from the marked "scale
