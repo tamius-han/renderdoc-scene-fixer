@@ -1,6 +1,5 @@
-import { calculateDistortion } from '../../mesh-tools/calculator';
+import { calculateLandmarkTransform } from '../../mesh-tools/landmark-matching';
 import { parseOBJ } from '../../parsers/obj';
-import { objToGeometryArrays } from '../../scene/mesh-builder';
 import { FileInfo } from '../../types/file-info.interface';
 import { IntelGPADropzone } from './intel-gpa-dropzone.type';
 
@@ -85,16 +84,18 @@ export async function identifyIntelGPAImport(landmarkSourceFile: FileInfo, landm
   const landmarkOutputGeometry = parseOBJ(await landmarkOutputFile.file.text());
   const sceneGeometry = parseOBJ(await sceneFile.file.text());
 
+  // landmark-source and landmark-output describe the SAME object, so face
+  // count is what has to match between them - NOT position/vertex count:
+  // landmark-output is exported with an unshared vertex per face corner,
+  // while landmark-source can share vertices between neighbouring faces,
+  // so their raw positions arrays are expected to differ in length even
+  // when everything's correctly identified (see landmark-matching.ts).
   if (
-    landmarkSourceGeometry.positions.length === landmarkOutputGeometry.positions.length &&
-    landmarkSourceGeometry.faces.length === landmarkOutputGeometry.faces.length
+    landmarkSourceGeometry.faces.length === landmarkOutputGeometry.faces.length &&
+    landmarkSourceGeometry.faces.length > 0
   ) {
-    const geometryData = objToGeometryArrays(landmarkSourceGeometry);
-    const previewGeometryData = objToGeometryArrays(landmarkOutputGeometry);
-
-    const distortion = calculateDistortion({geometryData, previewGeometryData});
-
     // TODO: check which file is source and which one is output, they could be reversed
+    const distortion = calculateLandmarkTransform(landmarkSourceGeometry, landmarkOutputGeometry);
 
     return {
       'landmark-source': {
@@ -109,19 +110,17 @@ export async function identifyIntelGPAImport(landmarkSourceFile: FileInfo, landm
         file: sceneFile,
         obj: sceneGeometry
       },
+      // matrix that maps landmarkSource onto landmarkOutput
+      landmarkTransform: distortion.nonPosedToPosed,
       distortion
     }
   } else if (
-    landmarkSourceGeometry.positions.length === sceneGeometry.positions.length
-    && landmarkSourceGeometry.faces.length === sceneGeometry.faces.length
-    && landmarkOutputGeometry.positions.length !== sceneGeometry.positions.length
+    landmarkSourceGeometry.faces.length === sceneGeometry.faces.length
     && landmarkOutputGeometry.faces.length !== sceneGeometry.faces.length
   ) {
     return identifyIntelGPAImport(landmarkSourceFile, sceneFile, landmarkOutputFile);
   } else if (
-    landmarkOutputGeometry.positions.length === sceneGeometry.positions.length
-    && landmarkOutputGeometry.faces.length === sceneGeometry.faces.length
-    && landmarkSourceGeometry.positions.length !== sceneGeometry.positions.length
+    landmarkOutputGeometry.faces.length === sceneGeometry.faces.length
     && landmarkSourceGeometry.faces.length !== sceneGeometry.faces.length
   ) {
     return identifyIntelGPAImport(landmarkOutputFile, sceneFile, landmarkSourceFile);
