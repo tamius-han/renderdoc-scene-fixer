@@ -365,19 +365,23 @@ export class CaptureImporter extends HTMLElement {
    */
   private async identifyImportType(entries: FileInfo[]): Promise<ImportType> {
     if (await this.isRenderDocExport(entries)) {
+      console.info('Dropped file was a renderdoc export');
       return ImportType.RenderDocExport;
     }
 
     // if there's three files, and if all three files are .obj, then
     // we assume it's full IntelGPADropzone import
     if (entries.length === 3 && entries.every(e => e.path.endsWith('.obj'))) {
+      console.info('Dropped file was a full Intel GPA export');
       return ImportType.IntelGPAExportFull;
     }
 
     if (entries.length === 1 && entries[0].path.endsWith('.obj')) {
+      console.info('Dropped file was a partial Intel GPA export');
       return ImportType.IntelGPAExportPartial;
     }
 
+    console.info('Unable to identify the import type');
     return ImportType.Unknown;
   }
 
@@ -422,6 +426,7 @@ export class CaptureImporter extends HTMLElement {
 
     if (!fileRoles) {
       // TODO: throw an error or something
+      console.warn('Failed to identify Intel GPA import roles');
       return;
     }
 
@@ -476,6 +481,9 @@ export class CaptureImporter extends HTMLElement {
 
     if (importType === ImportType.IntelGPAExportFull) {
       const guessedTargets = guessIntelGPAImportTargetsFromFilenames(entries);
+
+      console.info('[handleFiles] Processing full Intel GPA import. guessedTargets:', guessedTargets);
+
       for (const key in guessedTargets) {
         this.intelGPAImports[key as IntelGPADropzone] = guessedTargets[key as IntelGPADropzone];
         this.updateIntelGPADropzone(key as IntelGPADropzone, guessedTargets[key as IntelGPADropzone].file);
