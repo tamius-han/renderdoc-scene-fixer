@@ -271,7 +271,9 @@ export class SceneViewerApp {
       selectLandmarkSubmenu: {
         menu: this.el("select-landmark-submenu"),
         hint: this.el("select-landmark-submenu_no-selection"),
+        notHint: this.el("select-landmark-submenu_when-selection"),
         selectLandmarkApplyBtn: this.el("select-landmark-apply"),
+        selectLandmarkResetBtn: this.el("select-landmark-reset"),
         selectLandmarkCancelBtn: this.el("select-landmark-cancel"),
       },
 
@@ -281,6 +283,7 @@ export class SceneViewerApp {
         actions: this.el('select-ground-plane_options'),
         selectGroundPlaneApplyBtn: this.el("select-ground-plane_accept-selection"),
         selectGroundPlaneApply180Btn: this.el("select-ground-plane_accept-selection-180"),
+        selectGroundPlaneResetBtn: this.el("select-ground-plane_reset-selection"),
         selectGroundPlaneCancelBtn: this.el("select-ground-plane_cancel-selection"),
       }
     },
@@ -401,9 +404,17 @@ export class SceneViewerApp {
         if (Config.sessionConfig.tools.activeTool !== 'select-landmark') {
           Config.sessionConfig.tools.activeTool = 'select-landmark';
           this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.remove('hidden');
+          // The tool only ever allows a single selected landmark - collapse
+          // down to just one object if a multi-selection was already active
+          // from before the tool was turned on, rather than leaving an
+          // invariant-violating multi-selection sitting there untouched.
+          if (this.selectedIndices.size > 1) {
+            this.selectOnly(this.resourcePanelIndex ?? Math.max(...this.selectedIndices));
+          }
+          this.syncResourcePanelVisibility();
+          this.syncLandmarkSubmenuState();
         } else {
-          this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add('hidden');
-          Config.sessionConfig.tools.activeTool = null;
+          this.cancelSelectLandmarkTool();
         }
       });
       this.elements.toolsMenu.selectGroundPlaneBtn.addEventListener('click', () => {
@@ -441,6 +452,11 @@ export class SceneViewerApp {
       });
 
       this.restoreResourcePanel();
+      // Ensures the submenu's hint/apply-button visibility matches reality
+      // (no tool active, nothing selected yet) from the very first render,
+      // rather than relying on whatever hidden/shown state happens to be
+      // baked into the markup.
+      this.syncLandmarkSubmenuState();
     }
 
     // setup submenu: select volume
@@ -465,8 +481,24 @@ export class SceneViewerApp {
       this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneApply180Btn.addEventListener("click", () =>
         this.acceptGroundPlaneTool(true),
       );
+      this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneResetBtn.addEventListener("click", () =>
+        this.resetGroundPlaneTool(),
+      );
       this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneCancelBtn.addEventListener("click", () =>
         this.cancelSelectGroundPlaneTool(),
+      );
+    }
+
+    // setup submenu: select landmark (fix distortion)
+    {
+      this.elements.toolsMenu.selectLandmarkSubmenu.selectLandmarkApplyBtn.addEventListener("click", () =>
+        this.applySelectLandmarkTool(),
+      );
+      this.elements.toolsMenu.selectLandmarkSubmenu.selectLandmarkResetBtn.addEventListener("click", () =>
+        this.resetSelectLandmarkTool(),
+      );
+      this.elements.toolsMenu.selectLandmarkSubmenu.selectLandmarkCancelBtn.addEventListener("click", () =>
+        this.cancelSelectLandmarkTool(),
       );
     }
   }
@@ -555,17 +587,21 @@ export class SceneViewerApp {
       this.resourcePanelIndex = null;
     }
     this.syncResourcePanelVisibility();
+    this.syncLandmarkSubmenuState();
   }
 
   /** The single source of truth for whether the resource panel DOM should
-   * exist right now: the user's show/hide toggle AND there being a
-   * selected object to show it for - hidden whenever nothing's selected
-   * regardless of the toggle, and (re)appears the moment something is
-   * selected if the toggle is on. Safe to call redundantly - only
-   * touches the DOM when something's actually changed (see
-   * renderResourcePanel()'s own early-out). */
+   * exist right now: there being a selected object to show it for, AND
+   * either the user's own show/hide toggle being on, or the "fix
+   * distortion" tool being active - that tool forces the panel open
+   * (regardless of the toggle) the moment a landmark object is selected,
+   * since seeing that object's resources is the whole point of picking a
+   * landmark. Hidden whenever nothing's selected regardless of either of
+   * those. Safe to call redundantly - only touches the DOM when something's
+   * actually changed (see renderResourcePanel()'s own early-out). */
   private syncResourcePanelVisibility(): void {
-    if (Config.sessionConfig.resourcesPanel.visible && this.resourcePanelIndex !== null) {
+    const forcedByLandmarkTool = Config.sessionConfig.tools.activeTool === "select-landmark";
+    if ((Config.sessionConfig.resourcesPanel.visible || forcedByLandmarkTool) && this.resourcePanelIndex !== null) {
       this.renderResourcePanel(this.resourcePanelIndex);
     } else {
       this.removeResourcePanel();
@@ -574,6 +610,80 @@ export class SceneViewerApp {
 
   private removeResourcePanel(): void {
     this.viewport.querySelector<HTMLElement>(".resource-panel")?.remove();
+  }
+
+  /** Keeps the "fix distortion" (select-landmark) submenu's hint/apply
+   * button in sync with whether a landmark object is currently selected.
+   * No selection yet: show the "select a landmark" hint, hide the apply
+   * button. An object selected: hide the hint, show the apply button
+   * labeled "Fix distortion" (this submenu doesn't otherwise reuse "Apply"
+   * for anything else, so the label can just be set unconditionally here
+   * rather than only once at setup). Call after every selection change
+   * (see noteSelectionTarget()) and whenever the tool itself is
+   * activated/deactivated (see the fixDistortionBtn handler), since both
+   * affect whether a landmark counts as "selected" right now. */
+  private syncLandmarkSubmenuState(): void {
+    const { hint, notHint, selectLandmarkApplyBtn } = this.elements.toolsMenu.selectLandmarkSubmenu;
+    const landmarkSelected =
+      Config.sessionConfig.tools.activeTool === "select-landmark" && this.selectedIndices.size > 0;
+    hint.classList.toggle("hidden", landmarkSelected);
+    notHint.classList.toggle("hidden", !landmarkSelected);
+    selectLandmarkApplyBtn.classList.toggle("hidden", !landmarkSelected);
+    if (landmarkSelected) selectLandmarkApplyBtn.textContent = "Fix distortion";
+  }
+
+  /** Deselects the currently selected landmark object, if any - shared by
+   * the submenu's Reset and Cancel buttons (resetSelectLandmarkTool() /
+   * cancelSelectLandmarkTool()), which differ only in whether the submenu
+   * and the tool itself stay active afterwards. Goes through the normal
+   * selection-clearing path (noteSelectionTarget(), refreshSelectionVisuals(),
+   * renderObjectListState()) rather than just emptying selectedIndices
+   * directly, so the resource panel and object list stay in sync too. */
+  private clearLandmarkSelection(): void {
+    this.selectedIndices.clear();
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** The submenu's "Reset" button: deselects the current landmark (back to
+   * the "select a landmark" hint - see syncLandmarkSubmenuState(), which
+   * clearLandmarkSelection() triggers via noteSelectionTarget()) but, unlike
+   * Cancel, leaves the tool active and the submenu open so a different
+   * landmark can be picked right away. */
+  private resetSelectLandmarkTool(): void {
+    this.clearLandmarkSelection();
+  }
+
+  /** The submenu's own "Cancel" button: clearLandmarkSelection() plus
+   * closing the submenu and clearing Config.sessionConfig.tools.activeTool -
+   * the "I'm done with fix distortion for now" exit, matching
+   * cancelSelectByVolumeTool()/cancelSelectGroundPlaneTool()'s role for
+   * their own submenus. */
+  private cancelSelectLandmarkTool(): void {
+    this.clearLandmarkSelection();
+    this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add("hidden");
+    if (Config.sessionConfig.tools.activeTool === "select-landmark") {
+      Config.sessionConfig.tools.activeTool = null;
+    }
+    this.syncResourcePanelVisibility();
+    this.syncLandmarkSubmenuState();
+  }
+
+  /** The submenu's Apply button (labeled "Fix distortion" - see
+   * syncLandmarkSubmenuState()): runs recalculateTransformCorrection()
+   * using the selected landmark as the reference object, then exits the
+   * tool the same way Cancel does - mirroring acceptGroundPlaneTool()'s
+   * "closes the submenu and clears activeTool, same as the Cancel button"
+   * convention. Guarded on resourcePanelIndex rather than assuming the
+   * button can't be clicked without a selection - the button's own
+   * hidden/shown state (syncLandmarkSubmenuState()) already keeps that from
+   * happening in practice, but the guard costs nothing. */
+  private applySelectLandmarkTool(): void {
+    if (this.resourcePanelIndex === null) return;
+    this.recalculateTransformCorrection(this.resourcePanelIndex);
+    this.cancelSelectLandmarkTool();
   }
 
   //#endregion
@@ -1149,6 +1259,29 @@ export class SceneViewerApp {
     if (Config.sessionConfig.tools.activeTool === "select-ground-plane") {
       Config.sessionConfig.tools.activeTool = null;
     }
+  }
+
+  /** The submenu's "Reset" button: reverts any pending 3-point preview
+   * rotation back to whatever was active before the tool was armed - same
+   * restore step as cancelGroundPlaneTool() - but, unlike Cancel, keeps
+   * the tool armed (groundPlaneRotationSnapshot is deliberately left set,
+   * not nulled, so a later Cancel/Reset/Accept still has the original,
+   * pre-tool rotation to work from) and the submenu open, clearing the
+   * placed points and going back to the "select 3 points" hint so a new
+   * plane can be marked right away - essentially re-arming the tool the
+   * same way startGroundPlaneTool() does, without taking a fresh
+   * snapshot. */
+  private resetGroundPlaneTool(): void {
+    if (this.groundPlaneRotationSnapshot) {
+      this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
+      this.upAxisSelect.value = this.groundPlaneRotationSnapshot.upAxisValue;
+      this.applySceneRotation();
+    }
+    this.groundPlaneToolActive = true;
+    this.groundPlanePoints = [];
+    this.clearGroundPlaneVisuals();
+    this.sceneManager.renderer.domElement.style.cursor = "crosshair";
+    this.showGroundPlaneHint();
   }
 
   /** Keeps the previewed rotation from the just-completed 3-click marking
@@ -2015,6 +2148,16 @@ export class SceneViewerApp {
    * apply its own correction instead of assuming one object's distortion
    * speaks for the whole scene.
    *
+   * `referenceIndex` is which loaded draw's posed/non-posed pair the fit
+   * itself comes from (every OTHER draw still gets its own corrected
+   * positions written, per the above - this only chooses whose distortion
+   * is used as the fit). Defaults to the object list's own "is ref" marker
+   * (this.scaleReferenceIndex, see setLandmark()) for the standalone
+   * Recalculate button (recalculateCorrectionBtn); the "fix distortion"
+   * tool's own Apply button (see applySelectLandmarkTool()) passes the
+   * landmark object selected through that tool instead, without touching
+   * scaleReferenceIndex.
+   *
    * Always re-fits from draw.originalPosedPositions (a pristine copy taken
    * at load time - see loadDraw()) rather than from
    * draw.geometryData.positions, and writes the result into a NEW array
@@ -2029,12 +2172,12 @@ export class SceneViewerApp {
    * degenerate/planar geometry - see calculateDistortionMatrix()) is also
    * skipped, logged, and counted, rather than aborting correction for the
    * rest of the scene. */
-  private recalculateTransformCorrection(): void {
+  private recalculateTransformCorrection(referenceIndex: number | null = this.scaleReferenceIndex): void {
     if (this.loadedDraws.length === 0) {
       this.setStatus("Reconstruct a scene first.");
       return;
     }
-    if (this.scaleReferenceIndex === null) {
+    if (referenceIndex === null) {
       return;
     }
 
@@ -2047,7 +2190,7 @@ export class SceneViewerApp {
     let skipped = 0;
     const failures: string[] = [];
 
-    const referenceObject = this.loadedDraws[this.scaleReferenceIndex];
+    const referenceObject = this.loadedDraws[referenceIndex];
     let distortion;
     try {
       distortion = calculateDistortionMatrix(
@@ -2984,9 +3127,17 @@ export class SceneViewerApp {
    * plain click on that button behaves like a ctrl-click on the row, while
    * an actually-modified click on it behaves exactly like the same
    * modifier on the row). Hidden objects (excluded by the size filter)
-   * can't be selected at all. */
+   * can't be selected at all. While the "fix distortion" (select-landmark)
+   * tool is active, shift/ctrl are ignored entirely and every click just
+   * replaces the selection with the one clicked object - that tool only
+   * ever works with a single landmark, so multi-selection is disallowed
+   * rather than silently accumulating a selection it can't use. */
   private handleObjectClick(index: number, shiftKey: boolean, ctrlKey: boolean): void {
     if (this.isObjectHidden(index)) return;
+    if (Config.sessionConfig.tools.activeTool === "select-landmark") {
+      this.selectOnly(index);
+      return;
+    }
     if (shiftKey) this.selectRangeTo(index);
     else if (ctrlKey) this.toggleDrawSelection(index);
     else this.selectOnly(index);
@@ -3101,7 +3252,10 @@ export class SceneViewerApp {
 
     if (index === null || this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) return;
 
-    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+    // Same single-selection-only restriction as handleObjectClick() for the
+    // object list - see its doc comment.
+    const forceSingleSelection = Config.sessionConfig.tools.activeTool === "select-landmark";
+    if (!forceSingleSelection && (event.shiftKey || event.ctrlKey || event.metaKey)) {
       if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
       else this.selectedIndices.add(index);
     } else {
