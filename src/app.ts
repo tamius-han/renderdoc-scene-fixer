@@ -459,6 +459,10 @@ export class SceneViewerApp {
 
 
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    this.selectGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
+    this.groundPlaneCancelBtn.addEventListener("click", () => this.cancelGroundPlaneTool());
+    this.groundPlaneAcceptBtn.addEventListener("click", () => this.acceptGroundPlaneTool(false));
+    this.groundPlaneAccept180Btn.addEventListener("click", () => this.acceptGroundPlaneTool(true));
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
     // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
@@ -1148,7 +1152,7 @@ export class SceneViewerApp {
       -((event.clientY - rect.top) / rect.height) * 2 + 1,
     );
     const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(mouse, this.sceneManager.camera);
+    raycaster.setFromCamera(mouse, this.sceneManager.activeCamera);
     return raycaster;
   }
 
@@ -1683,7 +1687,7 @@ export class SceneViewerApp {
     const gizmo = this.selectAreaGizmo;
     const group = this.sceneManager.getContentGroup();
     if (!gizmo || !group) return;
-    gizmo.update(this.sceneManager.camera, group.quaternion, group.scale.x || 1);
+    gizmo.update(this.sceneManager.activeCamera, group.quaternion, group.scale.x || 1);
   }
 
   /** Switches the gizmo's mode (and remembers the choice for the next
@@ -1721,7 +1725,7 @@ export class SceneViewerApp {
 
     if (gizmo.isDragging()) {
       const raycaster = this.buildViewportRaycaster(event);
-      gizmo.updateDrag(raycaster, this.sceneManager.camera, group.quaternion, group.scale.x || 1, event.clientX, event.clientY);
+      gizmo.updateDrag(raycaster, this.sceneManager.activeCamera, group.quaternion, group.scale.x || 1, event.clientX, event.clientY);
       return;
     }
 
@@ -2564,7 +2568,7 @@ export class SceneViewerApp {
     );
 
     const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(mouse, this.sceneManager.camera);
+    raycaster.setFromCamera(mouse, this.sceneManager.activeCamera);
     const contentGroup = this.sceneManager.getContentGroup();
     const roots = contentGroup ? [contentGroup] : this.sceneManager.scene.children;
     const hits = raycaster.intersectObjects(roots, true).filter((hit) => !hit.object.userData.isSelectionVisual);
@@ -2616,7 +2620,7 @@ export class SceneViewerApp {
           this.selectAreaGizmo.beginDrag(
             handle,
             raycaster,
-            this.sceneManager.camera,
+            this.sceneManager.activeCamera,
             group.quaternion,
             group.scale.x || 1,
             this.sceneManager.renderer.domElement.getBoundingClientRect(),
@@ -3066,7 +3070,7 @@ export class SceneViewerApp {
     renderer.setRenderTarget(this.outlineMaskTarget);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
-    renderer.render(this.outlineMaskScene, this.sceneManager.camera);
+    renderer.render(this.outlineMaskScene, this.sceneManager.activeCamera);
 
     // autoClear:false here is essential - the main scene was already drawn
     // to this same target (the canvas) by SceneManager just before this
