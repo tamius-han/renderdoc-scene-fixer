@@ -271,6 +271,7 @@ export class SceneViewerApp {
       selectLandmarkSubmenu: {
         menu: this.el("select-landmark-submenu"),
         hint: this.el("select-landmark-submenu_no-selection"),
+        notHint: this.el("select-landmark-submenu_when-selection"),
         selectLandmarkApplyBtn: this.el("select-landmark-apply"),
         selectLandmarkResetBtn: this.el("select-landmark-reset"),
         selectLandmarkCancelBtn: this.el("select-landmark-cancel"),
@@ -622,10 +623,11 @@ export class SceneViewerApp {
    * activated/deactivated (see the fixDistortionBtn handler), since both
    * affect whether a landmark counts as "selected" right now. */
   private syncLandmarkSubmenuState(): void {
-    const { hint, selectLandmarkApplyBtn } = this.elements.toolsMenu.selectLandmarkSubmenu;
+    const { hint, notHint, selectLandmarkApplyBtn } = this.elements.toolsMenu.selectLandmarkSubmenu;
     const landmarkSelected =
       Config.sessionConfig.tools.activeTool === "select-landmark" && this.selectedIndices.size > 0;
     hint.classList.toggle("hidden", landmarkSelected);
+    notHint.classList.toggle("hidden", !landmarkSelected);
     selectLandmarkApplyBtn.classList.toggle("hidden", !landmarkSelected);
     if (landmarkSelected) selectLandmarkApplyBtn.textContent = "Fix distortion";
   }

@@ -610,13 +610,24 @@ button {
     @apply pointer-events-none;
     cursor: not-allowed;
   }
-}
 
-button.ghost {
-  background: none; border: 1px solid var(--line); color: var(--text-dim);
-  border-radius: 7px; padding: 7px 10px; font-size: 12px; cursor: pointer; font-family: var(--sans);
+  &.ghost-primary {
+    @apply bg-none text-amber-200 px-2 mx-2;
+
+    &:hover {
+      @apply text-amber-100 bg-warm-800/50;
+    }
+  }
+
+  &.ghost {
+    @apply bg-none text-warm-200 px-2 mx-2;
+
+    &:hover {
+      @apply text-amber-200 bg-warm-800/50;
+
+    }
+  }
 }
-button.ghost:hover { border-color: var(--accent-dim); color: var(--text); }
 
 #mark-ground-plane-btn.active, #select-sphere-btn.active, #select-box-btn.active, #select-options-menu button.active {
   border-color: var(--accent); color: var(--accent); background: rgba(110, 231, 200, 0.12);
