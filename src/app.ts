@@ -18,6 +18,7 @@ import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
 import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
+import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
@@ -292,6 +293,7 @@ export class SceneViewerApp {
 
 
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
+  private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
@@ -477,10 +479,7 @@ export class SceneViewerApp {
 
 
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    this.selectGroundPlaneBtn.addEventListener("click", () => this.toggleGroundPlaneTool());
-    this.groundPlaneCancelBtn.addEventListener("click", () => this.cancelGroundPlaneTool());
-    this.groundPlaneAcceptBtn.addEventListener("click", () => this.acceptGroundPlaneTool(false));
-    this.groundPlaneAccept180Btn.addEventListener("click", () => this.acceptGroundPlaneTool(true));
+    this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
     // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
@@ -2121,6 +2120,150 @@ export class SceneViewerApp {
       positions[i + 1] = v.y;
       positions[i + 2] = v.z;
     }
+  }
+
+  /** Negates every vertex's X component in a flat, non-indexed array (3
+   * components per vertex - positions or normals), in place. */
+  private negateXInPlace(values: number[]): void {
+    for (let i = 0; i < values.length; i += 3) values[i] = -values[i];
+  }
+
+  /** Swaps triangle corners 1 and 2 (of 0/1/2) throughout a flat,
+   * non-indexed, per-corner array - `componentsPerVertex` floats per
+   * corner, exactly 3 corners per triangle. This is the standard fix for
+   * the winding-order reversal a mirror transform causes: reflecting
+   * through a single axis flips a mesh "inside out" (its stored normals,
+   * and any normal later re-derived from winding via a cross product,
+   * would end up pointing inward) unless the corner order within each
+   * triangle is also reversed to compensate. Works in place; called on
+   * positions, normals, AND uvs together (see mirrorSceneAlongX()) so all
+   * three stay aligned corner-for-corner. */
+  private flipTriangleWindingInPlace(values: number[], componentsPerVertex: number): void {
+    const triStride = componentsPerVertex * 3;
+    for (let base = 0; base + triStride <= values.length; base += triStride) {
+      for (let c = 0; c < componentsPerVertex; c++) {
+        const a = base + componentsPerVertex + c;
+        const b = base + componentsPerVertex * 2 + c;
+        const tmp = values[a];
+        values[a] = values[b];
+        values[b] = tmp;
+      }
+    }
+  }
+
+  /** Mirrors the whole loaded scene along the X (left/right) axis: negates
+   * every vertex's X position and X normal component, then flips each
+   * triangle's winding order (see flipTriangleWindingInPlace()) so normals
+   * - whether the stored ones or ones later re-derived from winding - keep
+   * pointing outward instead of the mesh turning inside-out, which is what
+   * a bare X negation alone would do (mirroring is an orientation-
+   * reversing transform).
+   *
+   * Applied directly to each draw's own vertex data, not as an outer
+   * group-level transform (e.g. contentGroup.scale.x = -1): a negative
+   * axis scale would break the single-positive-uniform-scalar assumption
+   * that the ground-plane tool, the select-area gizmo, and marker sizing
+   * all make about contentGroup.scale.x elsewhere in this file.
+   *
+   * Also mirrors originalPosedPositions (when a draw has one) alongside
+   * geometryData.positions - recalculateTransformCorrection() always
+   * re-derives the latter from the former, so leaving the pristine copy
+   * un-mirrored would silently undo the mirror the next time distortion
+   * correction is (re-)run. uvs/normals aren't re-derived that way, so
+   * they only need the fix applied once, here.
+   *
+   * Doesn't attempt to re-level a previously-computed ground-plane
+   * rotation (manualUpRotation) - mirroring can change whether the
+   * originally-marked plane is still level afterward, so re-running
+   * "Select ground plane" is the way to fix that if needed. */
+  private mirrorSceneAlongX(): void {
+    if (this.loadedDraws.length === 0) return;
+
+    for (const draw of this.loadedDraws) {
+      this.negateXInPlace(draw.geometryData.positions);
+      this.flipTriangleWindingInPlace(draw.geometryData.positions, 3);
+
+      this.negateXInPlace(draw.geometryData.normals);
+      this.flipTriangleWindingInPlace(draw.geometryData.normals, 3);
+
+      this.flipTriangleWindingInPlace(draw.geometryData.uvs, 2);
+
+      if (draw.originalPosedPositions) {
+        this.negateXInPlace(draw.originalPosedPositions);
+        this.flipTriangleWindingInPlace(draw.originalPosedPositions, 3);
+      }
+
+      draw.bounds = computeBounds(draw.geometryData.positions);
+      draw.diagonal = boundsDiagonal(draw.bounds);
+    }
+
+    // A placed volume-select shape's position was recorded relative to the
+    // mesh as it stood before the mirror - fix up just its X so it stays
+    // where it visually was on the (now-mirrored) mesh. Its scale doesn't
+    // need any change: a mirrored sphere/box is still the same shape.
+    if (this.selectAreaShape) this.selectAreaShape.position.x = -this.selectAreaShape.position.x;
+
+    this.rebuildVisibleScene();
+    this.setStatus(`Mirrored ${this.loadedDraws.length} object(s) along X.`);
+  }
+
+  /** Exports the currently-selected (and currently visible) objects as one
+   * self-contained .glb file: drag-and-drop (or File > Import > glTF 2.0)
+   * into Blender loads a separate object per mesh, each with its material
+   * and texture already embedded - no external file references, no
+   * separate texture files to lose track of. See gltf-exporter.ts for the
+   * actual glTF/GLB building; this just gathers the selected draws'
+   * already-loaded (and, if applicable, already-corrected/mirrored) data
+   * and triggers the browser download.
+   *
+   * "Selected" uses the exact same definition updateSelectionVisuals()
+   * does elsewhere (selectedIndices minus anything currently hidden), so
+   * this always exports what's actually highlighted/visible on screen,
+   * not some separate notion of selection. */
+  private exportSelectedMeshesAsGlb(): void {
+    const activeSelected = Array.from(this.selectedIndices).filter(
+      (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
+    );
+    if (activeSelected.length === 0) {
+      this.setStatus("Select one or more objects to export first.");
+      return;
+    }
+
+    const entries: ExportMeshEntry[] = activeSelected.map((index) => {
+      const draw = this.loadedDraws[index];
+      return {
+        name: `Draw #${index} (eid ${draw.draw.eventId})`,
+        positions: draw.geometryData.positions,
+        normals: draw.geometryData.normals,
+        uvs: draw.geometryData.uvs,
+        bounds: draw.bounds,
+        material: draw.material,
+      };
+    });
+
+    // Bakes the scene's CURRENT orientation/scale (ground-plane leveling,
+    // up-axis, fixedScale) into a single root node in the export instead
+    // of each mesh's own vertex data - see ExportSceneTransform's doc
+    // comment - so exporting matches whatever's presently on screen.
+    const group = this.sceneManager.getContentGroup();
+    const sceneTransform: ExportSceneTransform = {
+      quaternion: this.getActiveSceneRotation(),
+      scale: group?.scale.x || this.fixedScale || 1,
+    };
+
+    const blob = buildGlbBlob(entries, sceneTransform);
+    const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
   }
 
   private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {
