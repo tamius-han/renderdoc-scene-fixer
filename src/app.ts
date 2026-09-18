@@ -187,6 +187,24 @@ export class SceneViewerApp {
    * repeated shift-clicks all extend/shrink from the same anchor - standard
    * list multi-select convention). */
   private lastClickedIndex: number | null = null;
+  /** Which loaded draw the resource panel is currently tracking - always
+   * the most recently selected object (see noteSelectionTarget()), or
+   * null when nothing is selected. Independent of whether the panel is
+   * actually visible right now - see syncResourcePanelVisibility(). */
+  private resourcePanelIndex: number | null = null;
+  /** Viewport-relative px position the resource panel was last placed or
+   * dragged to - persists across selection changes and hide/show toggles
+   * for the rest of the session. Null until the panel is shown for the
+   * first time, at which point it defaults to the bottom-left corner -
+   * see positionResourcePanel(). */
+  private resourcePanelPosition: { left: number; top: number } | null = null;
+  /** Which of the resource panel's two tabs is active when more than one
+   * object is selected (see renderResourcePanel()) - irrelevant, and
+   * ignored, for a single-object selection, which never shows tabs at
+   * all. Manual thumbnail clicks in the multi-select row can flip this
+   * back to "last" (see featureResourcePanelObject()); otherwise it's
+   * purely a user choice that persists until they click the other tab. */
+  private resourcePanelActiveTab: "last" | "all" = "last";
 
   /** Every Object3D currently added to the content group for the selection
    * highlight (screen-space outline meshes + the two dot-marker Points
@@ -284,7 +302,7 @@ export class SceneViewerApp {
   private viewport = this.el<HTMLElement>("viewport");
   // Placeholder values - recomputed from the actual viewport height and the
   // panel's real rendered content every time a resource panel is opened,
-  // see computeResourcePanelMinSize() and showResources().
+  // see computeResourcePanelMinSize() and renderResourcePanel().
   private resourcePanelMinSize = { width: 360, height: 420 };
   private resourcePanelSize = { ...this.resourcePanelMinSize };
 
@@ -507,29 +525,56 @@ export class SceneViewerApp {
    * @param show whether to show or to hide the resource panel
    */
   private toggleResourcePanel(show: boolean, noSaveState?: boolean) {
-    if (show) {
-      // TODO: Show the resource panel
-    } else {
-      // TODO: Hide the resource panel
-    }
-
     if (!noSaveState) {
-      if (show) {
-        this.elements.toolsMenu.showResourcesPanelBtn.classList.add('hidden');
-        this.elements.toolsMenu.hideResourcesPanelBtn.classList.remove('hidden');
-        // TODO: Show the resource panel
-      } else {
-        this.elements.toolsMenu.hideResourcesPanelBtn.classList.add('hidden');
-        this.elements.toolsMenu.showResourcesPanelBtn.classList.remove('hidden');
-        // TODO: Hide the resource panel
-      }
-
+      this.elements.toolsMenu.showResourcesPanelBtn.classList.toggle('hidden', show);
+      this.elements.toolsMenu.hideResourcesPanelBtn.classList.toggle('hidden', !show);
       Config.sessionConfig.resourcesPanel.visible = show;
     }
+    this.syncResourcePanelVisibility();
   }
 
   private restoreResourcePanel() {
     this.toggleResourcePanel(Config.sessionConfig.resourcesPanel.visible);
+  }
+
+  /** Updates which object the resource panel is tracking, then re-derives
+   * whether the panel should be visible at all - call this immediately
+   * after every place that finishes mutating this.selectedIndices.
+   * `candidate` is "the object this particular action was about", if any
+   * (the clicked/shift-clicked/ctrl-clicked index) - not necessarily
+   * what ends up selected (a ctrl-click can just as easily deselect it),
+   * so membership is re-checked here rather than assumed. Pass null when
+   * no single object fits that description (a volume-select affecting
+   * many at once, or an action that clears the selection outright) and
+   * whatever's still selected is used instead. */
+  private noteSelectionTarget(candidate: number | null): void {
+    if (candidate !== null && this.selectedIndices.has(candidate)) {
+      this.resourcePanelIndex = candidate;
+    } else if (this.selectedIndices.size > 0) {
+      this.resourcePanelIndex = Math.max(...this.selectedIndices);
+    } else {
+      this.resourcePanelIndex = null;
+    }
+    this.syncResourcePanelVisibility();
+  }
+
+  /** The single source of truth for whether the resource panel DOM should
+   * exist right now: the user's show/hide toggle AND there being a
+   * selected object to show it for - hidden whenever nothing's selected
+   * regardless of the toggle, and (re)appears the moment something is
+   * selected if the toggle is on. Safe to call redundantly - only
+   * touches the DOM when something's actually changed (see
+   * renderResourcePanel()'s own early-out). */
+  private syncResourcePanelVisibility(): void {
+    if (Config.sessionConfig.resourcesPanel.visible && this.resourcePanelIndex !== null) {
+      this.renderResourcePanel(this.resourcePanelIndex);
+    } else {
+      this.removeResourcePanel();
+    }
+  }
+
+  private removeResourcePanel(): void {
+    this.viewport.querySelector<HTMLElement>(".resource-panel")?.remove();
   }
 
   //#endregion
@@ -716,6 +761,11 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
+      // loadedDraws is about to be wiped, so anything the panel was
+      // pointing at is gone - just drop it, same as any other "nothing
+      // selected" case. Its dragged position is left alone, though, since
+      // that's a user preference that outlives any one scene.
+      this.noteSelectionTarget(null);
 
       let noMeshPathCount = 0;
       let meshNotFoundCount = 0;
@@ -864,6 +914,10 @@ export class SceneViewerApp {
     for (const index of this.selectedIndices) {
       if (this.hiddenDrawIndices.has(index)) this.selectedIndices.delete(index);
     }
+    // The resource panel may have been tracking one of the objects just
+    // dropped above - re-derive it (falls back to whatever's still
+    // selected, or hides the panel if that was the last one).
+    this.noteSelectionTarget(null);
 
     const builder = new SceneMeshBuilder();
     let excludedCount = 0;
@@ -954,6 +1008,7 @@ export class SceneViewerApp {
     if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
     else this.selectedIndices.add(index);
     this.lastClickedIndex = index;
+    this.noteSelectionTarget(index);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
@@ -1668,6 +1723,10 @@ export class SceneViewerApp {
       for (const index of matches) this.selectedIndices.delete(index);
     }
 
+    // No single object is "the" one here - fall back to whatever's still
+    // selected (deterministically, the highest index) rather than pick an
+    // arbitrary match.
+    this.noteSelectionTarget(null);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
 
@@ -2080,6 +2139,30 @@ export class SceneViewerApp {
   }
 
   private attachMeshPreview(container: HTMLElement, draw: LoadedDraw): void {
+    this.attachMultiMeshPreview(container, [draw], { interactive: true });
+  }
+
+  /** Shared implementation behind the single-object interactive preview
+   * (attachMeshPreview() - the "Last selected object" tab/the object-list
+   * row's own preview), the "All selected objects" tab (all currently
+   * selected draws together), and the new per-object/combined thumbnails
+   * in the resource panel's multi-select row. Every mesh uses its
+   * non-posed previewGeometryData, added to the scene at its own natural
+   * local coordinates (i.e. with no relative offset applied between
+   * them - "non-posed" meshes were never placed relative to each other to
+   * begin with), then the WHOLE assembly is centered/scaled as one rigid
+   * unit from the union of their individual bounds, exactly the way the
+   * original single-mesh version centered/scaled just the one mesh.
+   *
+   * `interactive`=true wires up the orbit-drag/wheel-zoom handling and
+   * keeps rendering every frame via requestAnimationFrame, same as
+   * before. `interactive`=false (the non-interactive thumbnails) renders
+   * exactly once - there's nothing that will ever change afterwards - and
+   * frees the GL context immediately rather than holding one open per
+   * thumbnail: a big multi-selection can easily produce more thumbnails
+   * than a browser's simultaneous-WebGL-context limit if they're left
+   * open indefinitely. */
+  private attachMultiMeshPreview(container: HTMLElement, draws: LoadedDraw[], options: { interactive: boolean }): void {
     const previewCanvas = document.createElement("canvas");
     previewCanvas.className = "resource-preview-canvas";
     container.appendChild(previewCanvas);
@@ -2091,37 +2174,55 @@ export class SceneViewerApp {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 1000);
 
-    const geometry = new THREE.BufferGeometry();
-    const sourceData = draw.previewGeometryData ?? draw.geometryData;
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(sourceData.positions, 3));
-    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(sourceData.uvs, 2));
-    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(sourceData.normals, 3));
-    geometry.computeVertexNormals();
+    const modelRoot = new THREE.Group();
+    scene.add(modelRoot);
+    // Everything actually being previewed lives one level further in, so
+    // the center/scale transform below can be applied to the assembly as
+    // a whole while modelRoot itself is left free for pure
+    // drag-to-rotate, exactly like the original code did with its single
+    // mesh directly.
+    const contentGroup = new THREE.Group();
+    modelRoot.add(contentGroup);
 
-    const material = draw.material.clone();
-    material.side = THREE.DoubleSide;
-    material.needsUpdate = true;
+    let overallBounds: Bounds | null = null;
+    for (const draw of draws) {
+      const geometry = new THREE.BufferGeometry();
+      const sourceData = draw.previewGeometryData ?? draw.geometryData;
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(sourceData.positions, 3));
+      geometry.setAttribute("uv", new THREE.Float32BufferAttribute(sourceData.uvs, 2));
+      geometry.setAttribute("normal", new THREE.Float32BufferAttribute(sourceData.normals, 3));
+      geometry.computeVertexNormals();
 
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
+      const material = draw.material.clone();
+      material.side = THREE.DoubleSide;
+      material.needsUpdate = true;
 
-    const bounds = computeBounds(sourceData.positions);
-    const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
-    const rawSize = bounds.max.clone().sub(bounds.min);
+      contentGroup.add(new THREE.Mesh(geometry, material));
+
+      const bounds = computeBounds(sourceData.positions);
+      overallBounds = overallBounds ? unionBounds(overallBounds, bounds) : bounds;
+    }
+    // Empty selection shouldn't be reachable in practice, but fall back to
+    // a small unit cube rather than propagate Infinity/NaN into the fit
+    // math below.
+    if (!overallBounds) overallBounds = { min: new THREE.Vector3(-0.5, -0.5, -0.5), max: new THREE.Vector3(0.5, 0.5, 0.5) };
+
+    const center = boundsCenter(overallBounds);
+    const rawSize = overallBounds.max.clone().sub(overallBounds.min);
 
     // Non-posed preview copy: centered at the origin, then scaled down
     // (never up) to fit inside a 100x100x100 cube if it doesn't already -
-    // applied as the mesh's own position/scale (not baked into the
+    // applied as contentGroup's own position/scale (not baked into the
     // geometry) so it's purely a property of this preview render, not of
     // sourceData itself. Object3D's local matrix scales geometry BEFORE
     // translating by position, so position has to be -scale*center (not
     // just -center) for the result to be "centered, then scaled" rather
     // than "centered by an unscaled offset, then scaled off-center".
     const PREVIEW_CUBE_SIZE = 100;
-    const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z);
+    const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-6);
     const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
-    mesh.position.copy(center).multiplyScalar(-previewScale);
-    mesh.scale.setScalar(previewScale);
+    contentGroup.position.copy(center).multiplyScalar(-previewScale);
+    contentGroup.scale.setScalar(previewScale);
 
     const size = rawSize.clone().multiplyScalar(previewScale);
     const radius = Math.max(size.length() * 0.5, 0.25);
@@ -2143,10 +2244,6 @@ export class SceneViewerApp {
 
     let fitDistance = computeFitDistance(1);
 
-    const modelRoot = new THREE.Group();
-    modelRoot.add(mesh);
-    scene.add(modelRoot);
-
     modelRoot.rotation.x = -0.65;
     modelRoot.rotation.y = 0.85;
 
@@ -2160,65 +2257,12 @@ export class SceneViewerApp {
     const fill = new THREE.HemisphereLight(0xb8d7ff, 0x1c2430, 0.75);
     scene.add(fill);
 
-    let pointerDown = false;
-    let lastX = 0;
-    let lastY = 0;
     // currentDistance = fitDistance * zoomRatio - keeping the user's zoom as
     // a RATIO (rather than an absolute distance) means resizing the panel
     // (which changes fitDistance, see resize() below) preserves how far
-    // // they'd zoomed in/out instead of resetting it.
+    // they'd zoomed in/out instead of resetting it.
     let zoomRatio = 1;
     let currentDistance = fitDistance;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      // Left OR middle mouse button rotate - unlike the main viewport
-      // (left click there selects an object, middle orbits), there's
-      // nothing to select in this thumbnail, so both buttons are just
-      // "rotate" here.
-      if (event.button !== 0 && event.button !== 1) return;
-      event.preventDefault(); // stops the browser's middle-click autoscroll icon (and any drag/selection UI on left)
-      pointerDown = true;
-      lastX = event.clientX;
-      lastY = event.clientY;
-      previewCanvas.setPointerCapture(event.pointerId);
-    };
-    const handlePointerMove = (event: PointerEvent) => {
-      if (!pointerDown) return;
-      const dx = event.clientX - lastX;
-      const dy = event.clientY - lastY;
-      lastX = event.clientX;
-      lastY = event.clientY;
-      modelRoot.rotation.y += dx * 0.01;
-      // Clamped to +-90 degrees so vertical dragging can't carry the model
-      // past vertical and flip it upside down - horizontal dragging (yaw,
-      // above) has no such limit since spinning all the way around is fine.
-      const PITCH_LIMIT = Math.PI / 2;
-      modelRoot.rotation.x = THREE.MathUtils.clamp(
-        modelRoot.rotation.x + dy * 0.01,
-        -PITCH_LIMIT,
-        PITCH_LIMIT,
-      );
-    };
-    const handlePointerUp = (event: PointerEvent) => {
-      pointerDown = false;
-      previewCanvas.releasePointerCapture(event.pointerId);
-    };
-    const handleWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const zoomFactor = Math.exp(-event.deltaY * 0.0015);
-      zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
-      currentDistance = fitDistance * zoomRatio;
-      camera.position.set(0, 0, currentDistance);
-      camera.lookAt(0, 0, 0);
-    };
-
-    previewCanvas.addEventListener("pointerdown", handlePointerDown);
-    previewCanvas.addEventListener("pointermove", handlePointerMove);
-    previewCanvas.addEventListener("pointerup", handlePointerUp);
-    previewCanvas.addEventListener("pointerleave", () => {
-      pointerDown = false;
-    });
-    previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
 
     const resize = () => {
       // Fill the container's actual (possibly non-square) size, rather
@@ -2236,36 +2280,104 @@ export class SceneViewerApp {
       camera.updateProjectionMatrix();
     };
 
-    const onResize = () => resize();
-    const resizeObserver = new ResizeObserver(onResize);
-    resizeObserver.observe(container);
+    if (options.interactive) {
+      let pointerDown = false;
+      let lastX = 0;
+      let lastY = 0;
 
-    const tick = () => {
-      if (!container.isConnected) {
+      const handlePointerDown = (event: PointerEvent) => {
+        // Left OR middle mouse button rotate - unlike the main viewport
+        // (left click there selects an object, middle orbits), there's
+        // nothing to select in this thumbnail, so both buttons are just
+        // "rotate" here.
+        if (event.button !== 0 && event.button !== 1) return;
+        event.preventDefault(); // stops the browser's middle-click autoscroll icon (and any drag/selection UI on left)
+        pointerDown = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        previewCanvas.setPointerCapture(event.pointerId);
+      };
+      const handlePointerMove = (event: PointerEvent) => {
+        if (!pointerDown) return;
+        const dx = event.clientX - lastX;
+        const dy = event.clientY - lastY;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        modelRoot.rotation.y += dx * 0.01;
+        // Clamped to +-90 degrees so vertical dragging can't carry the model
+        // past vertical and flip it upside down - horizontal dragging (yaw,
+        // above) has no such limit since spinning all the way around is fine.
+        const PITCH_LIMIT = Math.PI / 2;
+        modelRoot.rotation.x = THREE.MathUtils.clamp(
+          modelRoot.rotation.x + dy * 0.01,
+          -PITCH_LIMIT,
+          PITCH_LIMIT,
+        );
+      };
+      const handlePointerUp = (event: PointerEvent) => {
+        pointerDown = false;
+        previewCanvas.releasePointerCapture(event.pointerId);
+      };
+      const handleWheel = (event: WheelEvent) => {
+        event.preventDefault();
+        const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+        zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
+        currentDistance = fitDistance * zoomRatio;
+        camera.position.set(0, 0, currentDistance);
+        camera.lookAt(0, 0, 0);
+      };
+
+      previewCanvas.addEventListener("pointerdown", handlePointerDown);
+      previewCanvas.addEventListener("pointermove", handlePointerMove);
+      previewCanvas.addEventListener("pointerup", handlePointerUp);
+      previewCanvas.addEventListener("pointerleave", () => {
+        pointerDown = false;
+      });
+      previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
+
+      const resizeObserver = new ResizeObserver(() => resize());
+      resizeObserver.observe(container);
+
+      const tick = () => {
+        if (!container.isConnected) {
+          renderer.dispose();
+          resizeObserver.disconnect();
+          return;
+        }
+        renderer.render(scene, camera);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+
+      resize();
+    } else {
+      // Non-interactive: nothing ever changes after the first real layout,
+      // so render exactly once - as soon as the container actually has a
+      // size (it can be zero on the very first synchronous call, before
+      // layout has run) - and free the GL context right away instead of
+      // holding one open per thumbnail (see this method's doc comment).
+      const renderOnceReady = (): void => {
+        if (container.clientWidth === 0 || container.clientHeight === 0) return;
+        resize();
+        renderer.render(scene, camera);
         renderer.dispose();
         resizeObserver.disconnect();
-        return;
-      }
-      renderer.render(scene, camera);
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-
-    resize();
+      };
+      const resizeObserver = new ResizeObserver(() => renderOnceReady());
+      resizeObserver.observe(container);
+      renderOnceReady(); // covers the common case where layout's already settled
+    }
   }
 
-  private syncResourcePanelPosition(): void {
-    const panel = this.viewport.querySelector<HTMLElement>(".resource-panel");
-    if (!panel) return;
-
-    const index = Number(panel.dataset.index);
-    if (!Number.isInteger(index)) return;
-
-    const row = this.objectList.querySelector<HTMLElement>(`.draw-row-wrap[data-index="${index}"] .draw-item`);
-    if (!row) return;
-
+  /** Sizes and positions the resource panel. Sizing always follows
+   * resourcePanelSize/resourcePanelMinSize (as before); positioning now
+   * comes from resourcePanelPosition, which defaults to the bottom-left
+   * corner of the viewport the first time the panel is ever shown, and
+   * from then on just remembers wherever the user last dragged it to
+   * (see startResourceDrag()) - clamped back onscreen here in case the
+   * viewport has since shrunk (e.g. a browser resize). */
+  private positionResourcePanel(panel: HTMLElement): void {
     const viewportRect = this.viewport.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
     const minWidth = this.resourcePanelMinSize.width;
     const minHeight = this.resourcePanelMinSize.height;
     const panelWidth = Math.max(minWidth, Math.min(this.resourcePanelSize.width, viewportRect.width - 24));
@@ -2273,11 +2385,46 @@ export class SceneViewerApp {
     panel.style.width = `${panelWidth}px`;
     panel.style.height = `${panelHeight}px`;
 
-    const left = Math.min(rowRect.right - viewportRect.left + 12, viewportRect.width - panelWidth - 12);
-    const top = Math.min(rowRect.top - viewportRect.top, viewportRect.height - panelHeight - 12);
+    if (!this.resourcePanelPosition) {
+      this.resourcePanelPosition = { left: 12, top: viewportRect.height - panelHeight - 12 };
+    }
 
-    panel.style.left = `${Math.max(12, left)}px`;
-    panel.style.top = `${Math.max(12, top)}px`;
+    const maxLeft = Math.max(12, viewportRect.width - panelWidth - 12);
+    const maxTop = Math.max(12, viewportRect.height - panelHeight - 12);
+    const left = Math.min(Math.max(this.resourcePanelPosition.left, 12), maxLeft);
+    const top = Math.min(Math.max(this.resourcePanelPosition.top, 12), maxTop);
+
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  }
+
+  /** Drag-to-move for the whole panel, started from pointerdown on its
+   * header (see renderResourcePanel()) - mirrors startResourceResize()'s
+   * structure exactly, just moving left/top instead of resizing. Persists
+   * the result to resourcePanelPosition so it's remembered across
+   * selection changes and hide/show toggles (see positionResourcePanel()). */
+  private startResourceDrag(panel: HTMLElement, event: PointerEvent): void {
+    event.preventDefault();
+
+    const origin = { x: event.clientX, y: event.clientY, left: panel.offsetLeft, top: panel.offsetTop };
+
+    const onMove = (moveEvent: PointerEvent): void => {
+      const viewportRect = this.viewport.getBoundingClientRect();
+      const maxLeft = Math.max(12, viewportRect.width - panel.offsetWidth - 12);
+      const maxTop = Math.max(12, viewportRect.height - panel.offsetHeight - 12);
+      const left = Math.min(Math.max(origin.left + (moveEvent.clientX - origin.x), 12), maxLeft);
+      const top = Math.min(Math.max(origin.top + (moveEvent.clientY - origin.y), 12), maxTop);
+      this.resourcePanelPosition = { left, top };
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    };
+    const onUp = (): void => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
   }
 
   /** The panel's minimum no-overflow size, computed from the ACTUAL current
@@ -2294,20 +2441,32 @@ export class SceneViewerApp {
     const vh = window.innerHeight / 100;
     const previewSize = 25 * vh;
     const textureRowHeight = 12.5 * vh + 48; // matches .resource-texture-list's fixed CSS height
+    const multiRowHeight = 12.5 * vh + 34; // matches .resource-multi-row's fixed CSS height
 
     const header = panel.querySelector<HTMLElement>(".resource-header");
-    const subhead = panel.querySelector<HTMLElement>(".resource-subhead");
+    const tabs = panel.querySelector<HTMLElement>(".resource-tabs");
+    // There can be up to two of these now ("Textures" and "Selected
+    // objects") - sum whichever are actually present rather than assuming
+    // there's exactly one.
+    const subheads = panel.querySelectorAll<HTMLElement>(".resource-subhead");
+    const hasTextureRow = panel.querySelector(".resource-texture-list") !== null;
+    const hasMultiRow = panel.querySelector(".resource-multi-row") !== null;
     const panelStyle = getComputedStyle(panel);
     const paddingX = parseFloat(panelStyle.paddingLeft || "0") + parseFloat(panelStyle.paddingRight || "0");
     const paddingY = parseFloat(panelStyle.paddingTop || "0") + parseFloat(panelStyle.paddingBottom || "0");
 
     const headerHeight = header?.offsetHeight ?? 20;
-    const subheadHeight = subhead?.offsetHeight ?? 18;
+    const tabsHeight = tabs?.offsetHeight ?? 0;
+    let subheadsHeight = 0;
+    subheads.forEach((el) => (subheadsHeight += el.offsetHeight));
     const previewMarginBottom = 8; // matches .resource-preview's margin-bottom in CSS
+    const rowsHeight = (hasTextureRow ? textureRowHeight : 0) + (hasMultiRow ? multiRowHeight : 0);
 
     return {
       width: Math.ceil(previewSize + paddingX),
-      height: Math.ceil(headerHeight + previewSize + previewMarginBottom + subheadHeight + textureRowHeight + paddingY),
+      height: Math.ceil(
+        headerHeight + tabsHeight + previewSize + previewMarginBottom + subheadsHeight + rowsHeight + paddingY,
+      ),
     };
   }
 
@@ -2349,10 +2508,13 @@ export class SceneViewerApp {
       }
 
       this.resourcePanelSize = { width: nextWidth, height: nextHeight };
+      const clampedLeft = Math.min(Math.max(nextLeft, 12), viewRect.width - nextWidth - 12);
+      const clampedTop = Math.min(Math.max(nextTop, 12), viewRect.height - nextHeight - 12);
+      this.resourcePanelPosition = { left: clampedLeft, top: clampedTop };
       panel.style.width = `${nextWidth}px`;
       panel.style.height = `${nextHeight}px`;
-      panel.style.left = `${Math.min(Math.max(nextLeft, 12), viewRect.width - nextWidth - 12)}px`;
-      panel.style.top = `${Math.min(Math.max(nextTop, 12), viewRect.height - nextHeight - 12)}px`;
+      panel.style.left = `${clampedLeft}px`;
+      panel.style.top = `${clampedTop}px`;
     };
 
     const onUp = (): void => {
@@ -2414,15 +2576,59 @@ export class SceneViewerApp {
     img.src = asBlob;
   }
 
-  private showResources(index: number): void {
+  /** (Re)builds the resource panel's content for the given object, or does
+   * nothing if it's already showing exactly that object - called from
+   * syncResourcePanelVisibility() whenever the panel should be visible, so
+   * this doubles as "make sure the panel reflects resourcePanelIndex".
+   * Deliberately does NOT touch resourcePanelPosition - the panel is
+   * free-floating (see positionResourcePanel()), so swapping which object
+   * it's showing should never move it. */
+  /** Short label shown under each thumbnail in the multi-select row -
+   * mirrors the "Draw #N" fallback the object list itself uses when a
+   * draw has no name. */
+  private describeDrawLabel(index: number): string {
+    const name = this.loadedDraws[index]?.draw.name;
+    return name && name.trim().length > 0 ? name : `Draw #${index}`;
+  }
+
+  /** Switches which of the two tabs (only relevant/shown for a
+   * multi-selection) the resource panel displays - a pure panel-UI
+   * choice, so it never touches the actual selection. */
+  private setResourcePanelTab(tab: "last" | "all"): void {
+    if (this.resourcePanelActiveTab === tab) return;
+    this.resourcePanelActiveTab = tab;
+    if (this.resourcePanelIndex !== null) this.renderResourcePanel(this.resourcePanelIndex);
+  }
+
+  /** Makes the given (already-selected) object the one shown on the "Last
+   * selected object" tab, without changing the actual scene selection -
+   * this is what a click on one of the multi-select row's individual
+   * thumbnails does, letting you flip through everything you've selected
+   * without collapsing the multi-selection down to just one object. Any
+   * real new selection action (noteSelectionTarget()) still takes
+   * priority over this the next time one happens. */
+  private featureResourcePanelObject(index: number): void {
+    this.resourcePanelIndex = index;
+    this.resourcePanelActiveTab = "last";
+    this.renderResourcePanel(index);
+  }
+
+  private renderResourcePanel(index: number): void {
     const existing = this.viewport.querySelector<HTMLElement>(".resource-panel");
-    if (existing) {
-      if (existing.dataset.index === String(index)) {
-        existing.remove();
-        return;
-      }
-      existing.remove();
-    }
+    const selectedList = Array.from(this.selectedIndices).sort((a, b) => a - b);
+    const isMulti = selectedList.length > 1;
+    // A single-object selection has nothing to show a second tab for -
+    // pin to "last" so a leftover "all" choice from a previous
+    // multi-selection doesn't show a blank/nonsensical tab bar.
+    const activeTab = isMulti ? this.resourcePanelActiveTab : "last";
+    // Everything that decides what actually gets rendered below, joined
+    // into one key - renderResourcePanel() gets called on every selection
+    // tweak (see noteSelectionTarget()), most of which don't actually
+    // require a rebuild, so this lets that stay a no-op like it always
+    // was for the plain single-object case.
+    const signature = `${activeTab}:${index}:${selectedList.join(",")}`;
+    if (existing && existing.dataset.signature === signature) return;
+    existing?.remove();
 
     const draw = this.loadedDraws[index];
     if (!draw) return;
@@ -2430,7 +2636,17 @@ export class SceneViewerApp {
     const panel = document.createElement("aside");
     panel.className = "resource-panel";
     panel.dataset.index = String(index);
+    panel.dataset.signature = signature;
 
+    const tabsMarkup = isMulti
+      ? `
+        <div class="resource-tabs">
+          <button type="button" class="resource-tab${activeTab === "last" ? " is-active" : ""}" data-tab="last">Last selected</button>
+          <button type="button" class="resource-tab${activeTab === "all" ? " is-active" : ""}" data-tab="all">All selected (${selectedList.length})</button>
+        </div>`
+      : "";
+
+    const showTextures = activeTab === "last";
     const textureItems = draw.draw.textures.length
       ? draw.draw.textures
           .map((binding) => {
@@ -2449,43 +2665,115 @@ export class SceneViewerApp {
           })
           .join("")
       : "<li class=\"empty\">No textures bound to this draw.</li>";
+    const texturesMarkup = showTextures
+      ? `
+        <div class="resource-subhead">Textures</div>
+        <ul class="resource-texture-list">${textureItems}</ul>`
+      : "";
+
+    // "Selected object should have 'selected' class added to it" - the
+    // one whose thumbnail matches whatever's currently featured (i.e.
+    // shown on the "Last selected" tab) gets it, so it's always visually
+    // obvious which of these the main preview above is currently showing.
+    const multiRowMarkup = isMulti
+      ? `
+        <div class="resource-subhead">Selected objects</div>
+        <div class="resource-multi-row">
+          ${selectedList
+            .map(
+              (i) => `
+            <div class="resource-multi-thumb${i === index ? " selected" : ""}" data-multi-index="${i}" title="${this.describeDrawLabel(i)}">
+              <div class="resource-multi-thumb-canvas-host"></div>
+              <span class="resource-multi-thumb-label">${this.describeDrawLabel(i)}</span>
+            </div>`,
+            )
+            .join("")}
+          <div class="resource-multi-thumb resource-multi-thumb--combined${activeTab === "all" ? " selected" : ""}" data-multi-combined="true" title="All selected objects">
+            <div class="resource-multi-thumb-canvas-host"></div>
+            <span class="resource-multi-thumb-label">All selected</span>
+          </div>
+        </div>`
+      : "";
 
     const previewText = draw.previewPath ? `Previewing ${draw.previewPath}` : "Preview mesh";
     panel.innerHTML = `
-      <div class="resource-header">${previewText}</div>
+      <div class="resource-header" title="Drag to move">${previewText}</div>
+      ${tabsMarkup}
       <div class="resource-preview"></div>
-      <div class="resource-subhead">Textures</div>
-      <ul class="resource-texture-list">${textureItems}</ul>
+      ${texturesMarkup}
+      ${multiRowMarkup}
       <div class="resource-corner resource-corner--upper-right" data-corner="upper-right" aria-label="Resize preview"></div>
       <div class="resource-corner resource-corner--lower-right" data-corner="lower-right" aria-label="Resize preview"></div>
     `;
 
     const previewHost = panel.querySelector<HTMLElement>(".resource-preview");
-    if (previewHost) this.attachMeshPreview(previewHost, draw);
+    if (previewHost) {
+      if (activeTab === "all") {
+        const selectedDraws = selectedList.map((i) => this.loadedDraws[i]).filter((d): d is LoadedDraw => !!d);
+        this.attachMultiMeshPreview(previewHost, selectedDraws, { interactive: true });
+      } else {
+        this.attachMeshPreview(previewHost, draw);
+      }
+    }
 
     panel.querySelectorAll<HTMLElement>(".resource-corner").forEach((handle) => {
       handle.addEventListener("pointerdown", (event) => this.startResourceResize(panel, handle, event as PointerEvent));
     });
 
-    panel.querySelectorAll<HTMLImageElement>(".resource-texture-thumb[data-texture-path]").forEach((img) => {
-      const filePath = img.dataset.texturePath;
-      console.info('> processing img tag. Trying to load texture:', filePath, ' — img.dataset:', img.dataset);
-      if (!filePath) return;
-      const file = this.vfs.get(filePath);
-      console.info('> processing img tag. Attempting to load file', filePath, ' — file from vfs:', file, '\nvfs:', this.vfs);
+    // The header doubles as a drag handle for moving the whole panel - see
+    // startResourceDrag() and the "free-floating" positioning model in
+    // positionResourcePanel().
+    const header = panel.querySelector<HTMLElement>(".resource-header");
+    header?.addEventListener("pointerdown", (event) => this.startResourceDrag(panel, event as PointerEvent));
 
-      if (!file) return;
+    if (isMulti) {
+      panel.querySelectorAll<HTMLButtonElement>(".resource-tab").forEach((tabButton) => {
+        tabButton.addEventListener("click", () => {
+          const tab = tabButton.dataset.tab === "all" ? "all" : "last";
+          this.setResourcePanelTab(tab);
+        });
+      });
 
-      const isLikelyImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(file.name);
-      if (isLikelyImage) {
-        this.loadTextureThumb(img, file);
-      } else {
-        img.replaceWith(Object.assign(document.createElement("div"), {
-          className: "resource-texture-thumb resource-texture-thumb--missing",
-          textContent: "No image",
-        }));
+      panel.querySelectorAll<HTMLElement>(".resource-multi-thumb[data-multi-index]").forEach((thumbEl) => {
+        const thumbIndex = Number(thumbEl.dataset.multiIndex);
+        if (!Number.isInteger(thumbIndex)) return;
+        thumbEl.addEventListener("click", () => this.featureResourcePanelObject(thumbIndex));
+
+        const host = thumbEl.querySelector<HTMLElement>(".resource-multi-thumb-canvas-host");
+        const thumbDraw = this.loadedDraws[thumbIndex];
+        if (host && thumbDraw) this.attachMultiMeshPreview(host, [thumbDraw], { interactive: false });
+      });
+
+      const combinedThumb = panel.querySelector<HTMLElement>(".resource-multi-thumb--combined");
+      combinedThumb?.addEventListener("click", () => this.setResourcePanelTab("all"));
+      const combinedHost = combinedThumb?.querySelector<HTMLElement>(".resource-multi-thumb-canvas-host");
+      if (combinedHost) {
+        const selectedDraws = selectedList.map((i) => this.loadedDraws[i]).filter((d): d is LoadedDraw => !!d);
+        this.attachMultiMeshPreview(combinedHost, selectedDraws, { interactive: false });
       }
-    });
+    }
+
+    if (showTextures) {
+      panel.querySelectorAll<HTMLImageElement>(".resource-texture-thumb[data-texture-path]").forEach((img) => {
+        const filePath = img.dataset.texturePath;
+        console.info('> processing img tag. Trying to load texture:', filePath, ' — img.dataset:', img.dataset);
+        if (!filePath) return;
+        const file = this.vfs.get(filePath);
+        console.info('> processing img tag. Attempting to load file', filePath, ' — file from vfs:', file, '\nvfs:', this.vfs);
+
+        if (!file) return;
+
+        const isLikelyImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(file.name);
+        if (isLikelyImage) {
+          this.loadTextureThumb(img, file);
+        } else {
+          img.replaceWith(Object.assign(document.createElement("div"), {
+            className: "resource-texture-thumb resource-texture-thumb--missing",
+            textContent: "No image",
+          }));
+        }
+      });
+    }
 
     this.viewport.appendChild(panel);
 
@@ -2500,7 +2788,7 @@ export class SceneViewerApp {
       width: Math.max(this.resourcePanelSize.width, minSize.width),
       height: Math.max(this.resourcePanelSize.height, minSize.height),
     };
-    this.syncResourcePanelPosition();
+    this.positionResourcePanel(panel);
   }
 
   private isObjectHidden(index: number): boolean {
@@ -2522,6 +2810,7 @@ export class SceneViewerApp {
     this.selectedIndices.clear();
     this.selectedIndices.add(index);
     this.lastClickedIndex = index;
+    this.noteSelectionTarget(index);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
@@ -2541,6 +2830,7 @@ export class SceneViewerApp {
       if (!this.isObjectHidden(i)) this.selectedIndices.add(i);
     }
     // Anchor intentionally left unchanged - see lastClickedIndex's doc comment.
+    this.noteSelectionTarget(index);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
@@ -2649,6 +2939,7 @@ export class SceneViewerApp {
         if (this.selectedIndices.size > 0) {
           this.selectedIndices.clear();
           this.lastClickedIndex = null;
+          this.noteSelectionTarget(null);
           this.refreshSelectionVisuals();
           this.renderObjectListState();
         }
@@ -2658,6 +2949,7 @@ export class SceneViewerApp {
       if (!this.selectedIndices.has(index)) {
         this.selectedIndices.clear();
         this.lastClickedIndex = null;
+        this.noteSelectionTarget(null);
         this.refreshSelectionVisuals();
         this.renderObjectListState();
       }
@@ -2675,6 +2967,7 @@ export class SceneViewerApp {
     }
 
     this.lastClickedIndex = index;
+    this.noteSelectionTarget(index);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
     this.scrollDrawIntoView(index);
@@ -3161,10 +3454,6 @@ export class SceneViewerApp {
   }
 
   private setupObjectList(): void {
-    this.objectList.addEventListener("scroll", () => {
-      this.syncResourcePanelPosition();
-    });
-
     this.sceneManager.renderer.domElement.addEventListener("pointerdown", (event) => {
       if (event.button === 0 || event.button === 2) this.handleSceneObjectPointer(event as PointerEvent);
     });
@@ -3189,7 +3478,11 @@ export class SceneViewerApp {
         return;
       }
       if (action === "resources") {
-        this.showResources(index);
+        // The panel always tracks the selection now (see
+        // noteSelectionTarget()), so "show resources for this row"
+        // becomes "select this row, and make sure the panel's on".
+        this.selectOnly(index);
+        this.toggleResourcePanel(true);
         return;
       }
 
