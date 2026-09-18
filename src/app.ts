@@ -22,7 +22,8 @@ import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from ".
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
-import { Config } from './config/cls.config';
+import { Config, type AppConfiguration } from './config/cls.config';
+import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
@@ -702,7 +703,7 @@ export class SceneViewerApp {
     return wrap;
   }
 
-  private async reconstructScene({vfs, manifests, importOptions }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: any }): Promise<void> {
+  private async reconstructScene({vfs, manifests, importOptions }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: AppConfiguration['importOptions'] }): Promise<void> {
     this.loaded = manifests;
     if (!this.loaded || !vfs) {
       console.info('No manifests loaded — doing nothing.');
@@ -849,7 +850,22 @@ export class SceneViewerApp {
         for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
         const size = overall.max.clone().sub(overall.min);
         const maxDim = Math.max(size.x, size.y, size.z);
-        this.fixedScale = computeNormalizationScale(maxDim);
+
+        // "1 capture unit = <captureUnitSize> <captureUnitUnit>" - convert
+        // that straight into meters, since the app's own scale is fixed
+        // at 1 app unit = 1 meter. This (not an arbitrary normalization)
+        // is the primary driver of fixedScale; computeNormalizationScale()
+        // below only steps in afterwards to clamp an out-of-range result.
+        const unitScale =
+          (importOptions.captureUnitSize || 1) *
+          ((UNIT_CONVERSION as Record<string, number>)[importOptions.captureUnitUnit] ?? 1);
+        const maxDimMeters = maxDim * unitScale;
+
+        const clampScale = computeNormalizationScale(maxDimMeters, {
+          forceMax: importOptions.forceMaxSceneSize,
+          maxSpan: importOptions.maxSceneSize,
+        });
+        this.fixedScale = unitScale * clampScale;
 
         this.worldUpAxis = this.detectWorldUpAxis(overall);
         if (this.worldUpAxis !== "y") {
@@ -863,6 +879,8 @@ export class SceneViewerApp {
           min: overall.min,
           max: overall.max,
           size,
+          unitScale,
+          maxDimMeters,
           scale: this.fixedScale,
           worldUpAxis: this.worldUpAxis,
         });
@@ -875,8 +893,18 @@ export class SceneViewerApp {
       this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
       this.elements.loadingScreen.log(`Rebuilding visible scene...`);
-      this.rebuildVisibleScene();
+      // Goes through setHidePercent() (not a direct rebuildVisibleScene()
+      // call) so the configured "Hide largest % of objects" value is
+      // actually applied - and reflected in the viewport slider/text - on
+      // this first build, not just on later interactive changes.
+      this.setHidePercent(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
       this.elements.loadingScreen.log(`Visible scene rebuilt.`);
+
+      this.elements.loadingScreen.log(`Placing camera...`);
+      this.sceneManager.placeCameraForImport(
+        1.2,
+        importOptions.forceInitialScaleLimit ? importOptions.initialScaleLimit : undefined,
+      );
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
       // this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
@@ -2100,7 +2128,19 @@ export class SceneViewerApp {
     let overall: Bounds = this.loadedDraws[0].bounds;
     for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
     const size = overall.max.clone().sub(overall.min);
-    this.fixedScale = computeNormalizationScale(Math.max(size.x, size.y, size.z));
+    const maxDim = Math.max(size.x, size.y, size.z);
+    // Same unit-conversion + optional max-scene-size clamp as the initial
+    // import (see reconstructScene()) - distortion correction reshapes
+    // geometry, so the bounds (and therefore this) can change, but the
+    // import options that drove the original scale haven't.
+    const importOpts = this.appConfig.config.importOptions;
+    const unitScale =
+      (importOpts.captureUnitSize || 1) * ((UNIT_CONVERSION as Record<string, number>)[importOpts.captureUnitUnit] ?? 1);
+    const clampScale = computeNormalizationScale(maxDim * unitScale, {
+      forceMax: importOpts.forceMaxSceneSize,
+      maxSpan: importOpts.maxSceneSize,
+    });
+    this.fixedScale = unitScale * clampScale;
 
     this.rebuildVisibleScene();
 
