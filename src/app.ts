@@ -14,6 +14,7 @@ import {
   type GeometryArrays,
 } from "./scene/mesh-builder";
 import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
+import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
@@ -2580,6 +2581,21 @@ export class SceneViewerApp {
     modelRoot.add(contentGroup);
 
     let overallBounds: Bounds | null = null;
+    // Non-posed data has no coherent shared coordinate system across
+    // multiple draws - each was authored around its own arbitrary local
+    // origin (see this method's doc comment) - so union-ing their raw
+    // positions can put them arbitrarily far apart. The combined bounding
+    // box (and therefore the auto-fit camera below) then ends up
+    // dominated by the empty gap between them rather than the meshes
+    // themselves, making every individual mesh look tiny instead of
+    // filling the frame. Posed data doesn't have this problem (those
+    // positions already describe one real, spatially-coherent scene), and
+    // neither does a single mesh (nothing to be "arbitrarily far" from),
+    // so this only kicks in for a genuine non-posed multi-selection.
+    const arrangeSideBySide = poseMode === "non-posed" && draws.length > 1;
+    let shelfCursorX = 0;
+    const SHELF_GAP = 0.15; // relative to each mesh's own width - just enough to visually separate neighbors
+
     for (const draw of draws) {
       const geometry = new THREE.BufferGeometry();
       const sourceData = poseMode === "posed" ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
@@ -2597,9 +2613,29 @@ export class SceneViewerApp {
         material = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, flatShading: true, side: THREE.DoubleSide });
       }
 
-      contentGroup.add(new THREE.Mesh(geometry, material));
+      const mesh = new THREE.Mesh(geometry, material);
+      let bounds = computeBounds(sourceData.positions);
 
-      const bounds = computeBounds(sourceData.positions);
+      if (arrangeSideBySide) {
+        // Re-center this ONE mesh at its own bounds' center (removing
+        // whatever arbitrary local-space offset it was authored with),
+        // then place it on a "shelf" along X, edge-to-edge with a small
+        // gap after the previous mesh - so the combined bounding box
+        // below reflects the meshes actually placed next to each other,
+        // not the unrelated span between their original origins.
+        const meshCenter = boundsCenter(bounds);
+        const meshWidth = Math.max(bounds.max.x - bounds.min.x, 1e-6);
+        shelfCursorX += meshWidth / 2;
+        mesh.position.set(shelfCursorX - meshCenter.x, -meshCenter.y, -meshCenter.z);
+        shelfCursorX += meshWidth / 2 + meshWidth * SHELF_GAP;
+
+        bounds = {
+          min: bounds.min.clone().add(mesh.position),
+          max: bounds.max.clone().add(mesh.position),
+        };
+      }
+
+      contentGroup.add(mesh);
       overallBounds = overallBounds ? unionBounds(overallBounds, bounds) : bounds;
     }
     // Empty selection shouldn't be reachable in practice, but fall back to
@@ -2681,6 +2717,22 @@ export class SceneViewerApp {
     };
 
     if (options.interactive) {
+      // Small always-visible compass in the preview's own corner, reusing
+      // the same OrientationGizmo the main viewport uses (see
+      // scene-manager.ts) - just repositioned/shrunk via the
+      // "orientation-gizmo--preview" CSS modifier. It normally reads the
+      // CAMERA's orientation, but here the CAMERA never rotates - dragging
+      // spins modelRoot instead (see handlePointerMove() below) - so it's
+      // fed a small proxy object holding modelRoot's rotation INVERTED
+      // (updated in tick()): rotating the model one way is optically
+      // equivalent to rotating the camera the other way around a
+      // stationary object, so this still shows which way the world axes
+      // currently point relative to the viewer.
+      const gizmo = new OrientationGizmo();
+      gizmo.element.classList.add("orientation-gizmo--preview");
+      container.appendChild(gizmo.element);
+      const gizmoCameraProxy = new THREE.Object3D();
+
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
@@ -2720,7 +2772,11 @@ export class SceneViewerApp {
       };
       const handleWheel = (event: WheelEvent) => {
         event.preventDefault();
-        const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+        // Scrolling "up"/away from the user (negative deltaY) zooms IN
+        // (camera moves closer); scrolling down (positive deltaY) zooms
+        // OUT - the usual map/CAD-viewer convention. deltaY's sign is
+        // therefore used directly (not negated) when driving distance.
+        const zoomFactor = Math.exp(event.deltaY * 0.0015);
         zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
         currentDistance = fitDistance * zoomRatio;
         camera.position.set(0, 0, currentDistance);
@@ -2744,6 +2800,8 @@ export class SceneViewerApp {
           resizeObserver.disconnect();
           return;
         }
+        gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert();
+        gizmo.update(gizmoCameraProxy as unknown as THREE.Camera);
         renderer.render(scene, camera);
         requestAnimationFrame(tick);
       };
