@@ -7,6 +7,7 @@ import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
 import { collectFromDrop, VirtualFileSystem } from '../../filesystem';
+import type { AffineDistortionResult } from '../../mesh-tools/calculator';
 
 enum ImportType {
   Unknown = 0,
@@ -19,6 +20,15 @@ export class CaptureImporter extends HTMLElement {
 
   private appConfig: Config;
   private vfs!: VirtualFileSystem;
+  /** Set once processIntelGPAImport() successfully matches a
+   * landmark-source.obj/landmark-output.obj pair (see
+   * intel-gpa-import-helpers.ts) - carried through to reconstructScene()'s
+   * event detail so the main app can auto-apply it instead of requiring
+   * the user to mark a scale-reference object and click "Fix distortion"
+   * themselves. Cleared on a plain RenderDoc-only import (see
+   * handleFiles()) so a stale value from an earlier import attempt in the
+   * same session can't leak into an unrelated one. */
+  private intelGpaDistortion: AffineDistortionResult | null = null;
 
   private elements: {
     dropzoneOuter: HTMLElement;
@@ -302,7 +312,8 @@ export class CaptureImporter extends HTMLElement {
           detail: {
             vfs: this.vfs,
             manifests: this.elements.renderPassList.manifests,
-            importOptions: this.appConfig.config.importOptions
+            importOptions: this.appConfig.config.importOptions,
+            intelGpaDistortion: this.intelGpaDistortion
           },
           bubbles: true,
           composed: true
@@ -425,6 +436,13 @@ export class CaptureImporter extends HTMLElement {
       return;
     }
 
+    // Computed once from the dropped landmark pair - see
+    // intel-gpa-import-helpers.ts / mesh-tools/landmark-matching.ts.
+    // Picked up by reconstructScene() (see its event detail below) so it
+    // gets applied automatically instead of through the manual
+    // scale-reference-object flow.
+    this.intelGpaDistortion = fileRoles.distortion;
+
     const loaded = await fakeManifest(this.intelGPAImports['scene']!.file);
 
     if (!loaded) {
@@ -485,6 +503,11 @@ export class CaptureImporter extends HTMLElement {
     }
 
     // if we came this far, this should be a Renderdoc Scene Exporter folder.
+    // A plain RenderDoc-only import has no landmark pair to auto-apply -
+    // drop any distortion left over from an earlier IntelGPA import
+    // attempt this session, so it doesn't get applied to an unrelated scene.
+    this.intelGpaDistortion = null;
+
     const vfs = new VirtualFileSystem();
     for (const { path, file } of entries) {
      vfs.set(path, file);
