@@ -1,3 +1,5 @@
+import { AxisDirection } from '../types/axis-direction.type';
+
 export interface AppConfiguration {
   importOptions: {
     captureUnitSize: number;
@@ -6,6 +8,12 @@ export interface AppConfiguration {
     maxSceneSize: number;
     forceInitialScaleLimit: boolean;
     initialScaleLimit: number;
+
+    inputGeometryOrientation: {
+      up: AxisDirection;
+      forward: AxisDirection;
+      right: AxisDirection;
+    };
   };
   exportOptions: {
     exportTextures: boolean;
@@ -51,6 +59,12 @@ export class Config {
       maxSceneSize: 10000,
       forceInitialScaleLimit: true, // viewport is this many units across
       initialScaleLimit: 100,
+
+      inputGeometryOrientation: {
+        up: '+y',
+        forward: '+z',
+        right: '+x',
+      },
     },
     exportOptions: {
       exportTextures: true,

@@ -18,13 +18,14 @@ import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
-import { calculateDistortionMatrix, type HandednessMode } from "./mesh-tools/calculator";
+import { calculateDistortionMatrix, type AffineDistortionResult, type HandednessMode } from "./mesh-tools/calculator";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
 import { ExportMesh } from './components/export-mesh/cmp.export-mesh';
 import { Config, type AppConfiguration } from './config/cls.config';
+import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
@@ -102,6 +103,27 @@ export class SceneViewerApp {
    * object's correction to the whole scene; kept only for the UI marker
    * itself, which is otherwise harmless to leave clicked. */
   private scaleReferenceIndex: number | null = null;
+  /** Distortion transform computed from a matched IntelGPA
+   * landmark-source.obj/landmark-output.obj pair (see
+   * intel-gpa-import-helpers.ts / mesh-tools/landmark-matching.ts),
+   * carried in on reconstructScene()'s event detail. When set, it's
+   * applied to every draw automatically (see reconstructScene()) instead
+   * of through the manual scale-reference-object flow, and the "Fix
+   * distortion" tool is hidden since there's nothing left for it to do. */
+  private intelGpaDistortion: AffineDistortionResult | null = null;
+  /** The distortion last actually applied to the scene - either
+   * intelGpaDistortion (applied automatically, see reconstructScene()) or
+   * one fitted by recalculateTransformCorrection() from a marked
+   * scale-reference object. Source of truth for the "raw / corrected
+   * import" toggle button (see toggleRawImport()): null means no
+   * correction has been computed yet for the current scene, so the button
+   * stays hidden. Kept even while showingRawImport is true, so toggling
+   * back to "corrected" doesn't need to re-fit anything. */
+  private appliedDistortion: AffineDistortionResult | null = null;
+  /** True after toggleRawImport() has switched the scene to show
+   * draw.originalPosedPositions untouched, instead of appliedDistortion's
+   * correction. Only meaningful while appliedDistortion is non-null. */
+  private showingRawImport = false;
   /** Rotation applied to the whole scene's content group (not to individual
    * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
    * (filter/visibility changes tear down and recreate the content group).
@@ -251,6 +273,7 @@ export class SceneViewerApp {
     toolsMenu: {
       selectVolumeBtn: this.el("select-volume-btn"),
       fixDistortionBtn: this.el("fix-distortion-btn"),
+      toggleRawImportBtn: this.el("toggle-raw-import-btn"),
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
       setUpAxisBtn: this.el("set-up-axis-btn"),
       mirrorBtn: this.el("mirror-scene-btn"),
@@ -425,6 +448,7 @@ export class SceneViewerApp {
           this.cancelSelectLandmarkTool();
         }
       });
+      this.elements.toolsMenu.toggleRawImportBtn.addEventListener('click', () => this.toggleRawImport());
       this.elements.toolsMenu.selectGroundPlaneBtn.addEventListener('click', () => {
         this.hideAllToolSubmenus();
         this.cancelAllTools();
@@ -706,9 +730,54 @@ export class SceneViewerApp {
 
   private getUntexturedMaterial(): THREE.Material {
     if (!this.untexturedMaterial) {
-      this.untexturedMaterial = new THREE.MeshBasicMaterial({ color: 0x606a7a, side: THREE.DoubleSide });
+      const material = new THREE.MeshBasicMaterial({ color: 0x606a7a, side: THREE.DoubleSide });
+      this.applyFlatFaceShading(material);
+      this.untexturedMaterial = material;
     }
     return this.untexturedMaterial;
+  }
+
+  /** Installs the same "fake flat per-face lighting" trick used for the
+   * selected-mesh shader (see buildSelectionShaderMaterial() below) onto a
+   * plain MeshBasicMaterial: a per-face normal computed in the fragment
+   * shader from screen-space derivatives (dFdx/dFdy) of view-space
+   * position, dotted with a fixed pseudo-light direction, and used to
+   * scale the material's own diffuse color. There's no real light
+   * anywhere in this scene (see buildSelectionShaderMaterial()'s doc
+   * comment), so without this an untextured mesh - no map, i.e. no
+   * per-fragment detail at all - renders as one uniform flat color with
+   * zero depth cues: a "grey blob", most noticeable on IntelGPA imports,
+   * which never carry materials/textures at all (see manifest.ts's
+   * fakeManifest()). Deriving the face normal from screen-space
+   * derivatives rather than trusting the geometry's own normal attribute
+   * means this works regardless of whether that attribute is missing,
+   * default, or smoothed - no geometry changes needed (no
+   * toNonIndexed()/computeVertexNormals(), unlike
+   * applyFlatFaceVertexColors() below, which bakes into vertex colors
+   * instead for the cases - like the select-area gizmo shape - that want
+   * it that way). abs() rather than a plain clamp/dot: OBJ meshes here
+   * don't reliably have consistent winding, and there's no real light to
+   * "face away from" - this just keeps a facet from going fully black
+   * when its normal happens to point away from the pseudo-light. */
+  private applyFlatFaceShading(material: THREE.MeshBasicMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "varying vec3 vFlatShadeViewPos;\n#include <common>")
+        .replace("#include <project_vertex>", "#include <project_vertex>\nvFlatShadeViewPos = mvPosition.xyz;");
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "varying vec3 vFlatShadeViewPos;\n#include <common>")
+        .replace(
+          "#include <specularmap_fragment>",
+          `#include <specularmap_fragment>
+          {
+            vec3 faceNormal = normalize( cross( dFdx( vFlatShadeViewPos ), dFdy( vFlatShadeViewPos ) ) );
+            float ndotl = abs( dot( faceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
+            diffuseColor.rgb *= 0.45 + 0.55 * ndotl;
+          }`,
+        );
+    };
+    material.needsUpdate = true;
   }
 
   private async resolveMaterial(
@@ -778,7 +847,21 @@ export class SceneViewerApp {
       diagonal: boundsDiagonal(bounds),
       meshPath: meshRel,
       previewPath: previewRel,
-      originalPosedPositions: previewGeometryData !== geometryData ? geometryData.positions.slice() : null,
+      originalPosedPositions:
+        // A genuine RenderDoc posed/non-posed pair (previewRel resolved to
+        // a DIFFERENT file than meshRel) needs correcting the normal way.
+        // An IntelGPA-derived draw (see manifest.ts's fakeManifest(),
+        // which always sets posedMesh === mesh - there's no separate
+        // bind-pose export for a flat scene.obj) has no such pair, but
+        // still needs a pristine "as imported" snapshot: the ONE
+        // landmark-derived distortion (this.intelGpaDistortion, already
+        // set by the time this runs - see reconstructScene()) is applied
+        // directly to this draw's raw geometry, not to a posed/non-posed
+        // difference within it. Without this, applyDistortionToScene()
+        // would see originalPosedPositions === null and skip every draw.
+        previewGeometryData !== geometryData || this.intelGpaDistortion !== null
+          ? geometryData.positions.slice()
+          : null,
     });
 
     return "added";
@@ -820,7 +903,7 @@ export class SceneViewerApp {
     return wrap;
   }
 
-  private async reconstructScene({vfs, manifests, importOptions }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: any }): Promise<void> {
+  private async reconstructScene({vfs, manifests, importOptions, intelGpaDistortion }: { vfs: VirtualFileSystem; manifests: LoadedManifests; importOptions: AppConfiguration['importOptions']; intelGpaDistortion?: AffineDistortionResult | null }): Promise<void> {
     this.loaded = manifests;
     if (!this.loaded || !vfs) {
       console.info('No manifests loaded — doing nothing.');
@@ -839,6 +922,14 @@ export class SceneViewerApp {
       return;
     }
     this.vfs = vfs;
+    // Carried in from an IntelGPA landmark-pair import (see
+    // cmp.capture-importer.ts) - null for a plain RenderDoc-only import.
+    // The "Fix distortion" tool is only meaningful for the latter (it
+    // fits a correction from a manually marked scale-reference object),
+    // so hide it whenever a precomputed one is already going to be
+    // applied automatically below.
+    this.intelGpaDistortion = intelGpaDistortion ?? null;
+    this.elements.toolsMenu.fixDistortionBtn.classList.toggle("hidden", this.intelGpaDistortion !== null);
     this.elements.captureImporter.classList.add('hidden');
     this.elements.loadingScreen.show();
     this.elements.loadingScreen.log("Starting reconstruction...");
@@ -878,6 +969,13 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
+      // A fresh reconstruct means no distortion has been applied to it
+      // yet - any previous scene's correction (and raw/corrected toggle
+      // state) doesn't carry over. The IntelGPA auto-apply block further
+      // down sets appliedDistortion again if this import has one.
+      this.appliedDistortion = null;
+      this.showingRawImport = false;
+      this.updateToggleRawImportBtn();
       // loadedDraws is about to be wiped, so anything the panel was
       // pointing at is gone - just drop it, same as any other "nothing
       // selected" case. Its dragged position is left alone, though, since
@@ -967,7 +1065,22 @@ export class SceneViewerApp {
         for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
         const size = overall.max.clone().sub(overall.min);
         const maxDim = Math.max(size.x, size.y, size.z);
-        this.fixedScale = computeNormalizationScale(maxDim);
+
+        // "1 capture unit = <captureUnitSize> <captureUnitUnit>" - convert
+        // that straight into meters, since the app's own scale is fixed
+        // at 1 app unit = 1 meter. This (not an arbitrary normalization)
+        // is the primary driver of fixedScale; computeNormalizationScale()
+        // below only steps in afterwards to clamp an out-of-range result.
+        const unitScale =
+          (importOptions.captureUnitSize || 1) *
+          ((UNIT_CONVERSION as Record<string, number>)[importOptions.captureUnitUnit] ?? 1);
+        const maxDimMeters = maxDim * unitScale;
+
+        const clampScale = computeNormalizationScale(maxDimMeters, {
+          forceMax: importOptions.forceMaxSceneSize,
+          maxSpan: importOptions.maxSceneSize,
+        });
+        this.fixedScale = unitScale * clampScale;
 
         this.worldUpAxis = this.detectWorldUpAxis(overall);
         if (this.worldUpAxis !== "y") {
@@ -981,9 +1094,21 @@ export class SceneViewerApp {
           min: overall.min,
           max: overall.max,
           size,
+          unitScale,
+          maxDimMeters,
           scale: this.fixedScale,
           worldUpAxis: this.worldUpAxis,
         });
+      }
+
+      // IntelGPA import: apply the precomputed landmark distortion to
+      // every draw now, BEFORE the first rebuildVisibleScene() below -
+      // rebuild is deferred (see applyDistortionToScene()'s `rebuild`
+      // option) so the scene is only actually built once, already
+      // corrected, rather than once distorted then again once fixed.
+      if (this.intelGpaDistortion) {
+        const { corrected, skipped } = this.applyDistortionToScene(this.intelGpaDistortion, { rebuild: false });
+        console.log("[reconstruct] auto-applied IntelGPA landmark distortion", { corrected, skipped });
       }
 
       const problems: string[] = [];
@@ -993,8 +1118,18 @@ export class SceneViewerApp {
       this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
       this.elements.loadingScreen.log(`Rebuilding visible scene...`);
-      this.rebuildVisibleScene();
+      // Goes through setHidePercent() (not a direct rebuildVisibleScene()
+      // call) so the configured "Hide largest % of objects" value is
+      // actually applied - and reflected in the viewport slider/text - on
+      // this first build, not just on later interactive changes.
+      this.setHidePercent(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
       this.elements.loadingScreen.log(`Visible scene rebuilt.`);
+
+      this.elements.loadingScreen.log(`Placing camera...`);
+      this.sceneManager.placeCameraForImport(
+        1.2,
+        importOptions.forceInitialScaleLimit ? importOptions.initialScaleLimit : undefined,
+      );
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
       // this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
@@ -2144,17 +2279,21 @@ export class SceneViewerApp {
 
   //#endregion
 
-  /** Runs the matrix-based transform-correction fit independently for EVERY
-   * loaded draw (including hidden ones - hiddenness only affects
-   * rendering/selection, not the underlying data), rather than fitting one
-   * correction from a single marked "scale reference" object and
-   * broadcasting it to the whole scene. Each draw already carries its own
-   * posed/non-posed vertex pair (geometryData/previewGeometryData - see
-   * loadDraw()), from the SAME draw call, so each object can - and, since
-   * different objects can genuinely be distorted differently (different
-   * skinning, different shaders, different bones), *should* - fit and
-   * apply its own correction instead of assuming one object's distortion
-   * speaks for the whole scene.
+  /** Applies one already-computed distortion's shape-only correction
+   * (posedToNonPosedInPlace) to every loaded draw (including hidden ones -
+   * hiddenness only affects rendering/selection, not the underlying data),
+   * pivoted per-draw about that SAME distortion's posedCentroid, composed
+   * with the current "Up axis" override (see buildUpAxisAdjustment() for
+   * why it's composed this way rather than fighting the whole-scene
+   * sceneRotation from reconstructScene()). Shared by:
+   * - recalculateTransformCorrection(), which fits `distortion` from a
+   *   user-marked scale-reference object and broadcasts it to the whole
+   *   scene;
+   * - reconstructScene()'s automatic IntelGPA-landmark correction, which
+   *   instead already comes with `distortion` precomputed from the
+   *   dropped landmark-source.obj/landmark-output.obj pair (see
+   *   mesh-tools/landmark-matching.ts) and applies it the same way, with
+   *   no scale-reference object involved at all.
    *
    * `referenceIndex` is which loaded draw's posed/non-posed pair the fit
    * itself comes from (every OTHER draw still gets its own corrected
@@ -2174,44 +2313,21 @@ export class SceneViewerApp {
    * instead of compounding the previous run's correction onto itself.
    *
    * A draw with no separate posed export (originalPosedPositions is null -
-   * see loadDraw()) has no posed/non-posed pair to fit a distortion from,
-   * so it's skipped rather than fed a degenerate identity fit. A draw
-   * whose fit fails for another reason (mismatched vertex counts,
-   * degenerate/planar geometry - see calculateDistortionMatrix()) is also
-   * skipped, logged, and counted, rather than aborting correction for the
-   * rest of the scene. */
-  private recalculateTransformCorrection(referenceIndex: number | null = this.scaleReferenceIndex): void {
-    if (this.loadedDraws.length === 0) {
-      this.setStatus("Reconstruct a scene first.");
-      return;
-    }
-    if (referenceIndex === null) {
-      return;
-    }
-
-    const handedness = this.handednessSelect.value as HandednessMode;
+   * see loadDraw()) has no posed geometry to correct, so it's skipped.
+   * `rebuild` controls whether this also recomputes fixedScale and calls
+   * rebuildVisibleScene() once corrected - reconstructScene() passes
+   * false since it still has its own rebuild (hide-percent, camera
+   * placement, etc.) to run afterwards regardless. */
+  private applyDistortionToScene(
+    distortion: AffineDistortionResult,
+    options: { rebuild?: boolean } = {},
+  ): { corrected: number; skipped: number } {
     const upAxisMode = this.upAxisSelect.value as "auto" | "x" | "y" | "z" | "manual";
     const upAxisAdjustment = this.buildUpAxisAdjustment(upAxisMode);
     const upAxisAdjustment4 = new THREE.Matrix4().makeRotationFromQuaternion(upAxisAdjustment);
 
     let corrected = 0;
     let skipped = 0;
-    const failures: string[] = [];
-
-    const referenceObject = this.loadedDraws[referenceIndex];
-    let distortion;
-    try {
-      distortion = calculateDistortionMatrix(
-        { geometryData: { positions: referenceObject.originalPosedPositions }, previewGeometryData: referenceObject.previewGeometryData },
-        { handedness },
-      );
-    } catch (e) {
-      // const label = `eid${draw.draw.eventId}`;
-      // failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
-      // console.warn(`[recalculateTransformCorrection] skipping ${label}`, e);
-      // continue;
-      return;
-    }
 
     for (const draw of this.loadedDraws) {
       if (draw.originalPosedPositions === null) {
@@ -2219,11 +2335,6 @@ export class SceneViewerApp {
         continue;
       }
 
-      // Shape-only fix (posedToNonPosedInPlace) pivoted about this draw's
-      // own posed centroid, plus the "Up axis" override (also pivoted
-      // about that same centroid, applied after the shape fix) - see
-      // buildUpAxisAdjustment() for why composing it this way avoids
-      // fighting the whole-scene sceneRotation set up in reconstructScene().
       const c = distortion.posedCentroid;
       const pivotedUpAdjustment = new THREE.Matrix4()
         .makeTranslation(c.x, c.y, c.z)
@@ -2239,25 +2350,116 @@ export class SceneViewerApp {
       corrected++;
     }
 
-    if (corrected === 0) {
-      this.setStatus(
-        failures.length > 0
-          ? `Distortion correction failed for all ${failures.length} eligible object(s) - first error: ${failures[0]}`
-          : "No objects have a separate posed mesh to correct - nothing to do.",
-      );
-      return;
+    if (corrected > 0) {
+      this.recomputeFixedScale();
+      this.appliedDistortion = distortion;
+      this.showingRawImport = false;
+      this.updateToggleRawImportBtn();
+
+      if (options.rebuild ?? true) this.rebuildVisibleScene();
     }
 
+    return { corrected, skipped };
+  }
+
+  /** Recomputes fixedScale from the CURRENT union of every loadedDraw's
+   * bounds - the same unit-conversion + optional max-scene-size clamp used
+   * whenever scale needs re-establishing after the underlying geometry
+   * changes shape (after a distortion correction - see
+   * applyDistortionToScene() - and after toggling raw/corrected import -
+   * see toggleRawImport()). No-op if there are no loaded draws. */
+  private recomputeFixedScale(): void {
+    if (this.loadedDraws.length === 0) return;
     let overall: Bounds = this.loadedDraws[0].bounds;
     for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
     const size = overall.max.clone().sub(overall.min);
-    this.fixedScale = computeNormalizationScale(Math.max(size.x, size.y, size.z));
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const importOpts = this.appConfig.config.importOptions;
+    const unitScale =
+      (importOpts.captureUnitSize || 1) * ((UNIT_CONVERSION as Record<string, number>)[importOpts.captureUnitUnit] ?? 1);
+    const clampScale = computeNormalizationScale(maxDim * unitScale, {
+      forceMax: importOpts.forceMaxSceneSize,
+      maxSpan: importOpts.maxSceneSize,
+    });
+    this.fixedScale = unitScale * clampScale;
+  }
 
+  /** Flips the whole scene between the RAW imported posed geometry
+   * (draw.originalPosedPositions, exactly as loaded) and the last-applied
+   * distortion correction (appliedDistortion - set by
+   * applyDistortionToScene(), whether that ran automatically for an
+   * IntelGPA import or manually via "Recalculate correction"). Lets you
+   * compare the two without re-fitting or re-dropping files each time.
+   * No-op if no correction has been computed yet for the current scene. */
+  private toggleRawImport(): void {
+    if (!this.appliedDistortion || this.loadedDraws.length === 0) return;
+
+    if (this.showingRawImport) {
+      // Re-applies the SAME distortion object (calculateDistortionMatrix
+      // isn't re-run) - just restores the corrected positions.
+      this.applyDistortionToScene(this.appliedDistortion);
+      return;
+    }
+
+    for (const draw of this.loadedDraws) {
+      if (draw.originalPosedPositions === null) continue;
+      draw.geometryData.positions = draw.originalPosedPositions.slice();
+      draw.bounds = computeBounds(draw.geometryData.positions);
+      draw.diagonal = boundsDiagonal(draw.bounds);
+    }
+    this.recomputeFixedScale();
     this.rebuildVisibleScene();
+    this.showingRawImport = true;
+    this.updateToggleRawImportBtn();
+  }
+
+  /** Syncs the toggle button's visibility/label/pressed state to
+   * appliedDistortion/showingRawImport - called whenever either changes
+   * (applyDistortionToScene(), toggleRawImport(), and the full-reload
+   * reset in reconstructScene()). */
+  private updateToggleRawImportBtn(): void {
+    const btn = this.elements.toolsMenu.toggleRawImportBtn;
+    // const hasDistortion = this.appliedDistortion !== null;
+    // btn.classList.toggle("hidden", !hasDistortion);
+    // btn.classList.toggle("active", this.showingRawImport);
+    btn.textContent = this.showingRawImport ? "Enable distortion correction" : "Disable distortion correction";
+  }
+
+  /** Fits the matrix-based transform-correction from the marked "scale
+   * reference" object's posed/non-posed vertex pair (geometryData/
+   * previewGeometryData - see loadDraw()) and broadcasts it to every
+   * loaded draw via applyDistortionToScene() above. */
+  private recalculateTransformCorrection(): void {
+    if (this.loadedDraws.length === 0) {
+      this.setStatus("Reconstruct a scene first.");
+      return;
+    }
+    if (this.scaleReferenceIndex === null) {
+      return;
+    }
+
+    const handedness = this.handednessSelect.value as HandednessMode;
+
+    const referenceObject = this.loadedDraws[this.scaleReferenceIndex];
+    let distortion;
+    try {
+      distortion = calculateDistortionMatrix(
+        { geometryData: { positions: referenceObject.originalPosedPositions }, previewGeometryData: referenceObject.previewGeometryData },
+        { handedness },
+      );
+    } catch (e) {
+      return;
+    }
+
+    const { corrected, skipped } = this.applyDistortionToScene(distortion);
+
+    if (corrected === 0) {
+      this.setStatus("No objects have a separate posed mesh to correct - nothing to do.");
+      return;
+    }
 
     const statusParts = [`Applied per-object distortion correction to ${corrected} object(s)`];
     if (skipped > 0) statusParts.push(`${skipped} skipped (no separate posed mesh)`);
-    if (failures.length > 0) statusParts.push(`${failures.length} failed (see console)`);
     this.setStatus(statusParts.join(", ") + ".");
   }
 

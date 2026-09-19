@@ -1,4 +1,4 @@
-import { UNITS } from '../../util/const.unit-conversion';
+import { AxisDirection } from '../../types/axis-direction.type';
 import { fakeManifest, loadManifests } from "../../manifest";
 import template from './cmp.capture-importer.html?raw';
 import { RenderPassList } from '../common/render-pass/cmp.render-pass-list';
@@ -7,6 +7,8 @@ import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
 import { collectFromDrop, VirtualFileSystem } from '../../filesystem';
+import type { AffineDistortionResult } from '../../mesh-tools/calculator';
+import { UNITS } from '../../util/const.unit-conversion';
 
 enum ImportType {
   Unknown = 0,
@@ -19,12 +21,23 @@ export class CaptureImporter extends HTMLElement {
 
   private appConfig: Config;
   private vfs!: VirtualFileSystem;
+  /** Set once processIntelGPAImport() successfully matches a
+   * landmark-source.obj/landmark-output.obj pair (see
+   * intel-gpa-import-helpers.ts) - carried through to reconstructScene()'s
+   * event detail so the main app can auto-apply it instead of requiring
+   * the user to mark a scale-reference object and click "Fix distortion"
+   * themselves. Cleared on a plain RenderDoc-only import (see
+   * handleFiles()) so a stale value from an earlier import attempt in the
+   * same session can't leak into an unrelated one. */
+  private intelGpaDistortion: AffineDistortionResult | null = null;
 
   private elements: {
     dropzoneOuter: HTMLElement;
     dropzone: HTMLElement;
     folderInput: HTMLInputElement;
 
+    dropzonesContainer: HTMLElement;
+    readingFilesScreen: HTMLElement;
     importProcessingSection: HTMLElement;
 
     // import options
@@ -37,6 +50,10 @@ export class CaptureImporter extends HTMLElement {
     enforceInitialScaleLimitCheckbox: HTMLInputElement;
     initialScaleLimitInput: HTMLInputElement;
 
+    // orientation
+    upAxis: HTMLSelectElement;
+    forwardAxis: HTMLSelectElement;
+    rightAxis: HTMLSelectElement;
 
     reconstructBtn: HTMLButtonElement;
     recalculateCorrectionBtn: HTMLButtonElement;
@@ -85,6 +102,8 @@ export class CaptureImporter extends HTMLElement {
    */
   private registerElements() {
     this.elements.dropzoneOuter = this.querySelector("#capture-importer-container") as HTMLElement;
+    this.elements.dropzonesContainer = this.querySelector("#capture-importer-dropzones-container") as HTMLElement;
+    this.elements.readingFilesScreen = this.querySelector("#capture-importer-reading-files-screen") as HTMLElement;
 
     // individual dropzones and file inputs
     this.elements.dropzone = this.querySelector("#capture-importer-dropzone") as HTMLElement;
@@ -118,6 +137,10 @@ export class CaptureImporter extends HTMLElement {
     this.elements.maxSceneSizeInput = this.querySelector("#capture-importer-max-scene-size") as HTMLInputElement;
     this.elements.enforceInitialScaleLimitCheckbox = this.querySelector("#capture-importer-enforce-initial-scale-limit") as HTMLInputElement;
     this.elements.initialScaleLimitInput = this.querySelector("#capture-importer-initial-scale-limit") as HTMLInputElement;
+
+    this.elements.upAxis = this.querySelector("#capture-importer-up-axis") as HTMLSelectElement;
+    this.elements.forwardAxis = this.querySelector("#capture-importer-forward-axis") as HTMLSelectElement;
+    this.elements.rightAxis = this.querySelector("#capture-importer-right-axis") as HTMLSelectElement;
 
     // reconstruct button
     this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
@@ -285,7 +308,21 @@ export class CaptureImporter extends HTMLElement {
       this.elements.initialScaleLimitInput.addEventListener("change", () => {
         this.appConfig.config.importOptions.initialScaleLimit = Number(this.elements.initialScaleLimitInput.value);
       });
+
+      this.elements.upAxis.addEventListener("change", () => {
+        this.setInputGeometryOrientation('up', this.elements.upAxis.value);
+      });
+      this.elements.forwardAxis.addEventListener("change", () => {
+        this.setInputGeometryOrientation('forward', this.elements.forwardAxis.value);
+      });
+      this.elements.rightAxis.addEventListener("change", () => {
+        this.setInputGeometryOrientation('right', this.elements.rightAxis.value);
+      });
     }
+  }
+
+  private setInputGeometryOrientation(axis: 'up' | 'forward' | 'right', value: string): void {
+    this.appConfig.config.importOptions.inputGeometryOrientation[axis] = value as AxisDirection;
   }
 
   /**
@@ -302,7 +339,8 @@ export class CaptureImporter extends HTMLElement {
           detail: {
             vfs: this.vfs,
             manifests: this.elements.renderPassList.manifests,
-            importOptions: this.appConfig.config.importOptions
+            importOptions: this.appConfig.config.importOptions,
+            intelGpaDistortion: this.intelGpaDistortion
           },
           bubbles: true,
           composed: true
@@ -407,6 +445,11 @@ export class CaptureImporter extends HTMLElement {
     this.intelGPAImports[dropzone] = null;
   }
 
+  private showReadingFilesScreen(visible: boolean) {
+    this.elements.readingFilesScreen.classList.toggle('hidden', !visible);
+    this.elements.dropzonesContainer.classList.toggle('hidden', visible);
+  }
+
   /**
    * Processes the Intel GPA import once all required files are present
    */
@@ -418,6 +461,8 @@ export class CaptureImporter extends HTMLElement {
       }
     }
 
+    this.showReadingFilesScreen(true);
+
     const fileRoles = await identifyIntelGPAImport(
       this.intelGPAImports['landmark-source']!,
       this.intelGPAImports['landmark-output']!,
@@ -426,13 +471,24 @@ export class CaptureImporter extends HTMLElement {
 
     if (!fileRoles) {
       // TODO: throw an error or something
+      this.showReadingFilesScreen(false);
       console.warn('Failed to identify Intel GPA import roles');
       return;
     }
 
+
+
+    // Computed once from the dropped landmark pair - see
+    // intel-gpa-import-helpers.ts / mesh-tools/landmark-matching.ts.
+    // Picked up by reconstructScene() (see its event detail below) so it
+    // gets applied automatically instead of through the manual
+    // scale-reference-object flow.
+    this.intelGpaDistortion = fileRoles.distortion;
+
     const loaded = await fakeManifest(this.intelGPAImports['scene']!.file);
 
     if (!loaded) {
+      this.showReadingFilesScreen(false);
       this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
       return;
     }
@@ -444,6 +500,8 @@ export class CaptureImporter extends HTMLElement {
     for (const dropzone in this.intelGPADropzones) {
       this.resetIntelGPADropzone(dropzone as IntelGPADropzone);
     }
+
+    this.showReadingFilesScreen(false);
   }
 
   /**
@@ -493,6 +551,12 @@ export class CaptureImporter extends HTMLElement {
     }
 
     // if we came this far, this should be a Renderdoc Scene Exporter folder.
+    // A plain RenderDoc-only import has no landmark pair to auto-apply -
+    // drop any distortion left over from an earlier IntelGPA import
+    // attempt this session, so it doesn't get applied to an unrelated scene.
+    this.showReadingFilesScreen(true);
+    this.intelGpaDistortion = null;
+
     const vfs = new VirtualFileSystem();
     for (const { path, file } of entries) {
      vfs.set(path, file);
@@ -501,6 +565,7 @@ export class CaptureImporter extends HTMLElement {
     const loaded = await loadManifests(vfs);
     if (!loaded) {
       this.setStatus("No manifest.json found in the dropped folder - is this a SceneExporter export?");
+      this.showReadingFilesScreen(false);
       return;
     }
     this.vfs = loaded.vfs;
@@ -508,6 +573,7 @@ export class CaptureImporter extends HTMLElement {
     console.log("Loaded manifests:", loaded);
 
     this.elements.renderPassList.manifests = loaded.manifests;
+    this.showReadingFilesScreen(false);
     this.elements.importProcessingSection.style.display = "block";
 
     // this.loaded = loaded;

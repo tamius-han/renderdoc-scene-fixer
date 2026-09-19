@@ -53,8 +53,19 @@ function easeInOutCubic(t: number): number {
 export const MIN_SPAN = 10;
 export const MAX_SPAN = 10000;
 
-export function computeNormalizationScale(maxDim: number): number {
-  if (maxDim > MAX_SPAN) return MAX_SPAN / maxDim;
+export function computeNormalizationScale(
+  maxDim: number,
+  options?: { forceMax?: boolean; maxSpan?: number },
+): number {
+  const forceMax = options?.forceMax ?? true;
+  const maxSpan = options?.maxSpan ?? MAX_SPAN;
+  // The upper clamp is the user-configurable "enforce max scene size"
+  // option (see importOptions.forceMaxSceneSize/maxSceneSize) - only
+  // applied when explicitly requested. The lower clamp always applies:
+  // it's not about scene-size preference, it's what keeps a tiny scene
+  // from falling below the camera's near-plane precision (see MIN_SPAN's
+  // comment above).
+  if (forceMax && maxDim > maxSpan) return maxSpan / maxDim;
   if (maxDim > 0 && maxDim < MIN_SPAN) return MIN_SPAN / maxDim;
   return 1;
 }
@@ -799,6 +810,63 @@ export class SceneManager {
     // have left `up` pointing along a horizontal axis - reset it before
     // this lookAt() so this always reproduces the same default framing
     // regardless of whatever view was active beforehand.
+    this.camera.up.set(0, 1, 0);
+    this.updateCamera();
+    this.camera.lookAt(this.target);
+  }
+
+  /** Places the camera once, right after import (see reconstructScene()) -
+   * distinct from frameOnScene(), which resets to the class's own default
+   * viewing angle centered on the box's center and is reachable any time
+   * via "recenter cam". This instead always sits on the diagonal through
+   * the +x/+y/+z octant and always looks through the scene ORIGIN (not
+   * the bounding box's center - an off-center import should still be
+   * viewed from a predictable, origin-relative angle), placed far enough
+   * back that a sphere centered on the origin and reaching every corner
+   * of the scene's bounding box is fully inside the frustum, times
+   * `padding`. If `maxDistance` is given (the "enforce initial scale
+   * limit" option), the camera is pulled in to at most that distance -
+   * it's fine, and expected, for it to end up closer. */
+  placeCameraForImport(padding: number = 1.2, maxDistance?: number): void {
+    const box = new THREE.Box3().setFromObject(this.scene);
+    if (box.isEmpty()) return;
+    this.viewTransition = null;
+
+    // Farthest distance from the ORIGIN (not the box center) to any
+    // corner of the bounding box - the radius of the smallest
+    // origin-centered sphere that fully contains the scene.
+    let radius = 0;
+    for (let xi = 0; xi < 2; xi++) {
+      for (let yi = 0; yi < 2; yi++) {
+        for (let zi = 0; zi < 2; zi++) {
+          const corner = new THREE.Vector3(
+            xi ? box.max.x : box.min.x,
+            yi ? box.max.y : box.min.y,
+            zi ? box.max.z : box.min.z,
+          );
+          radius = Math.max(radius, corner.length());
+        }
+      }
+    }
+    if (radius <= 0) radius = MIN_SPAN * 0.5;
+
+    // Fit that sphere within whichever of the vertical/horizontal FOV is
+    // tighter for the current aspect ratio - same reasoning as the
+    // resource-panel thumbnail's computeFitDistance(), just for a sphere
+    // (distance*sin(halfAngle) = radius) instead of a flat plane.
+    const vFov = (this.camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
+    const limitingFov = Math.min(vFov, hFov);
+    let distance = radius / Math.sin(limitingFov / 2);
+    distance *= padding;
+
+    if (maxDistance !== undefined && Number.isFinite(maxDistance) && maxDistance > 0) {
+      distance = Math.min(distance, maxDistance);
+    }
+
+    const dir = new THREE.Vector3(1, 1, 1).normalize();
+    this.target.set(0, 0, 0);
+    this.offset.copy(dir).multiplyScalar(distance);
     this.camera.up.set(0, 1, 0);
     this.updateCamera();
     this.camera.lookAt(this.target);
