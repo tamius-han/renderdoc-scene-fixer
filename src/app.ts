@@ -2599,32 +2599,18 @@ export class SceneViewerApp {
         material = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, flatShading: true, side: THREE.DoubleSide });
       }
 
-      const mesh = new THREE.Mesh(geometry, material);
-      let bounds = computeBounds(sourceData.positions);
+      // No per-mesh repositioning here, for either pose mode - each mesh
+      // keeps exactly the relative offset to the others that its own
+      // source data gives it (whether that's real shared scene placement
+      // for posed data, or whatever relative offset the non-posed/preview
+      // export happens to carry). It's the SELECTION AS A WHOLE that gets
+      // centered at the origin, as one rigid move applied once below to
+      // contentGroup (built from the union of every individual mesh's
+      // bounds, computed here without moving anything) - see the
+      // centering step right after this loop.
+      contentGroup.add(new THREE.Mesh(geometry, material));
 
-      if (poseMode === "non-posed") {
-        // Non-posed data has no coherent shared coordinate system across
-        // multiple draws - each was authored around its own arbitrary
-        // local origin (see this method's doc comment) - so trusting
-        // those raw positions when several are previewed together can put
-        // them arbitrarily far apart: the combined bounding box (and
-        // therefore the auto-fit camera below) ends up dominated by the
-        // empty gap between them rather than the meshes themselves,
-        // making every individual mesh look tiny instead of filling the
-        // frame. Moving each mesh so ITS OWN bounding-box center sits at
-        // the shared origin sidesteps that - every mesh's original origin
-        // is discarded rather than trusted, so the combined bounding box
-        // always reflects actual geometry (bounded by the largest single
-        // mesh) instead of an arbitrary spread between authoring origins.
-        // Posed data is left exactly where it is: those positions
-        // describe one real, spatially-coherent scene, and moving them
-        // would break that relative placement.
-        const meshCenter = boundsCenter(bounds);
-        mesh.position.set(-meshCenter.x, -meshCenter.y, -meshCenter.z);
-        bounds = { min: bounds.min.clone().sub(meshCenter), max: bounds.max.clone().sub(meshCenter) };
-      }
-
-      contentGroup.add(mesh);
+      const bounds = computeBounds(sourceData.positions);
       overallBounds = overallBounds ? unionBounds(overallBounds, bounds) : bounds;
     }
     // Empty selection shouldn't be reachable in practice, but fall back to
@@ -2635,8 +2621,8 @@ export class SceneViewerApp {
     const center = boundsCenter(overallBounds);
     const rawSize = overallBounds.max.clone().sub(overallBounds.min);
 
-    // The whole assembly (posed data as one coherent scene, non-posed data
-    // already re-centered per-mesh above) is centered at the origin, then
+    // The whole assembly (relative offsets between meshes untouched - see
+    // the loop above) is centered at the origin as ONE rigid move, then
     // scaled down (never up) to fit inside a 100x100x100 cube if it
     // doesn't already - applied as contentGroup's own position/scale (not
     // baked into the geometry) so it's purely a property of this preview
