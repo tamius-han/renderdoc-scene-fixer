@@ -3,7 +3,7 @@ import { parseOBJ } from '../../parsers/obj';
 import { FileInfo } from '../../types/file-info.interface';
 import { IntelGPADropzone } from './intel-gpa-dropzone.type';
 
-const landmarkSources = ['landmark-source', 'ls', 'landmark-src'];
+const landmarkSources = ['landmark-source', 'ls', 'landmark-src', 'li', 'landmark-in', 'landmark-input'];
 const landmarkOutputs = ['landmark-output', 'lo', 'landmark-out'];
 /**
  * Guesses the IntelGPA import target based on the filename.
@@ -17,11 +17,15 @@ export function guessIntelGPAImportTargetFromFilename(entry: FileInfo): IntelGPA
   if (!filename) {
     return undefined;
   }
-  if (landmarkSources.includes(filename)) {
-    return 'landmark-source';
+  for (const lsn of landmarkSources) {
+    if (filename.endsWith(lsn)) {
+      return 'landmark-source';
+    }
   }
-  if (landmarkOutputs.includes(filename)) {
-    return 'landmark-output';
+  for (const lon of landmarkOutputs) {
+    if (filename.endsWith(lon)) {
+      return 'landmark-output';
+    }
   }
   return 'scene';
 }
@@ -37,6 +41,7 @@ export function guessIntelGPAImportTargetsFromFilenames(entries: FileInfo[]): { 
     entry,
     target: guessIntelGPAImportTargetFromFilename(entry)
   }));
+  console.info('guessing filenames — initial guess:', droppedFiles, 'from', entries);
 
   const mappedOutput: { [key in IntelGPADropzone]: FileInfo } = {} as any;    // 'as any' is there to shut up ts about empty object, we know it's gonna get filled
 

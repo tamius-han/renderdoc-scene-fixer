@@ -13,6 +13,8 @@ export interface AppConfiguration {
     fillHoles: boolean;
     resizeExportedObject: boolean;
     approximateHeight: number;
+
+    exportType: 'output' | 'input';
   };
 
   objectFiltering: {
@@ -56,6 +58,7 @@ export class Config {
       fillHoles: true,
       resizeExportedObject: true,
       approximateHeight: 100,
+      exportType: 'output',
     },
 
     objectFiltering: {

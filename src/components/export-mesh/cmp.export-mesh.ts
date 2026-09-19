@@ -13,6 +13,9 @@ export class ExportMesh extends Overlay {
     resizeExportedCheckbox: HTMLInputElement;
     approximateHeightInput: HTMLInputElement;
     startExportButton: HTMLButtonElement;
+
+    exportPosedButton: HTMLButtonElement;
+    exportOriginalButton: HTMLButtonElement;
   } = {} as any;
 
   constructor() {
@@ -34,6 +37,8 @@ export class ExportMesh extends Overlay {
     this.elements.resizeExportedCheckbox = this.element.querySelector('#export-options-resize-exported') as HTMLInputElement;
     this.elements.approximateHeightInput = this.element.querySelector('#export-options-approximate-height') as HTMLInputElement;
     this.elements.startExportButton = this.element.querySelector('#export-options-start-export-btn') as HTMLButtonElement;
+    this.elements.exportPosedButton = this.element.querySelector('#export-options-export-output') as HTMLButtonElement;
+    this.elements.exportOriginalButton = this.element.querySelector('#export-options-export-input') as HTMLButtonElement;
 
     // load initial values from appConfig
     this.elements.exportTexturesCheckbox.checked = this.appConfig.config.exportOptions.exportTextures;
@@ -44,16 +49,34 @@ export class ExportMesh extends Overlay {
     this.elements.approximateHeightInput.value = this.appConfig.config.exportOptions.approximateHeight.toString();
     this.elements.approximateHeightInput.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
 
+    this.elements.exportPosedButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'output');
+    this.elements.exportOriginalButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'input');
+
     this.elements.exportTexturesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.resizeExportedCheckbox.addEventListener('change', () => this.updateExportOptions());
-    this.elements.approximateHeightInput.addEventListener('input', () => this.updateExportOptions());
 
     this.elements.startExportButton.addEventListener('click', () => this.startExport());
+    this.elements.exportPosedButton.addEventListener('click', () => this.updateExportType('output'));
+    this.elements.exportOriginalButton.addEventListener('click', () => this.updateExportType('input'));
+  }
+
+  updateExportType(type: 'output' | 'input') {
+    if (type === 'output') {
+      this.elements.exportPosedButton.classList.add('active');
+      this.elements.exportOriginalButton.classList.remove('active');
+    } else {
+      this.elements.exportPosedButton.classList.remove('active');
+      this.elements.exportOriginalButton.classList.add('active');
+    }
+    this.appConfig.config.exportOptions.exportType = type;
+
+    this.elements.approximateHeightInput.addEventListener('input', () => this.updateExportOptions());
   }
 
   updateExportOptions() {
+    this.appConfig.config.exportOptions.exportType = this.elements.exportPosedButton.classList.contains('active') ? 'output' : 'input';
     this.appConfig.config.exportOptions.exportTextures = this.elements.exportTexturesCheckbox.checked;
     this.appConfig.config.exportOptions.splitLooseParts = this.elements.splitLoosePartsCheckbox.checked;
     this.appConfig.config.exportOptions.fillHoles = this.elements.fillHolesCheckbox.checked;
