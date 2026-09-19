@@ -54,10 +54,13 @@ export class ExportMesh extends Overlay {
     this.elements.resizeExportedCheckbox.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
     this.elements.resizeExportedCheckbox.checked = this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.value = this.appConfig.config.exportOptions.approximateHeight.toString();
+    this.elements.approximateHeightInput.disabled = !this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
 
     this.elements.exportPosedButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'output');
     this.elements.exportOriginalButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'input');
+
+    this.syncDependentDisabledStates();
 
     this.elements.exportTexturesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
@@ -67,6 +70,30 @@ export class ExportMesh extends Overlay {
     this.elements.startExportButton.addEventListener('click', () => this.startExport());
     this.elements.exportPosedButton.addEventListener('click', () => this.updateExportType('output'));
     this.elements.exportOriginalButton.addEventListener('click', () => this.updateExportType('input'));
+  }
+
+  /** Keeps checkboxes that only make sense as a refinement of ANOTHER
+   * checkbox in sync with that other one's current state:
+   * "Fill holes" only makes sense when "Split by loose parts" is also
+   * on - hole detection/filling runs per split-out part (see fill.ts),
+   * and there's no such thing as "the hole in this whole, unsplit
+   * object". "Approximate height" only matters when "Resize exported
+   * object" is on. Both dependent controls get genuinely disabled (not
+   * just styled - see the `.disabled` class alongside), and are forced
+   * unchecked/cleared-looking whenever their prerequisite turns off, so
+   * the UI can't be left showing a checked-but-inert checkbox. Called
+   * once from setupInteraction() for the initial state loaded from
+   * config, and again from updateExportOptions() every time any checkbox
+   * changes. */
+  private syncDependentDisabledStates(): void {
+    const splitEnabled = this.elements.splitLoosePartsCheckbox.checked;
+    this.elements.fillHolesCheckbox.disabled = !splitEnabled;
+    this.elements.fillHolesCheckbox.classList.toggle('disabled', !splitEnabled);
+    if (!splitEnabled) this.elements.fillHolesCheckbox.checked = false;
+
+    const resizeEnabled = this.elements.resizeExportedCheckbox.checked;
+    this.elements.approximateHeightInput.disabled = !resizeEnabled;
+    this.elements.approximateHeightInput.classList.toggle('disabled', !resizeEnabled);
   }
 
   /** Called by SceneViewerApp right before show(), so this dialog knows
@@ -95,6 +122,9 @@ export class ExportMesh extends Overlay {
     this.appConfig.config.exportOptions.exportType = this.elements.exportPosedButton.classList.contains('active') ? 'output' : 'input';
     this.appConfig.config.exportOptions.exportTextures = this.elements.exportTexturesCheckbox.checked;
     this.appConfig.config.exportOptions.splitLooseParts = this.elements.splitLoosePartsCheckbox.checked;
+
+    this.syncDependentDisabledStates(); // may force-uncheck fillHoles/clear approximateHeight's enabled state above
+
     this.appConfig.config.exportOptions.fillHoles = this.elements.fillHolesCheckbox.checked;
     this.appConfig.config.exportOptions.resizeExportedObject = this.elements.resizeExportedCheckbox.checked;
 

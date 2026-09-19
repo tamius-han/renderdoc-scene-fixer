@@ -13,18 +13,20 @@ import {
   type Bounds,
   type GeometryArrays,
 } from "./scene/mesh-builder";
-import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
+import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from "./scene/scene-manager";
+import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
 import { calculateDistortionMatrix, type AffineDistortionResult, type HandednessMode } from "./mesh-tools/calculator";
+import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
+import { ExportMesh } from './components/export-mesh/cmp.export-mesh';
 import { Config, type AppConfiguration } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
-import { remapObjOrientation } from './util/axis-orientation';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
@@ -832,16 +834,7 @@ export class SceneViewerApp {
       const previewText = await this.vfs.readText(previewPath);
       if (previewText) {
         const previewObj = parseOBJ(previewText);
-        // Non-posed/bind-pose meshes are artist-authored source assets,
-        // which can use a different up/forward/right convention than the
-        // app's own (see remapObjOrientation()'s doc comment) - unlike the
-        // POSED mesh above, which comes from GPU capture and is assumed
-        // already in the app's frame, so it's left alone.
-        const remappedPreviewObj = remapObjOrientation(
-          previewObj,
-          this.appConfig.config.importOptions.inputGeometryOrientation,
-        );
-        previewGeometryData = objToGeometryArrays(remappedPreviewObj);
+        previewGeometryData = objToGeometryArrays(previewObj);
       }
     }
 
@@ -2635,33 +2628,37 @@ export class SceneViewerApp {
    * downloads a .glb from whichever draws the dialog was told about (see
    * ExportMesh.setSelectedIndices(), set from the fixExport handler in
    * setupMenu()) using the dialog's own pending export options - the same
-   * two options renderExportMeshPreview() already previews live:
-   * exportType picks posed (draw.geometryData) vs non-posed
-   * (draw.previewGeometryData) vertex data, and exportTextures picks the
-   * draw's own (possibly textured) material vs the shared flat grey
-   * untextured one (see getUntexturedMaterial()) - buildGlbBlob() already
-   * exports an untextured MeshBasicMaterial as a flat baseColorFactor
-   * with no baseColorTexture, so reusing that one material is enough to
-   * get a textureless export, no separate "strip the texture" step
-   * needed.
+   * options renderExportMeshPreview() already previews live:
+   * - exportType picks posed (draw.geometryData) vs non-posed
+   *   (draw.previewGeometryData) vertex data.
+   * - exportTextures picks the draw's own (possibly textured) material vs
+   *   the shared flat grey untextured one (see getUntexturedMaterial()) -
+   *   buildGlbBlob() already exports an untextured MeshBasicMaterial as a
+   *   flat baseColorFactor with no baseColorTexture, so reusing that one
+   *   material is enough to get a textureless export, no separate "strip
+   *   the texture" step needed.
+   * - splitLooseParts/fillHoles run each draw's geometry through fill.ts's
+   *   splitGeometryByLooseParts()/groupFixedMeshes() (see
+   *   buildExportEntriesForDraw()) - with splitLooseParts off, each draw
+   *   exports as a single mesh exactly as loaded ("Export should export
+   *   meshes as is"), and fillHoles is forced off with it (see
+   *   ExportMesh.syncDependentDisabledStates()) - a hole is only a
+   *   meaningful concept per split-out part.
+   * - resizeExportedObject uniformly rescales the WHOLE exported selection
+   *   (after everything above) so its bounding box is approximateHeight
+   *   tall along Y (see applyExportResize()), overriding whatever scale
+   *   the scene would otherwise have exported at.
    *
-   * splitLooseParts/fillHoles/resizeExportedObject/approximateHeight are
-   * also on the dialog but have no corresponding mesh-processing pass
-   * implemented anywhere in this codebase yet (hole-filling and
-   * connected-component splitting are both nontrivial geometry
-   * algorithms), so they're read from exportOptions but not yet acted on
-   * here - only exportType and exportTextures actually change the
-   * output right now.
-   *
-   * For a non-posed export, the scene's overall orientation/scale
-   * (ground-plane leveling, up-axis, fixedScale - see
-   * exportSelectedMeshesAsGlb()'s own doc comment) is deliberately NOT
-   * baked in: that transform describes how POSED meshes sit relative to
-   * each other in the reconstructed scene, but non-posed/original meshes
-   * were never placed relative to each other to begin with (see
-   * attachMultiMeshPreview()'s doc comment) - baking a scene-level leveling
-   * transform onto them would just be wrong, so they're exported as
-   * authored (identity transform) instead. */
+   * For a non-posed export, the scene's overall orientation (ground-plane
+   * leveling, up-axis - see exportSelectedMeshesAsGlb()'s own doc comment)
+   * is deliberately NOT baked in: that describes how POSED meshes sit
+   * relative to each other in the reconstructed scene, but non-posed/
+   * original meshes were never placed relative to each other to begin
+   * with (see attachMultiMeshPreview()'s doc comment) - baking a
+   * scene-level leveling rotation onto them would just be wrong, so
+   * they're exported as authored (identity rotation) instead; resize (if
+   * requested) still applies on top of that identity rotation the same
+   * way it does for posed exports. */
   private handleStartExport(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): void {
     const draws = selectedIndices
       .map((index) => ({ index, draw: this.loadedDraws[index] }))
@@ -2672,27 +2669,131 @@ export class SceneViewerApp {
     }
 
     const posed = exportOptions.exportType === "output";
-    const entries: ExportMeshEntry[] = draws.map(({ index, draw }) => {
-      const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
-      return {
-        name: `Draw #${index} (eid ${draw.draw.eventId})`,
-        positions: sourceData.positions,
-        normals: sourceData.normals,
-        uvs: sourceData.uvs,
-        bounds: posed ? draw.bounds : computeBounds(sourceData.positions),
-        material: exportOptions.exportTextures ? draw.material : this.getUntexturedMaterial(),
-      };
-    });
+    const entries: ExportMeshEntry[] = draws.flatMap(({ index, draw }) =>
+      this.buildExportEntriesForDraw(index, draw, posed, exportOptions),
+    );
 
     const group = this.sceneManager.getContentGroup();
     const sceneTransform: ExportSceneTransform = posed
       ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
       : { quaternion: new THREE.Quaternion(), scale: 1 };
 
+    if (exportOptions.resizeExportedObject) {
+      this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
+    }
+
     const blob = buildGlbBlob(entries, sceneTransform);
     const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
     this.downloadBlob(blob, fileName);
     this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
+  }
+
+  /** Builds the ExportMeshEntry list for ONE draw - the per-draw half of
+   * handleStartExport() above, applying splitLooseParts/fillHoles (see
+   * fill.ts). With splitLooseParts off, this is just the single original
+   * entry, unchanged from before. With it on, the draw's geometry is split
+   * into its connected ("loose") parts via splitGeometryByLooseParts(),
+   * and - if fillHoles is also on - each part is run through
+   * groupFixedMeshes(), which fills any boundary-edge holes it finds and
+   * reports what happened to it; that status is appended to the exported
+   * name (e.g. "Draw #3 (eid 12) part 2 [filled]"), i.e. "group and name
+   * mesh objects by their status", the same idea as the old fill.js's
+   * groupFixedMeshes_safe(). Every resulting part shares the draw's one
+   * material - splitting/filling only ever adds geometry, never changes
+   * what it's textured with. */
+  private buildExportEntriesForDraw(
+    index: number,
+    draw: LoadedDraw,
+    posed: boolean,
+    exportOptions: AppConfiguration["exportOptions"],
+  ): ExportMeshEntry[] {
+    const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
+    const material = exportOptions.exportTextures ? draw.material : this.getUntexturedMaterial();
+    const baseName = `Draw #${index} (eid ${draw.draw.eventId})`;
+
+    if (!exportOptions.splitLooseParts) {
+      return [
+        {
+          name: baseName,
+          positions: sourceData.positions,
+          normals: sourceData.normals,
+          uvs: sourceData.uvs,
+          bounds: posed ? draw.bounds : computeBounds(sourceData.positions),
+          material,
+        },
+      ];
+    }
+
+    const partGeometries = splitGeometryByLooseParts(sourceData);
+    const namedParts: NamedMeshPart[] = partGeometries.map((geometry, i) => ({
+      name: partGeometries.length > 1 ? `${baseName} part ${i + 1}` : baseName,
+      geometry,
+    }));
+
+    const parts: (NamedMeshPart & { status?: MeshFixStatus })[] = exportOptions.fillHoles
+      ? groupFixedMeshes(namedParts)
+      : namedParts;
+
+    return parts.map((part) => ({
+      name: part.status ? `${part.name} [${part.status}]` : part.name,
+      positions: part.geometry.positions,
+      normals: part.geometry.normals,
+      uvs: part.geometry.uvs,
+      bounds: computeBounds(part.geometry.positions),
+      material,
+    }));
+  }
+
+  /** Uniformly rescales `sceneTransform.scale` (mutated in place - the
+   * entries themselves are untouched, since the single root-node scale
+   * already applies to all of them) so the combined bounding box of every
+   * entry, AFTER sceneTransform's own rotation, is `targetHeight` tall
+   * along Y - "as tall as export-options-approximate-height". Rotation is
+   * applied first because that's the orientation the exported file will
+   * actually be viewed/printed in - resizing in the mesh's own unrotated
+   * space could make the WRONG axis come out at the target height.
+   * Rotating each entry's full 8-corner bounding box (not just its
+   * min/max points) is necessary because an axis-aligned box's own
+   * min/max corners don't map to the rotated box's min/max after an
+   * arbitrary rotation - only the union of all 8 transformed corners
+   * does. Leaves sceneTransform.scale untouched if the combined geometry
+   * has ~0 height (an empty entry list, or geometry perfectly flat along
+   * Y) to avoid dividing by ~0. */
+  private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {
+    let combined: Bounds | null = null;
+    for (const entry of entries) {
+      const bounds = computeBounds(entry.positions);
+      combined = combined ? unionBounds(combined, bounds) : bounds;
+    }
+    if (!combined) return;
+
+    const corners = [
+      new THREE.Vector3(combined.min.x, combined.min.y, combined.min.z),
+      new THREE.Vector3(combined.min.x, combined.min.y, combined.max.z),
+      new THREE.Vector3(combined.min.x, combined.max.y, combined.min.z),
+      new THREE.Vector3(combined.min.x, combined.max.y, combined.max.z),
+      new THREE.Vector3(combined.max.x, combined.min.y, combined.min.z),
+      new THREE.Vector3(combined.max.x, combined.min.y, combined.max.z),
+      new THREE.Vector3(combined.max.x, combined.max.y, combined.min.z),
+      new THREE.Vector3(combined.max.x, combined.max.y, combined.max.z),
+    ];
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const corner of corners) {
+      corner.applyQuaternion(sceneTransform.quaternion);
+      if (corner.y < minY) minY = corner.y;
+      if (corner.y > maxY) maxY = corner.y;
+    }
+
+    const rotatedHeight = maxY - minY;
+    if (rotatedHeight < 1e-9) return;
+
+    // targetHeight is an absolute size, independent of whatever "natural"
+    // scale the reconstructed scene happened to end up at - this REPLACES
+    // sceneTransform.scale rather than multiplying it, discarding the
+    // previous scale (ground-plane/up-axis-driven, or 1 for a non-posed
+    // export) entirely rather than adjusting it.
+    sceneTransform.scale = targetHeight / rotatedHeight;
   }
 
   private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {
