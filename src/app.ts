@@ -13,8 +13,7 @@ import {
   type Bounds,
   type GeometryArrays,
 } from "./scene/mesh-builder";
-import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from "./scene/scene-manager";
-import { OrientationGizmo } from "./scene/orientation-gizmo";
+import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
@@ -23,9 +22,9 @@ import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from ".
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
-import { ExportMesh } from './components/export-mesh/cmp.export-mesh';
 import { Config, type AppConfiguration } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
+import { remapObjOrientation } from './util/axis-orientation';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
@@ -833,7 +832,16 @@ export class SceneViewerApp {
       const previewText = await this.vfs.readText(previewPath);
       if (previewText) {
         const previewObj = parseOBJ(previewText);
-        previewGeometryData = objToGeometryArrays(previewObj);
+        // Non-posed/bind-pose meshes are artist-authored source assets,
+        // which can use a different up/forward/right convention than the
+        // app's own (see remapObjOrientation()'s doc comment) - unlike the
+        // POSED mesh above, which comes from GPU capture and is assumed
+        // already in the app's frame, so it's left alone.
+        const remappedPreviewObj = remapObjOrientation(
+          previewObj,
+          this.appConfig.config.importOptions.inputGeometryOrientation,
+        );
+        previewGeometryData = objToGeometryArrays(remappedPreviewObj);
       }
     }
 

@@ -138,6 +138,10 @@ export class Config {
     if (typeof config.importOptions.maxSceneSize !== 'number') return false;
     if (typeof config.importOptions.forceInitialScaleLimit !== 'boolean') return false;
     if (typeof config.importOptions.initialScaleLimit !== 'number') return false;
+    if (!config.importOptions.inputGeometryOrientation) return false;
+    if (typeof config.importOptions.inputGeometryOrientation.up !== 'string') return false;
+    if (typeof config.importOptions.inputGeometryOrientation.forward !== 'string') return false;
+    if (typeof config.importOptions.inputGeometryOrientation.right !== 'string') return false;
     if (!config.objectFiltering) return false;
     if (typeof config.objectFiltering.hideLargestObjectsPercent !== 'number') return false;
     if (typeof config.canRecalculateDistortion !== 'boolean') return false;

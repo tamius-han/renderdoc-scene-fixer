@@ -8,7 +8,10 @@ import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
 import { collectFromDrop, VirtualFileSystem } from '../../filesystem';
 import type { AffineDistortionResult } from '../../mesh-tools/calculator';
+import { calculateLandmarkTransform } from '../../mesh-tools/landmark-matching';
 import { UNITS } from '../../util/const.unit-conversion';
+import { axisLetter, remapObjOrientation } from '../../util/axis-orientation';
+import type { ParsedOBJ } from '../../types';
 
 enum ImportType {
   Unknown = 0,
@@ -30,6 +33,14 @@ export class CaptureImporter extends HTMLElement {
    * handleFiles()) so a stale value from an earlier import attempt in the
    * same session can't leak into an unrelated one. */
   private intelGpaDistortion: AffineDistortionResult | null = null;
+  /** The raw (un-remapped) landmark-source.obj/landmark-output.obj pair
+   * behind intelGpaDistortion, kept so reconstructScene() (below) can
+   * re-remap the source side and re-fit the distortion against whatever
+   * the orientation settings are AT RECONSTRUCT TIME, without re-reading
+   * or re-identifying the dropped files. Cleared alongside
+   * intelGpaDistortion on a plain RenderDoc-only import - see
+   * handleFiles(). */
+  private intelGpaLandmarkObjs: { source: ParsedOBJ; output: ParsedOBJ } | null = null;
 
   private elements: {
     dropzoneOuter: HTMLElement;
@@ -255,6 +266,10 @@ export class CaptureImporter extends HTMLElement {
     this.elements.enforceInitialScaleLimitCheckbox.checked = this.appConfig.config.importOptions.forceInitialScaleLimit;
     this.elements.initialScaleLimitInput.value = this.appConfig.config.importOptions.initialScaleLimit as any;
 
+    this.elements.upAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.up;
+    this.elements.forwardAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.forward;
+    this.elements.rightAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.right;
+
     // disable appropriate fields
     {
       if (!this.elements.enforceMaxSceneSizeCheckbox.checked) {
@@ -321,8 +336,65 @@ export class CaptureImporter extends HTMLElement {
     }
   }
 
+  private axisSelectElement(axis: 'up' | 'forward' | 'right'): HTMLSelectElement {
+    if (axis === 'up') return this.elements.upAxis;
+    if (axis === 'forward') return this.elements.forwardAxis;
+    return this.elements.rightAxis;
+  }
+
+  /** Sets one of the 3 input-geometry orientation fields, keeping the
+   * invariant that all 3 always name a DIFFERENT axis: if the new value
+   * would put `axis` on the same axis (ignoring sign) as one of the other
+   * two fields, that other field is bumped to `axis`'s OLD value instead
+   * of being left colliding. E.g. starting from up:+y, forward:+z,
+   * right:+x, setting up to -z collides with forward (both 'z') - forward
+   * becomes +y (up's old value), leaving up:-z, forward:+y, right:+x. At
+   * most one other field can ever collide, since the invariant holds
+   * before every call. */
   private setInputGeometryOrientation(axis: 'up' | 'forward' | 'right', value: string): void {
-    this.appConfig.config.importOptions.inputGeometryOrientation[axis] = value as AxisDirection;
+    const orientation = this.appConfig.config.importOptions.inputGeometryOrientation;
+    const newValue = value as AxisDirection;
+    const oldValue = orientation[axis];
+    if (newValue === oldValue) return;
+
+    for (const other of (['up', 'forward', 'right'] as const)) {
+      if (other === axis) continue;
+      if (axisLetter(orientation[other]) === axisLetter(newValue)) {
+        orientation[other] = oldValue;
+        this.axisSelectElement(other).value = oldValue;
+        break;
+      }
+    }
+
+    orientation[axis] = newValue;
+  }
+
+  /** Re-derives intelGpaDistortion from intelGpaLandmarkObjs against the
+   * CURRENT orientation settings, in case they were changed any time after
+   * the files were dropped (the fit computed then - see
+   * processIntelGPAImport() - only reflects whatever the settings were at
+   * that moment). No-op for a plain RenderDoc-only import
+   * (intelGpaLandmarkObjs is null - see handleFiles()). Only the source
+   * side gets remapped, matching loadDraw()'s non-posed remap in app.ts:
+   * landmark-output, like a draw's posed mesh, is assumed to already be in
+   * the app's own reference frame (it's GPU-capture output, not an
+   * artist-authored asset), so only landmark-source - the artist-authored
+   * side - needs its axis convention corrected before comparing the two. */
+  private recalculateIntelGpaDistortion(): void {
+    if (!this.intelGpaLandmarkObjs) return;
+
+    try {
+      const remappedSource = remapObjOrientation(
+        this.intelGpaLandmarkObjs.source,
+        this.appConfig.config.importOptions.inputGeometryOrientation,
+      );
+      this.intelGpaDistortion = calculateLandmarkTransform(remappedSource, this.intelGpaLandmarkObjs.output);
+    } catch (e) {
+      console.warn(
+        '[capture-importer] failed to re-fit the IntelGPA landmark distortion after remapping axes - keeping the previous fit',
+        e,
+      );
+    }
   }
 
   /**
@@ -331,6 +403,7 @@ export class CaptureImporter extends HTMLElement {
    */
   private async reconstructScene(): Promise<void> {
     this.appConfig.saveConfig();
+    this.recalculateIntelGpaDistortion();
     console.log('manifest:', this.elements.renderPassList.manifests);
     this.dispatchEvent(
       new CustomEvent(
@@ -482,8 +555,15 @@ export class CaptureImporter extends HTMLElement {
     // intel-gpa-import-helpers.ts / mesh-tools/landmark-matching.ts.
     // Picked up by reconstructScene() (see its event detail below) so it
     // gets applied automatically instead of through the manual
-    // scale-reference-object flow.
+    // scale-reference-object flow. Re-derived from intelGpaLandmarkObjs
+    // (below) right before that dispatch, against whatever the
+    // orientation settings are at that point - this initial fit is just
+    // what's in effect until then.
     this.intelGpaDistortion = fileRoles.distortion;
+    this.intelGpaLandmarkObjs = {
+      source: fileRoles['landmark-source'].obj,
+      output: fileRoles['landmark-output'].obj,
+    };
 
     const loaded = await fakeManifest(this.intelGPAImports['scene']!.file);
 
@@ -556,6 +636,7 @@ export class CaptureImporter extends HTMLElement {
     // attempt this session, so it doesn't get applied to an unrelated scene.
     this.showReadingFilesScreen(true);
     this.intelGpaDistortion = null;
+    this.intelGpaLandmarkObjs = null;
 
     const vfs = new VirtualFileSystem();
     for (const { path, file } of entries) {
