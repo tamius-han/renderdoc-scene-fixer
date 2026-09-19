@@ -684,7 +684,21 @@ export class SceneViewerApp {
       diagonal: boundsDiagonal(bounds),
       meshPath: meshRel,
       previewPath: previewRel,
-      originalPosedPositions: previewGeometryData !== geometryData ? geometryData.positions.slice() : null,
+      originalPosedPositions:
+        // A genuine RenderDoc posed/non-posed pair (previewRel resolved to
+        // a DIFFERENT file than meshRel) needs correcting the normal way.
+        // An IntelGPA-derived draw (see manifest.ts's fakeManifest(),
+        // which always sets posedMesh === mesh - there's no separate
+        // bind-pose export for a flat scene.obj) has no such pair, but
+        // still needs a pristine "as imported" snapshot: the ONE
+        // landmark-derived distortion (this.intelGpaDistortion, already
+        // set by the time this runs - see reconstructScene()) is applied
+        // directly to this draw's raw geometry, not to a posed/non-posed
+        // difference within it. Without this, applyDistortionToScene()
+        // would see originalPosedPositions === null and skip every draw.
+        previewGeometryData !== geometryData || this.intelGpaDistortion !== null
+          ? geometryData.positions.slice()
+          : null,
     });
 
     return "added";
@@ -2182,8 +2196,6 @@ export class SceneViewerApp {
    * compare the two without re-fitting or re-dropping files each time.
    * No-op if no correction has been computed yet for the current scene. */
   private toggleRawImport(): void {
-    console.log('toggling raw import ... applied distortion:', this.appliedDistortion);
-
     if (!this.appliedDistortion || this.loadedDraws.length === 0) return;
 
     if (this.showingRawImport) {
