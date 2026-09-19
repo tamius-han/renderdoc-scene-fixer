@@ -485,6 +485,7 @@ code {
 }
 
 .resource-preview {
+  position: relative; /* anchors the small orientation-gizmo--preview compass added in the corner - see attachMultiMeshPreview() */
   flex: 1 1 auto; /* grows to fill whatever space the panel resize leaves for it */
   min-width: 25vh;
   min-height: 25vh;
@@ -677,6 +678,19 @@ button {
   background: rgba(11, 14, 19, 0.6); padding: 3px 8px; border-radius: 5px; border: 1px solid var(--line);
 }
 
+/* Small variant of the same compass, used inside mesh-preview panels
+   (resource panel, "Fix & export" dialog - see attachMultiMeshPreview())
+   instead of the main viewport's own corner placement: pinned to the
+   preview's own upper-right corner (resource-preview has position:relative
+   for exactly this) and shrunk down. These previews are always
+   perspective, so the projection-mode label underneath (never set here -
+   see setProjectionLabel()) is just hidden rather than shown empty. */
+.orientation-gizmo--preview {
+  position: absolute; top: 6px; right: 6px; left: auto; z-index: 5;
+}
+.orientation-gizmo--preview svg { width: 48px; height: 48px; }
+.orientation-gizmo--preview .orientation-gizmo-projection { display: none; }
+
 input[type="file"] { display: none; }
 
 ::-webkit-scrollbar { width: 9px; }
@@ -700,4 +714,3 @@ input[type="file"] { display: none; }
     @apply mt-2 py-2 px-4 bg-brown-900/90 text-warm-300;
   }
 }
-
