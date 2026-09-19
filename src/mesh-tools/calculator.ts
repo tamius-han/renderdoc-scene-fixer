@@ -242,6 +242,122 @@ export interface AffineDistortionResult {
    * an up-axis realignment) about the same point posedToNonPosedInPlace
    * uses, instead of recomputing it. */
   posedCentroid: THREE.Vector3;
+  /** Like posedToNonPosedInPlace, but keeping the fit's rotation as well as
+   * its stretch (R*S instead of just S), still pivoted about posedCentroid
+   * with no net translation. R is never a reflection even if the raw fit's
+   * own polar decomposition would have been one (posed geometry is always
+   * right-handed - see HandednessMode - so mirroring it here would turn it
+   * inside out); see analyzeTransformMatrix's doc comment for how that's
+   * avoided.
+   *
+   * NOT used by app.ts's default pipeline (applyDistortionToScene()) -
+   * baking R into each object's OWN vertices individually rotates every
+   * object to match ITS OWN bind pose's local forward/right convention,
+   * which is generally unrelated to how that object was actually placed
+   * in the world (most placed objects share the scene's up direction, not
+   * a global forward/right - a chair can face any direction and still be
+   * "upright"). That mismatch is what previously made corrected scenes
+   * come out visibly tilted. app.ts now applies rotation ONCE, for the
+   * whole scene, from distortionOrientation below (the same R, but as a
+   * standalone quaternion) instead - kept here mainly for completeness /
+   * lower-level callers that genuinely do want one object's full posed-
+   * to-non-posed map, R and S combined. */
+  posedToNonPosedOrientedInPlace: THREE.Matrix4;
+  /** The fitted rotation ALONE - no stretch/shear, no translation - the
+   * exact same rotation baked into posedToNonPosedOrientedInPlace above
+   * (see that field's doc comment for what it represents: posed's raw
+   * orientation -> non-posed geometry's own up/forward/right convention,
+   * meaningful specifically because loadDraw() already remaps non-posed
+   * geometry into the app's fixed convention via remapObjOrientation()
+   * before fitting). Exposed as its own standalone quaternion, rather
+   * than only reachable by pulling it back out of ...OrientedInPlace's
+   * 4x4, so a caller can apply it as ONE WHOLE-SCENE rotation (see
+   * app.ts's applyDistortionToScene(), which sets this.sceneRotation from
+   * it after every distortion fix) instead of baking it into each
+   * object's own vertices individually. Baking a per-object rotation like
+   * that previously caused the reconstructed scene to come out visibly
+   * tilted: an object placed with some arbitrary yaw in the world (most
+   * furniture, most placed props) does NOT actually share its own bind-
+   * pose mesh's local forward/right convention, only (usually) its up
+   * direction - fitting and applying a FULL per-object rotation from
+   * posed to that object's own local convention was therefore fighting
+   * each object's real, legitimate placement instead of just correcting
+   * the capture's systemic distortion. A single whole-scene rotation,
+   * chosen once (from whichever reference/consensus object's fit is most
+   * trustworthy) and applied uniformly, doesn't have this problem. */
+  distortionOrientation: THREE.Quaternion;
+  /** RMS distance between each posed vertex and where nonPosedToPosed
+   * predicts it should land, relative to the posed mesh's own bounding
+   * diagonal - a unitless "how well does a single affine map actually
+   * explain posed from non-posed" signal. 0 means a perfect fit (typical
+   * for a rigid prop with a uniform scale/shear error); a large value
+   * means the two shapes plausibly differ by more than any single 3x3
+   * matrix can correct - most commonly because the mesh is rigged/skinned
+   * and posed via independent per-bone transforms rather than one
+   * whole-object transform. See isGoodDistortionFitCandidate(). */
+  relativeFitError: number;
+  /** Ratio between the largest and smallest of the fit's 3 singular values
+   * (posedToNonPosedLinear's per-axis stretch factors, whichever 3
+   * directions they actually fall along - not necessarily x/y/z). 1 means
+   * the correction is a pure uniform scale: same aspect ratio, just a
+   * different overall size. Larger means the correction reshapes the
+   * object non-uniformly - changes its aspect ratio, not just its size.
+   *
+   * A low relativeFitError alone doesn't tell a genuine capture/export
+   * artifact apart from an INTENTIONAL non-uniform scale the game applies
+   * on purpose (e.g. a prop deliberately stretched to fit a space, a
+   * squash-and-stretch animation frame, or a LOD authored with different
+   * proportions than the source model) - both fit a single affine map
+   * equally well, since "fits well" only checks whether one matrix
+   * explains ALL of posed from non-posed, not whether that matrix looks
+   * like a plausible bug. scaleAnisotropy is the second signal
+   * isGoodDistortionFitCandidate() uses to tell those apart: a mild
+   * aspect-ratio change is plausibly a real distortion worth fixing; a
+   * drastic one is plausibly a deliberate difference between the source
+   * model and its in-game appearance, and safer to leave alone than to
+   * silently "correct" away. */
+  scaleAnisotropy: number;
+}
+
+/** Default threshold for isGoodDistortionFitCandidate() below - an RMS fit
+ * residual above 8% of the posed mesh's own bounding diagonal is treated
+ * as "not a shape a single affine map can explain" (see
+ * AffineDistortionResult.relativeFitError). Picked by feel, not derived
+ * from any formal statistic - a real capture with a lot of false
+ * positives/negatives would be a reason to revisit this, not a fixed law. */
+export const DEFAULT_FIT_ERROR_THRESHOLD = 0.08;
+
+/** Default threshold for isGoodDistortionFitCandidate() below - a fitted
+ * correction that stretches one axis more than 35% relative to another
+ * (see AffineDistortionResult.scaleAnisotropy) is treated as reshaping the
+ * object rather than fixing a small export quirk. Also picked by feel, not
+ * derived from any formal statistic - same caveat as
+ * DEFAULT_FIT_ERROR_THRESHOLD above. */
+export const DEFAULT_MAX_SCALE_ANISOTROPY = 1.35;
+
+/** Whether a fit is trustworthy enough to auto-apply without a human
+ * checking it first. Two independent checks, both must pass:
+ * - relativeFitError: does a single affine map even explain the
+ *   difference well? Catches meshes a matrix fundamentally can't correct
+ *   (typically rigged/skinned ones - see that field's doc comment).
+ * - scaleAnisotropy: if it does, is that map itself a small, plausible
+ *   correction rather than a drastic reshaping? Catches meshes where the
+ *   fit is clean but the "distortion" is probably intentional (see that
+ *   field's doc comment) - a good fit alone doesn't imply a good
+ *   CANDIDATE, since an intentional aspect-ratio change fits just as
+ *   cleanly as an accidental one. */
+export function isGoodDistortionFitCandidate(
+  result: Pick<AffineDistortionResult, "relativeFitError" | "scaleAnisotropy">,
+  options: { maxRelativeFitError?: number; maxScaleAnisotropy?: number } = {},
+): boolean {
+  const maxRelativeFitError = options.maxRelativeFitError ?? DEFAULT_FIT_ERROR_THRESHOLD;
+  const maxScaleAnisotropy = options.maxScaleAnisotropy ?? DEFAULT_MAX_SCALE_ANISOTROPY;
+  return (
+    Number.isFinite(result.relativeFitError) &&
+    result.relativeFitError <= maxRelativeFitError &&
+    Number.isFinite(result.scaleAnisotropy) &&
+    result.scaleAnisotropy <= maxScaleAnisotropy
+  );
 }
 
 /** Entry point mirroring calculateDistortion() above, but returning a full
@@ -360,19 +476,77 @@ function analyzeTransformMatrix(
 
   const posedToNonPosedInPlace = affineFromLinearAndTranslation(stretch, posedCentroid, posedCentroid);
 
+  // Rotation-preserving variant (posedToNonPosedOrientedInPlace) needs a
+  // GUARANTEED proper rotation (det=+1) - reflecting posed geometry
+  // (always right-handed - see HandednessMode) would turn it inside out.
+  // The raw polar-decomposition rotation (naiveRotation = u*v^T) already
+  // satisfies that whenever handednessMismatchDetected is false; when
+  // it's true, fall back to the Kabsch-fitted rotation from
+  // analyzeTransform() above, which is always a proper rotation by
+  // construction (it's a genuine rigid-alignment fit, not a polar
+  // decomposition of this fit's own linear map, but a reasonable
+  // substitute for just this edge case) rather than trying to repair
+  // naiveRotation by hand.
+  const orientationRotation = handednessMismatchDetected
+    ? new THREE.Matrix3().setFromMatrix4(
+        new THREE.Matrix4().makeRotationFromQuaternion(
+          analyzeTransform(nonPosedVertices, posedVertices).posedToNonPosedRotation,
+        ),
+      )
+    : naiveRotation;
+  const orientedLinear = orientationRotation.clone().multiply(stretch);
+  const posedToNonPosedOrientedInPlace = affineFromLinearAndTranslation(orientedLinear, posedCentroid, posedCentroid);
+  const distortionOrientation = matrix3ToQuaternion(orientationRotation);
+
+  // How well a single affine map actually explains posed from non-posed -
+  // see relativeFitError's own doc comment. Measured against
+  // nonPosedToPosed (every non-posed vertex mapped forward) rather than
+  // posedToNonPosed, purely so the comparison is in "posed space" against
+  // the untouched posedVertices array already on hand.
+  let sumSquaredResidual = 0;
+  for (let i = 0; i < posedVertices.length; i++) {
+    const predicted = nonPosedVertices[i].clone().applyMatrix4(nonPosedToPosed);
+    sumSquaredResidual += predicted.distanceToSquared(posedVertices[i]);
+  }
+  const rmsResidual = Math.sqrt(sumSquaredResidual / posedVertices.length);
+  const posedDiagonal = new THREE.Box3().setFromPoints(posedVertices).getSize(new THREE.Vector3()).length();
+  const relativeFitError = posedDiagonal > 0 ? rmsResidual / posedDiagonal : 0;
+
+  // How non-uniform the fit's own correction is - see scaleAnisotropy's
+  // doc comment. singularValues are posedToNonPosedLinear's 3 per-axis
+  // stretch factors (always >= 0, from svd3x3() above); only positive ones
+  // count toward the ratio, since a fit that collapses an axis entirely
+  // (0 singular value) would already have failed the isZeroMatrix3() check
+  // above if ALL of them did - a single collapsed axis alongside 2 healthy
+  // ones is nonsensical geometry-wise and better caught by the fit-error
+  // check than reported as "infinitely anisotropic" here.
+  const positiveSingularValues = singularValues.filter((value) => value > 1e-9);
+  const scaleAnisotropy =
+    positiveSingularValues.length > 0
+      ? Math.max(...positiveSingularValues) / Math.min(...positiveSingularValues)
+      : 1;
+
   console.log("mesh matrix results:", {
     posedToNonPosed,
     nonPosedToPosed,
     posedToNonPosedInPlace,
+    posedToNonPosedOrientedInPlace,
+    distortionOrientation,
     handednessMismatchDetected,
+    relativeFitError,
+    scaleAnisotropy,
   });
 
   return {
     posedToNonPosed,
     nonPosedToPosed,
     posedToNonPosedInPlace,
+    posedToNonPosedOrientedInPlace,
+    distortionOrientation,
     handednessMismatchDetected,
     posedCentroid,
+    relativeFitError,
+    scaleAnisotropy,
   };
 }
 
@@ -432,6 +606,105 @@ function affineFromLinearAndTranslation(
   // Composition order matters: pre is applied to the input vector first,
   // then linear4, then post - matrix multiplication applies right-to-left.
   return post.multiply(linear4).multiply(pre);
+}
+
+function frobeniusNorm(elements: ArrayLike<number>): number {
+  let sum = 0;
+  for (let i = 0; i < elements.length; i++) sum += elements[i] * elements[i];
+  return Math.sqrt(sum);
+}
+
+function frobeniusDistance(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+export interface DistortionConsensusResult {
+  /** Which cluster each input matrix landed in, same order/length as the
+   * input array - every matrix belongs to SOME cluster, even a singleton
+   * one, so this is never -1. */
+  clusterOf: number[];
+  /** Index of the largest cluster (into the same numbering as clusterOf) -
+   * ties broken by whichever cluster reached that size first. Always a
+   * valid index as long as `matrices` was non-empty. */
+  largestCluster: number;
+  /** How many matrices landed in largestCluster. 1 means every matrix was
+   * mutually distinct - "largest" is really just "the first one", with no
+   * actual cross-object agreement behind it, which callers may want to
+   * treat as a weaker signal than a genuine multi-member cluster. */
+  largestClusterSize: number;
+}
+
+/** Default relative tolerance for findDistortionConsensus() below - two
+ * fitted matrices are considered "the same" distortion if their Frobenius
+ * distance is within 10% of the cluster's own running-mean magnitude.
+ * Picked by feel like this file's other thresholds (DEFAULT_FIT_ERROR_-
+ * THRESHOLD, DEFAULT_MAX_SCALE_ANISOTROPY) - independently fitted matrices
+ * for the SAME true distortion won't be bit-identical (different meshes,
+ * different vertex noise), so this needs to be loose enough to absorb
+ * that while still being tight enough not to lump genuinely different
+ * distortions together. */
+export const DEFAULT_MATRIX_CLUSTER_TOLERANCE = 0.1;
+
+/** Groups a set of fitted linear distortion maps (one per candidate object
+ * that already passed isGoodDistortionFitCandidate() - see app.ts's
+ * autoCorrectRenderDocDistortion()) by approximate equality, on the theory
+ * that if several DIFFERENT, otherwise-unrelated objects independently fit
+ * to close to the SAME matrix, that's much stronger evidence of the real,
+ * systemic capture/export distortion than any single object's fit alone.
+ * autoCorrectRenderDocDistortion() uses this to pick ONE matrix - the
+ * cleanest-fitting member of the LARGEST cluster - and broadcasts that
+ * single distortion to the whole scene, rather than trusting (or
+ * distrusting) each object's own individual fit.
+ *
+ * Greedy single-pass clustering: each matrix joins the first existing
+ * cluster within tolerance of that cluster's current running mean, or
+ * starts a new cluster of its own. Not a proper agglomerative clustering,
+ * but candidate counts here are small (one per correctable object in a
+ * scene) and approximate grouping is all a "picked by feel" tolerance can
+ * really promise regardless of algorithm. */
+export function findDistortionConsensus(
+  matrices: THREE.Matrix3[],
+  tolerance: number = DEFAULT_MATRIX_CLUSTER_TOLERANCE,
+): DistortionConsensusResult {
+  const clusterSums: number[][] = [];
+  const clusterCounts: number[] = [];
+  const clusterOf: number[] = [];
+
+  for (const matrix of matrices) {
+    let placedIn = -1;
+    for (let c = 0; c < clusterSums.length; c++) {
+      const mean = clusterSums[c].map((sum) => sum / clusterCounts[c]);
+      if (frobeniusDistance(matrix.elements, mean) <= tolerance * Math.max(frobeniusNorm(mean), 1e-6)) {
+        placedIn = c;
+        break;
+      }
+    }
+    if (placedIn === -1) {
+      clusterSums.push(Array.from(matrix.elements));
+      clusterCounts.push(1);
+      placedIn = clusterSums.length - 1;
+    } else {
+      for (let i = 0; i < 9; i++) clusterSums[placedIn][i] += matrix.elements[i];
+      clusterCounts[placedIn]++;
+    }
+    clusterOf.push(placedIn);
+  }
+
+  let largestCluster = 0;
+  let largestClusterSize = 0;
+  for (let c = 0; c < clusterCounts.length; c++) {
+    if (clusterCounts[c] > largestClusterSize) {
+      largestClusterSize = clusterCounts[c];
+      largestCluster = c;
+    }
+  }
+
+  return { clusterOf, largestCluster, largestClusterSize };
 }
 
 /** Embeds a 3x3 linear map as the upper-left block of a 4x4 matrix with no
