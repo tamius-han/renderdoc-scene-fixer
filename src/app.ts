@@ -13,7 +13,8 @@ import {
   type Bounds,
   type GeometryArrays,
 } from "./scene/mesh-builder";
-import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
+import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from "./scene/scene-manager";
+import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
@@ -22,6 +23,7 @@ import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from ".
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
+import { ExportMesh } from './components/export-mesh/cmp.export-mesh';
 import { Config, type AppConfiguration } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
@@ -314,7 +316,7 @@ export class SceneViewerApp {
     captureImporter: this.el<CaptureImporter>("capture-importer"),
     loadingScreen: this.el<LoadingScreen>("loading-screen"),
     controlsOverlay: this.el<Overlay>("controls-overlay"),
-    exportOverlay: this.el<Overlay>("export-overlay"),
+    exportOverlay: this.el<ExportMesh>("export-overlay"),
   };
 
 
@@ -402,8 +404,14 @@ export class SceneViewerApp {
     });
     this.elements.menu.fixExport.addEventListener('click', () => {
       console.info('opening export overlay');
+      this.elements.exportOverlay.setSelectedIndices(this.getActiveSelectedIndices());
+      this.renderExportMeshPreview();
       this.elements.exportOverlay.show();
     });
+    this.elements.exportOverlay.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
+    this.elements.exportOverlay.addEventListener('start-export', (e: any) =>
+      this.handleStartExport(e.detail.selectedIndices, e.detail.exportOptions),
+    );
   }
 
   private setupToolsMenu() {
@@ -2566,9 +2574,7 @@ export class SceneViewerApp {
    * this always exports what's actually highlighted/visible on screen,
    * not some separate notion of selection. */
   private exportSelectedMeshesAsGlb(): void {
-    const activeSelected = Array.from(this.selectedIndices).filter(
-      (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
-    );
+    const activeSelected = this.getActiveSelectedIndices();
     if (activeSelected.length === 0) {
       this.setStatus("Select one or more objects to export first.");
       return;
@@ -2598,7 +2604,15 @@ export class SceneViewerApp {
 
     const blob = buildGlbBlob(entries, sceneTransform);
     const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
+    this.downloadBlob(blob, fileName);
+    this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
+  }
 
+  /** Triggers a browser download of an already-built blob under the given
+   * file name - the DOM-anchor-click dance shared by
+   * exportSelectedMeshesAsGlb() and handleStartExport(), extracted so both
+   * only have to build the blob and pick a name. */
+  private downloadBlob(blob: Blob, fileName: string): void {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -2607,7 +2621,69 @@ export class SceneViewerApp {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+  }
 
+  /** Handles the "Fix & export" dialog's 'start-export' event: builds and
+   * downloads a .glb from whichever draws the dialog was told about (see
+   * ExportMesh.setSelectedIndices(), set from the fixExport handler in
+   * setupMenu()) using the dialog's own pending export options - the same
+   * two options renderExportMeshPreview() already previews live:
+   * exportType picks posed (draw.geometryData) vs non-posed
+   * (draw.previewGeometryData) vertex data, and exportTextures picks the
+   * draw's own (possibly textured) material vs the shared flat grey
+   * untextured one (see getUntexturedMaterial()) - buildGlbBlob() already
+   * exports an untextured MeshBasicMaterial as a flat baseColorFactor
+   * with no baseColorTexture, so reusing that one material is enough to
+   * get a textureless export, no separate "strip the texture" step
+   * needed.
+   *
+   * splitLooseParts/fillHoles/resizeExportedObject/approximateHeight are
+   * also on the dialog but have no corresponding mesh-processing pass
+   * implemented anywhere in this codebase yet (hole-filling and
+   * connected-component splitting are both nontrivial geometry
+   * algorithms), so they're read from exportOptions but not yet acted on
+   * here - only exportType and exportTextures actually change the
+   * output right now.
+   *
+   * For a non-posed export, the scene's overall orientation/scale
+   * (ground-plane leveling, up-axis, fixedScale - see
+   * exportSelectedMeshesAsGlb()'s own doc comment) is deliberately NOT
+   * baked in: that transform describes how POSED meshes sit relative to
+   * each other in the reconstructed scene, but non-posed/original meshes
+   * were never placed relative to each other to begin with (see
+   * attachMultiMeshPreview()'s doc comment) - baking a scene-level leveling
+   * transform onto them would just be wrong, so they're exported as
+   * authored (identity transform) instead. */
+  private handleStartExport(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): void {
+    const draws = selectedIndices
+      .map((index) => ({ index, draw: this.loadedDraws[index] }))
+      .filter((entry): entry is { index: number; draw: LoadedDraw } => !!entry.draw);
+    if (draws.length === 0) {
+      this.setStatus("Select one or more objects to export first.");
+      return;
+    }
+
+    const posed = exportOptions.exportType === "output";
+    const entries: ExportMeshEntry[] = draws.map(({ index, draw }) => {
+      const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
+      return {
+        name: `Draw #${index} (eid ${draw.draw.eventId})`,
+        positions: sourceData.positions,
+        normals: sourceData.normals,
+        uvs: sourceData.uvs,
+        bounds: posed ? draw.bounds : computeBounds(sourceData.positions),
+        material: exportOptions.exportTextures ? draw.material : this.getUntexturedMaterial(),
+      };
+    });
+
+    const group = this.sceneManager.getContentGroup();
+    const sceneTransform: ExportSceneTransform = posed
+      ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
+      : { quaternion: new THREE.Quaternion(), scale: 1 };
+
+    const blob = buildGlbBlob(entries, sceneTransform);
+    const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
+    this.downloadBlob(blob, fileName);
     this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
   }
 
@@ -2626,21 +2702,48 @@ export class SceneViewerApp {
     return `bind ${binding.bindPoint}`;
   }
 
-  private attachMeshPreview(container: HTMLElement, draw: LoadedDraw): void {
-    this.attachMultiMeshPreview(container, [draw], { interactive: true });
+  private attachMeshPreview(
+    container: HTMLElement,
+    draw: LoadedDraw,
+    options?: { poseMode?: "posed" | "non-posed"; textured?: boolean },
+  ): void {
+    this.attachMultiMeshPreview(container, [draw], { interactive: true, ...options });
   }
 
   /** Shared implementation behind the single-object interactive preview
    * (attachMeshPreview() - the "Last selected object" tab/the object-list
    * row's own preview), the "All selected objects" tab (all currently
-   * selected draws together), and the new per-object/combined thumbnails
-   * in the resource panel's multi-select row. Every mesh uses its
-   * non-posed previewGeometryData, added to the scene at its own natural
-   * local coordinates (i.e. with no relative offset applied between
-   * them - "non-posed" meshes were never placed relative to each other to
-   * begin with), then the WHOLE assembly is centered/scaled as one rigid
-   * unit from the union of their individual bounds, exactly the way the
-   * original single-mesh version centered/scaled just the one mesh.
+   * selected draws together), the per-object/combined thumbnails in the
+   * resource panel's multi-select row, and the "Fix & export" dialog's own
+   * preview (see renderExportMeshPreview()). Every mesh is added to the
+   * scene at its own natural local coordinates (i.e. with no relative
+   * offset applied between them - non-posed meshes were never placed
+   * relative to each other to begin with, and posed ones already carry
+   * whatever relative placement the capture gave them), then the WHOLE
+   * assembly is centered/scaled as one rigid unit from the union of their
+   * individual bounds, exactly the way the original single-mesh version
+   * centered/scaled just the one mesh.
+   *
+   * `poseMode` (defaults to "non-posed", matching every pre-existing
+   * caller's behavior) picks which of a draw's two vertex sets to preview:
+   * "posed" uses draw.geometryData (the scene/output positions), matching
+   * the export dialog's "Export with poses" option; "non-posed" uses
+   * draw.previewGeometryData (falling back to geometryData for draws with
+   * no separate posed export - see loadDraw()), matching "Export
+   * original".
+   *
+   * `textured` (defaults to true, again matching every pre-existing
+   * caller) picks the material: true clones the draw's own material as
+   * before (whatever texture it has, or the shared untextured fallback -
+   * see resolveMaterial()/getUntexturedMaterial()); false ignores the
+   * draw's material entirely and uses a plain grey MeshStandardMaterial
+   * with flatShading - unlike the main scene (which has no lights, hence
+   * needing applyFlatFaceVertexColors()'s baked-vertex-color trick to fake
+   * faceting on an unlit material), this preview scene adds its own real
+   * lights below, so flatShading here just works: the shader derives each
+   * face's normal from screen-space derivatives instead of interpolating
+   * the smooth per-vertex ones, giving a genuinely per-face-faceted look
+   * with ordinary lighting.
    *
    * `interactive`=true wires up the orbit-drag/wheel-zoom handling and
    * keeps rendering every frame via requestAnimationFrame, same as
@@ -2650,7 +2753,14 @@ export class SceneViewerApp {
    * thumbnail: a big multi-selection can easily produce more thumbnails
    * than a browser's simultaneous-WebGL-context limit if they're left
    * open indefinitely. */
-  private attachMultiMeshPreview(container: HTMLElement, draws: LoadedDraw[], options: { interactive: boolean }): void {
+  private attachMultiMeshPreview(
+    container: HTMLElement,
+    draws: LoadedDraw[],
+    options: { interactive: boolean; poseMode?: "posed" | "non-posed"; textured?: boolean },
+  ): void {
+    const poseMode = options.poseMode ?? "non-posed";
+    const textured = options.textured ?? true;
+
     const previewCanvas = document.createElement("canvas");
     previewCanvas.className = "resource-preview-canvas";
     container.appendChild(previewCanvas);
@@ -2673,18 +2783,33 @@ export class SceneViewerApp {
     modelRoot.add(contentGroup);
 
     let overallBounds: Bounds | null = null;
+
     for (const draw of draws) {
       const geometry = new THREE.BufferGeometry();
-      const sourceData = draw.previewGeometryData ?? draw.geometryData;
+      const sourceData = poseMode === "posed" ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(sourceData.positions, 3));
       geometry.setAttribute("uv", new THREE.Float32BufferAttribute(sourceData.uvs, 2));
       geometry.setAttribute("normal", new THREE.Float32BufferAttribute(sourceData.normals, 3));
       geometry.computeVertexNormals();
 
-      const material = draw.material.clone();
-      material.side = THREE.DoubleSide;
-      material.needsUpdate = true;
+      let material: THREE.Material;
+      if (textured) {
+        material = draw.material.clone();
+        material.side = THREE.DoubleSide;
+        material.needsUpdate = true;
+      } else {
+        material = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, flatShading: true, side: THREE.DoubleSide });
+      }
 
+      // No per-mesh repositioning here, for either pose mode - each mesh
+      // keeps exactly the relative offset to the others that its own
+      // source data gives it (whether that's real shared scene placement
+      // for posed data, or whatever relative offset the non-posed/preview
+      // export happens to carry). It's the SELECTION AS A WHOLE that gets
+      // centered at the origin, as one rigid move applied once below to
+      // contentGroup (built from the union of every individual mesh's
+      // bounds, computed here without moving anything) - see the
+      // centering step right after this loop.
       contentGroup.add(new THREE.Mesh(geometry, material));
 
       const bounds = computeBounds(sourceData.positions);
@@ -2698,14 +2823,16 @@ export class SceneViewerApp {
     const center = boundsCenter(overallBounds);
     const rawSize = overallBounds.max.clone().sub(overallBounds.min);
 
-    // Non-posed preview copy: centered at the origin, then scaled down
-    // (never up) to fit inside a 100x100x100 cube if it doesn't already -
-    // applied as contentGroup's own position/scale (not baked into the
-    // geometry) so it's purely a property of this preview render, not of
-    // sourceData itself. Object3D's local matrix scales geometry BEFORE
-    // translating by position, so position has to be -scale*center (not
-    // just -center) for the result to be "centered, then scaled" rather
-    // than "centered by an unscaled offset, then scaled off-center".
+    // The whole assembly (relative offsets between meshes untouched - see
+    // the loop above) is centered at the origin as ONE rigid move, then
+    // scaled down (never up) to fit inside a 100x100x100 cube if it
+    // doesn't already - applied as contentGroup's own position/scale (not
+    // baked into the geometry) so it's purely a property of this preview
+    // render, not of sourceData itself. Object3D's local matrix scales
+    // geometry BEFORE translating by position, so position has to be
+    // -scale*center (not just -center) for the result to be "centered,
+    // then scaled" rather than "centered by an unscaled offset, then
+    // scaled off-center".
     const PREVIEW_CUBE_SIZE = 100;
     const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-6);
     const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
@@ -2732,10 +2859,15 @@ export class SceneViewerApp {
 
     let fitDistance = computeFitDistance(1);
 
-    modelRoot.rotation.x = -0.65;
-    modelRoot.rotation.y = 0.85;
-
-    camera.position.set(0, 0, fitDistance);
+    // Same diagonal look direction the main scene's camera starts from
+    // (see getDefaultViewDirection()) - the model itself starts at
+    // identity rotation (dragging, see handlePointerMove() below, is the
+    // only thing that ever rotates it) and the camera supplies this angle
+    // instead, so "current view" is always exactly "camera position/
+    // orientation", with no separate baked-in model rotation to account
+    // for elsewhere (see the gizmo proxy math below).
+    const viewDirection = getDefaultViewDirection();
+    camera.position.copy(viewDirection).multiplyScalar(fitDistance);
     camera.lookAt(0, 0, 0);
 
     const light = new THREE.DirectionalLight(0xffffff, 1.3);
@@ -2763,12 +2895,40 @@ export class SceneViewerApp {
       camera.aspect = aspect;
       fitDistance = computeFitDistance(aspect);
       currentDistance = fitDistance * zoomRatio;
-      camera.position.set(0, 0, currentDistance);
+      // Distance changes (zoom/resize), but the DIRECTION the camera sits
+      // along never does - camera.lookAt(0,0,0) from further/closer along
+      // the same ray produces the same orientation every time, so the
+      // gizmo proxy math below doesn't need to treat camera.quaternion as
+      // something that changes per frame.
+      camera.position.copy(viewDirection).multiplyScalar(currentDistance);
       camera.lookAt(0, 0, 0);
       camera.updateProjectionMatrix();
     };
 
     if (options.interactive) {
+      // Small always-visible compass in the preview's own corner, reusing
+      // the same OrientationGizmo the main viewport uses (see
+      // scene-manager.ts) - just repositioned/shrunk via the
+      // "orientation-gizmo--preview" CSS modifier. It normally reads the
+      // CAMERA's orientation directly, but here the camera itself never
+      // rotates after setup (only its distance changes, along the fixed
+      // viewDirection - see resize()/handleWheel()) while dragging spins
+      // modelRoot instead (see handlePointerMove() below) - so it's fed a
+      // small proxy object holding the COMBINED orientation (updated in
+      // tick()): world axis -> rotated by the model's current drag
+      // rotation -> viewed from the camera's fixed diagonal angle. That
+      // combined value is modelRoot.quaternion inverted and then
+      // multiplied by camera.quaternion (apply the model's rotation
+      // first, then the camera's, matching OrientationGizmo.update()'s
+      // own "invert what's passed in, then apply" convention) - at rest
+      // (no drag yet) this correctly shows the same diagonal angle
+      // camera.quaternion alone would, and updates further as the model
+      // is dragged.
+      const gizmo = new OrientationGizmo();
+      gizmo.element.classList.add("orientation-gizmo--preview");
+      container.appendChild(gizmo.element);
+      const gizmoCameraProxy = new THREE.Object3D();
+
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
@@ -2808,10 +2968,14 @@ export class SceneViewerApp {
       };
       const handleWheel = (event: WheelEvent) => {
         event.preventDefault();
-        const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+        // Scrolling "up"/away from the user (negative deltaY) zooms IN
+        // (camera moves closer); scrolling down (positive deltaY) zooms
+        // OUT - the usual map/CAD-viewer convention. deltaY's sign is
+        // therefore used directly (not negated) when driving distance.
+        const zoomFactor = Math.exp(event.deltaY * 0.0015);
         zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
         currentDistance = fitDistance * zoomRatio;
-        camera.position.set(0, 0, currentDistance);
+        camera.position.copy(viewDirection).multiplyScalar(currentDistance);
         camera.lookAt(0, 0, 0);
       };
 
@@ -2832,6 +2996,8 @@ export class SceneViewerApp {
           resizeObserver.disconnect();
           return;
         }
+        gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert().multiply(camera.quaternion);
+        gizmo.update(gizmoCameraProxy as unknown as THREE.Camera);
         renderer.render(scene, camera);
         requestAnimationFrame(tick);
       };
@@ -2855,6 +3021,48 @@ export class SceneViewerApp {
       resizeObserver.observe(container);
       renderOnceReady(); // covers the common case where layout's already settled
     }
+  }
+
+  /** (Re)builds the "Fix & export" dialog's own live mesh preview
+   * (#export-mesh-export-preview) from whatever's currently selected
+   * (same selected-AND-visible definition as getActiveSelectedIndices(),
+   * which exportSelectedMeshesAsGlb() also uses) and the dialog's own
+   * pending export options - "works the same as resource panel" via
+   * reusing attachMultiMeshPreview() directly (draggable/zoomable,
+   * lit), just without the panel chrome (header/tabs/resize handles/
+   * multi-select thumbnail row), since this preview always shows every
+   * currently-selected mesh together (there's no separate "last
+   * selected" single-object tab to switch to here) inside a fixed-size
+   * dialog rather than free-floating in the viewport.
+   *
+   * Called once when the dialog opens (see the fixExport handler in
+   * setupMenu()) and again on every 'export-options-changed' event the
+   * dialog itself dispatches (see ExportMesh.notifyOptionsChanged()), so
+   * toggling "Export with poses"/"Export original" or the "Export
+   * textures" checkbox updates the preview immediately.
+   *
+   * Rebuilds from scratch every call (clearing the container first,
+   * which disconnects the old canvas so its render loop notices and
+   * disposes itself - see attachMultiMeshPreview()'s own interactive-
+   * branch cleanup) rather than diffing against whatever was there
+   * before - this only ever runs on dialog-open or an explicit option
+   * change, not every frame, so the cost of a full rebuild doesn't
+   * matter here the way it would in renderResourcePanel(). */
+  private renderExportMeshPreview(): void {
+    const host = this.el<HTMLElement>("export-mesh-export-preview");
+    host.innerHTML = "";
+
+    const draws = this.getActiveSelectedIndices()
+      .map((i) => this.loadedDraws[i])
+      .filter((d): d is LoadedDraw => !!d);
+    if (draws.length === 0) return;
+
+    const exportOptions = this.appConfig.config.exportOptions;
+    this.attachMultiMeshPreview(host, draws, {
+      interactive: true,
+      poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
+      textured: exportOptions.exportTextures,
+    });
   }
 
   /** Sizes and positions the resource panel. Sizing always follows
@@ -3517,13 +3725,23 @@ export class SceneViewerApp {
    * not actually being rendered - but the shading and mask-rebuild passes
    * above still run regardless, so hiding the last visible selected object
    * still clears any leftover dimming/outline. */
+  /** Currently selected AND actually visible objects - "selected" should
+   * always mean what's actually highlighted/visible on screen, not some
+   * separate notion of selection that includes hidden objects. Shared by
+   * updateSelectionVisuals(), exportSelectedMeshesAsGlb(), and the export
+   * dialog's own knowledge of what it's exporting (see
+   * renderExportMeshPreview() and the fixExport handler in setupMenu()). */
+  private getActiveSelectedIndices(): number[] {
+    return Array.from(this.selectedIndices).filter(
+      (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
+    );
+  }
+
   private updateSelectionVisuals(): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
 
-    const activeSelected = Array.from(this.selectedIndices).filter(
-      (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
-    );
+    const activeSelected = this.getActiveSelectedIndices();
 
     // Recolors selected/non-selected triangles (or restores everything to
     // normal if activeSelected is empty) - see applySelectionShading()'s

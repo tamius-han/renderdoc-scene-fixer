@@ -6,6 +6,13 @@ export class ExportMesh extends Overlay {
 
   private appConfig: Config = Config.getConfig();
 
+  /** Which loaded draws (by index into SceneViewerApp's loadedDraws) this
+   * dialog is currently open for - set via setSelectedIndices() right
+   * before show(), so the dialog (and whoever handles 'start-export')
+   * knows what's being exported without needing access to the app's own
+   * mesh data. */
+  private selectedIndices: number[] = [];
+
   private elements: {
     exportTexturesCheckbox: HTMLInputElement;
     splitLoosePartsCheckbox: HTMLInputElement;
@@ -62,6 +69,13 @@ export class ExportMesh extends Overlay {
     this.elements.exportOriginalButton.addEventListener('click', () => this.updateExportType('input'));
   }
 
+  /** Called by SceneViewerApp right before show(), so this dialog knows
+   * which meshes it's currently open for (see selectedIndices' doc
+   * comment). */
+  setSelectedIndices(indices: number[]): void {
+    this.selectedIndices = indices;
+  }
+
   updateExportType(type: 'output' | 'input') {
     if (type === 'output') {
       this.elements.exportPosedButton.classList.add('active');
@@ -73,6 +87,8 @@ export class ExportMesh extends Overlay {
     this.appConfig.config.exportOptions.exportType = type;
 
     this.elements.approximateHeightInput.addEventListener('input', () => this.updateExportOptions());
+
+    this.notifyOptionsChanged();
   }
 
   updateExportOptions() {
@@ -87,6 +103,18 @@ export class ExportMesh extends Overlay {
       this.appConfig.config.exportOptions.approximateHeight = f;
     }
     this.appConfig.saveConfig();
+
+    this.notifyOptionsChanged();
+  }
+
+  /** Lets whoever's showing this dialog (SceneViewerApp) know the pending
+   * export options just changed, so it can refresh anything derived from
+   * them - currently just the live mesh preview in
+   * #export-mesh-export-preview, which depends on exportType
+   * (posed/non-posed) and exportTextures (textured/flat grey) - see
+   * renderExportMeshPreview() in app.ts. */
+  private notifyOptionsChanged(): void {
+    this.dispatchEvent(new CustomEvent('export-options-changed'));
   }
 
   startExport() {
@@ -98,7 +126,8 @@ export class ExportMesh extends Overlay {
         'start-export',
         {
           detail: {
-            exportOptions: this.appConfig.config.exportOptions
+            exportOptions: this.appConfig.config.exportOptions,
+            selectedIndices: this.selectedIndices,
           }
         }
       )
