@@ -612,9 +612,54 @@ export class SceneViewerApp {
 
   private getUntexturedMaterial(): THREE.Material {
     if (!this.untexturedMaterial) {
-      this.untexturedMaterial = new THREE.MeshBasicMaterial({ color: 0x606a7a, side: THREE.DoubleSide });
+      const material = new THREE.MeshBasicMaterial({ color: 0x606a7a, side: THREE.DoubleSide });
+      this.applyFlatFaceShading(material);
+      this.untexturedMaterial = material;
     }
     return this.untexturedMaterial;
+  }
+
+  /** Installs the same "fake flat per-face lighting" trick used for the
+   * selected-mesh shader (see buildSelectionShaderMaterial() below) onto a
+   * plain MeshBasicMaterial: a per-face normal computed in the fragment
+   * shader from screen-space derivatives (dFdx/dFdy) of view-space
+   * position, dotted with a fixed pseudo-light direction, and used to
+   * scale the material's own diffuse color. There's no real light
+   * anywhere in this scene (see buildSelectionShaderMaterial()'s doc
+   * comment), so without this an untextured mesh - no map, i.e. no
+   * per-fragment detail at all - renders as one uniform flat color with
+   * zero depth cues: a "grey blob", most noticeable on IntelGPA imports,
+   * which never carry materials/textures at all (see manifest.ts's
+   * fakeManifest()). Deriving the face normal from screen-space
+   * derivatives rather than trusting the geometry's own normal attribute
+   * means this works regardless of whether that attribute is missing,
+   * default, or smoothed - no geometry changes needed (no
+   * toNonIndexed()/computeVertexNormals(), unlike
+   * applyFlatFaceVertexColors() below, which bakes into vertex colors
+   * instead for the cases - like the select-area gizmo shape - that want
+   * it that way). abs() rather than a plain clamp/dot: OBJ meshes here
+   * don't reliably have consistent winding, and there's no real light to
+   * "face away from" - this just keeps a facet from going fully black
+   * when its normal happens to point away from the pseudo-light. */
+  private applyFlatFaceShading(material: THREE.MeshBasicMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "varying vec3 vFlatShadeViewPos;\n#include <common>")
+        .replace("#include <project_vertex>", "#include <project_vertex>\nvFlatShadeViewPos = mvPosition.xyz;");
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "varying vec3 vFlatShadeViewPos;\n#include <common>")
+        .replace(
+          "#include <specularmap_fragment>",
+          `#include <specularmap_fragment>
+          {
+            vec3 faceNormal = normalize( cross( dFdx( vFlatShadeViewPos ), dFdy( vFlatShadeViewPos ) ) );
+            float ndotl = abs( dot( faceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
+            diffuseColor.rgb *= 0.45 + 0.55 * ndotl;
+          }`,
+        );
+    };
+    material.needsUpdate = true;
   }
 
   private async resolveMaterial(
