@@ -13,7 +13,7 @@
       <div class="text-warm-300 mt-4"> <> <a href="/help.html" target="_blank" class="!text-warm-300 underline">What is this?</a></div>
     </div>
 
-    <div class="flex flex-col lg:flex-row gap-4 w-full mt-12">
+    <div id="capture-importer-dropzones-container" class="flex flex-col lg:flex-row gap-4 w-full mt-12">
       <div class="flex-1">
         <h3 class="text-center">RenderDoc Scene Exporter</h3>
         <div id="capture-importer-dropzone" class="dropzone dropzone-segment h-[12rem] m-8" >
@@ -44,6 +44,9 @@
       </div>
     </div>
 
+    <div id="capture-importer-reading-files-screen" class="flex flex-row h-[12rem] mt-12 justify-center items-center hidden">
+      <div class="text-warm-400">Reading files, please wait ...</div>
+    </div>
 
     <div
       id="capture-importer-import-processing-section"
@@ -64,6 +67,60 @@
               <input type="text" id="capture-importer-capture-unit-size" class="text-right" min="0" value="1" />
               <select id="capture-importer-capture-unit-unit" value="m" class="w-12 text-amber-300">
 
+              </select>
+            </div>
+          </div>
+
+          <div class="field row">
+            <div class="label">Input geometry up axis:</div>
+            <div class="input">
+              <select
+                id="capture-importer-up-axis"
+                class="w-24 text-amber-300"
+                value="+z"
+              >
+                <option value="+x">+x</option>
+                <option value="-x">-x</option>
+                <option value="+y">+y</option>
+                <option value="-y">-y</option>
+                <option value="+z">+z</option>
+                <option value="-z">-z</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field row">
+            <div class="label">Input geometry forward axis:</div>
+            <div class="input">
+              <select
+                id="capture-importer-forward-axis"
+                class="w-24 text-amber-300"
+                value="-y"
+              >
+                <option value="+x">+x</option>
+                <option value="-x">-x</option>
+                <option value="+y">+y</option>
+                <option value="-y">-y</option>
+                <option value="+z">+z</option>
+                <option value="-z">-z</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field row">
+            <div class="label">Input geometry right axis:</div>
+            <div class="input">
+              <select
+                id="capture-importer-right-axis"
+                class="w-24 text-amber-300"
+                value="+x"
+              >
+                <option value="+x">+x</option>
+                <option value="-x">-x</option>
+                <option value="+y">+y</option>
+                <option value="-y">-y</option>
+                <option value="+z">+z</option>
+                <option value="-z">-z</option>
               </select>
             </div>
           </div>
