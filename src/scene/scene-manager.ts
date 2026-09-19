@@ -12,6 +12,19 @@ export type CameraProjectionHandler = (projection: CameraProjection) => void;
 
 const VIEW_TRANSITION_DURATION_MS = 500;
 
+/** Unit direction the main scene's camera looks FROM at startup (see the
+ * constructor below) - diagonal, from the positive-x/positive-y/positive-z
+ * octant toward the origin. Exported so anything else that wants to match
+ * this same "look" (e.g. the small mesh-preview panels in
+ * SceneViewerApp.attachMultiMeshPreview() - the resource panel and the
+ * "Fix & export" dialog) doesn't have to duplicate the theta/phi numbers
+ * and risk drifting out of sync with this one. */
+export function getDefaultViewDirection(): THREE.Vector3 {
+  const theta = Math.PI * 0.25;
+  const phi = Math.PI * 0.35;
+  return new THREE.Vector3(Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta));
+}
+
 /** In-flight animated transition to a numpad-triggered view (see
  * startViewTransition()/setAxisView()/viewOppositeDirection()) - `target`
  * never moves during one of these, only offset/quaternion/up, so it's not
@@ -142,16 +155,11 @@ export class SceneManager {
     // Bounds are recomputed every frame from the control camera (see
     // syncOrthographicCamera()) - the constructor values are placeholders.
     this.orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100000);
-    // Initial view angle, matching the old default (theta=pi/4, phi=0.35pi).
-    // A one-time lookAt() here is fine - unlike everywhere else in this
-    // class, there's no prior orientation to preserve at construction time.
-    const initialTheta = Math.PI * 0.25;
-    const initialPhi = Math.PI * 0.35;
-    this.offset.set(
-      10 * Math.sin(initialPhi) * Math.sin(initialTheta),
-      10 * Math.cos(initialPhi),
-      10 * Math.sin(initialPhi) * Math.cos(initialTheta),
-    );
+    // Initial view angle, matching the old default (theta=pi/4, phi=0.35pi)
+    // - see getDefaultViewDirection(). A one-time lookAt() here is fine -
+    // unlike everywhere else in this class, there's no prior orientation
+    // to preserve at construction time.
+    this.offset.copy(getDefaultViewDirection()).multiplyScalar(10);
     this.updateCamera();
     this.camera.lookAt(this.target);
 

@@ -13,7 +13,7 @@ import {
   type Bounds,
   type GeometryArrays,
 } from "./scene/mesh-builder";
-import { computeNormalizationScale, SceneManager } from "./scene/scene-manager";
+import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from "./scene/scene-manager";
 import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
@@ -2581,20 +2581,6 @@ export class SceneViewerApp {
     modelRoot.add(contentGroup);
 
     let overallBounds: Bounds | null = null;
-    // Non-posed data has no coherent shared coordinate system across
-    // multiple draws - each was authored around its own arbitrary local
-    // origin (see this method's doc comment) - so union-ing their raw
-    // positions can put them arbitrarily far apart. The combined bounding
-    // box (and therefore the auto-fit camera below) then ends up
-    // dominated by the empty gap between them rather than the meshes
-    // themselves, making every individual mesh look tiny instead of
-    // filling the frame. Posed data doesn't have this problem (those
-    // positions already describe one real, spatially-coherent scene), and
-    // neither does a single mesh (nothing to be "arbitrarily far" from),
-    // so this only kicks in for a genuine non-posed multi-selection.
-    const arrangeSideBySide = poseMode === "non-posed" && draws.length > 1;
-    let shelfCursorX = 0;
-    const SHELF_GAP = 0.15; // relative to each mesh's own width - just enough to visually separate neighbors
 
     for (const draw of draws) {
       const geometry = new THREE.BufferGeometry();
@@ -2616,23 +2602,26 @@ export class SceneViewerApp {
       const mesh = new THREE.Mesh(geometry, material);
       let bounds = computeBounds(sourceData.positions);
 
-      if (arrangeSideBySide) {
-        // Re-center this ONE mesh at its own bounds' center (removing
-        // whatever arbitrary local-space offset it was authored with),
-        // then place it on a "shelf" along X, edge-to-edge with a small
-        // gap after the previous mesh - so the combined bounding box
-        // below reflects the meshes actually placed next to each other,
-        // not the unrelated span between their original origins.
+      if (poseMode === "non-posed") {
+        // Non-posed data has no coherent shared coordinate system across
+        // multiple draws - each was authored around its own arbitrary
+        // local origin (see this method's doc comment) - so trusting
+        // those raw positions when several are previewed together can put
+        // them arbitrarily far apart: the combined bounding box (and
+        // therefore the auto-fit camera below) ends up dominated by the
+        // empty gap between them rather than the meshes themselves,
+        // making every individual mesh look tiny instead of filling the
+        // frame. Moving each mesh so ITS OWN bounding-box center sits at
+        // the shared origin sidesteps that - every mesh's original origin
+        // is discarded rather than trusted, so the combined bounding box
+        // always reflects actual geometry (bounded by the largest single
+        // mesh) instead of an arbitrary spread between authoring origins.
+        // Posed data is left exactly where it is: those positions
+        // describe one real, spatially-coherent scene, and moving them
+        // would break that relative placement.
         const meshCenter = boundsCenter(bounds);
-        const meshWidth = Math.max(bounds.max.x - bounds.min.x, 1e-6);
-        shelfCursorX += meshWidth / 2;
-        mesh.position.set(shelfCursorX - meshCenter.x, -meshCenter.y, -meshCenter.z);
-        shelfCursorX += meshWidth / 2 + meshWidth * SHELF_GAP;
-
-        bounds = {
-          min: bounds.min.clone().add(mesh.position),
-          max: bounds.max.clone().add(mesh.position),
-        };
+        mesh.position.set(-meshCenter.x, -meshCenter.y, -meshCenter.z);
+        bounds = { min: bounds.min.clone().sub(meshCenter), max: bounds.max.clone().sub(meshCenter) };
       }
 
       contentGroup.add(mesh);
@@ -2646,14 +2635,16 @@ export class SceneViewerApp {
     const center = boundsCenter(overallBounds);
     const rawSize = overallBounds.max.clone().sub(overallBounds.min);
 
-    // Non-posed preview copy: centered at the origin, then scaled down
-    // (never up) to fit inside a 100x100x100 cube if it doesn't already -
-    // applied as contentGroup's own position/scale (not baked into the
-    // geometry) so it's purely a property of this preview render, not of
-    // sourceData itself. Object3D's local matrix scales geometry BEFORE
-    // translating by position, so position has to be -scale*center (not
-    // just -center) for the result to be "centered, then scaled" rather
-    // than "centered by an unscaled offset, then scaled off-center".
+    // The whole assembly (posed data as one coherent scene, non-posed data
+    // already re-centered per-mesh above) is centered at the origin, then
+    // scaled down (never up) to fit inside a 100x100x100 cube if it
+    // doesn't already - applied as contentGroup's own position/scale (not
+    // baked into the geometry) so it's purely a property of this preview
+    // render, not of sourceData itself. Object3D's local matrix scales
+    // geometry BEFORE translating by position, so position has to be
+    // -scale*center (not just -center) for the result to be "centered,
+    // then scaled" rather than "centered by an unscaled offset, then
+    // scaled off-center".
     const PREVIEW_CUBE_SIZE = 100;
     const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-6);
     const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
@@ -2680,10 +2671,15 @@ export class SceneViewerApp {
 
     let fitDistance = computeFitDistance(1);
 
-    modelRoot.rotation.x = -0.65;
-    modelRoot.rotation.y = 0.85;
-
-    camera.position.set(0, 0, fitDistance);
+    // Same diagonal look direction the main scene's camera starts from
+    // (see getDefaultViewDirection()) - the model itself starts at
+    // identity rotation (dragging, see handlePointerMove() below, is the
+    // only thing that ever rotates it) and the camera supplies this angle
+    // instead, so "current view" is always exactly "camera position/
+    // orientation", with no separate baked-in model rotation to account
+    // for elsewhere (see the gizmo proxy math below).
+    const viewDirection = getDefaultViewDirection();
+    camera.position.copy(viewDirection).multiplyScalar(fitDistance);
     camera.lookAt(0, 0, 0);
 
     const light = new THREE.DirectionalLight(0xffffff, 1.3);
@@ -2711,7 +2707,12 @@ export class SceneViewerApp {
       camera.aspect = aspect;
       fitDistance = computeFitDistance(aspect);
       currentDistance = fitDistance * zoomRatio;
-      camera.position.set(0, 0, currentDistance);
+      // Distance changes (zoom/resize), but the DIRECTION the camera sits
+      // along never does - camera.lookAt(0,0,0) from further/closer along
+      // the same ray produces the same orientation every time, so the
+      // gizmo proxy math below doesn't need to treat camera.quaternion as
+      // something that changes per frame.
+      camera.position.copy(viewDirection).multiplyScalar(currentDistance);
       camera.lookAt(0, 0, 0);
       camera.updateProjectionMatrix();
     };
@@ -2721,13 +2722,20 @@ export class SceneViewerApp {
       // the same OrientationGizmo the main viewport uses (see
       // scene-manager.ts) - just repositioned/shrunk via the
       // "orientation-gizmo--preview" CSS modifier. It normally reads the
-      // CAMERA's orientation, but here the CAMERA never rotates - dragging
-      // spins modelRoot instead (see handlePointerMove() below) - so it's
-      // fed a small proxy object holding modelRoot's rotation INVERTED
-      // (updated in tick()): rotating the model one way is optically
-      // equivalent to rotating the camera the other way around a
-      // stationary object, so this still shows which way the world axes
-      // currently point relative to the viewer.
+      // CAMERA's orientation directly, but here the camera itself never
+      // rotates after setup (only its distance changes, along the fixed
+      // viewDirection - see resize()/handleWheel()) while dragging spins
+      // modelRoot instead (see handlePointerMove() below) - so it's fed a
+      // small proxy object holding the COMBINED orientation (updated in
+      // tick()): world axis -> rotated by the model's current drag
+      // rotation -> viewed from the camera's fixed diagonal angle. That
+      // combined value is modelRoot.quaternion inverted and then
+      // multiplied by camera.quaternion (apply the model's rotation
+      // first, then the camera's, matching OrientationGizmo.update()'s
+      // own "invert what's passed in, then apply" convention) - at rest
+      // (no drag yet) this correctly shows the same diagonal angle
+      // camera.quaternion alone would, and updates further as the model
+      // is dragged.
       const gizmo = new OrientationGizmo();
       gizmo.element.classList.add("orientation-gizmo--preview");
       container.appendChild(gizmo.element);
@@ -2779,7 +2787,7 @@ export class SceneViewerApp {
         const zoomFactor = Math.exp(event.deltaY * 0.0015);
         zoomRatio = THREE.MathUtils.clamp(zoomRatio * zoomFactor, 0.2, 6);
         currentDistance = fitDistance * zoomRatio;
-        camera.position.set(0, 0, currentDistance);
+        camera.position.copy(viewDirection).multiplyScalar(currentDistance);
         camera.lookAt(0, 0, 0);
       };
 
@@ -2800,7 +2808,7 @@ export class SceneViewerApp {
           resizeObserver.disconnect();
           return;
         }
-        gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert();
+        gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert().multiply(camera.quaternion);
         gizmo.update(gizmoCameraProxy as unknown as THREE.Camera);
         renderer.render(scene, camera);
         requestAnimationFrame(tick);
