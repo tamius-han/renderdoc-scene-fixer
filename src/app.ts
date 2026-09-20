@@ -4239,10 +4239,6 @@ export class SceneViewerApp {
       depthTest: false,
       depthWrite: false,
     });
-    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-    ring.userData.isSelectionVisual = true;
-    ring.renderOrder = renderOrderBase + 1;
-
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.outlineQuadMaterial);
     quad.frustumCulled = false;
     this.outlineQuadScene.add(quad);
