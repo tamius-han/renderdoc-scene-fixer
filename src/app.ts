@@ -3209,6 +3209,38 @@ export class SceneViewerApp {
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
+      // Yaw/pitch tracked as separate spherical-style angles (rather than
+      // mutating modelRoot.rotation.x/.y directly, the old approach) and
+      // recomposed into modelRoot.quaternion on every move.
+      //
+      // Composition order matters here, and it's easy to get backwards:
+      // yaw must be applied FIRST (innermost) and pitch SECOND (outermost)
+      // - i.e. modelRoot.quaternion = pitchQuaternion.multiply(yawQuaternion),
+      // NOT the other way round. Reasoning: the model's own "up" is the
+      // point (0,1,0) in its local space. Rotating that point about the
+      // world Y axis (yaw, whatever the angle) always leaves it exactly
+      // where it started, since it sits ON that axis. So as long as yaw is
+      // applied to the RAW model first, the model's up point ends up at a
+      // position that depends only on the fixed pitch (constant during a
+      // pure horizontal drag) and not at all on the current yaw angle -
+      // meaning purely horizontal dragging can never make the model's up
+      // axis wander, however far it's already been pitched.
+      // Doing it the other way (pitch first, yaw second - tilt the model,
+      // *then* spin the tilted result around world Y) is exactly the
+      // motion of a tilted spinning top: the model's own up axis sweeps
+      // out a visible cone as yaw changes, i.e. the "wobble" this is
+      // fixing.
+      // The pitch axis itself is the camera's actual (fixed - the camera
+      // never rotates, see viewDirection above) screen-right vector,
+      // rather than an arbitrary world axis, so vertical dragging reads as
+      // "tilt the view up/down" rather than introducing a sideways skew
+      // whenever the default diagonal viewing angle isn't axis-aligned.
+      let yawAngle = 0;
+      let pitchAngle = 0;
+      const worldUpAxis = new THREE.Vector3(0, 1, 0);
+      const pitchAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      const yawQuaternion = new THREE.Quaternion();
+      const pitchQuaternion = new THREE.Quaternion();
 
       const handlePointerDown = (event: PointerEvent) => {
         // Left OR middle mouse button rotate - unlike the main viewport
@@ -3228,16 +3260,16 @@ export class SceneViewerApp {
         const dy = event.clientY - lastY;
         lastX = event.clientX;
         lastY = event.clientY;
-        modelRoot.rotation.y += dx * 0.01;
+        yawAngle += dx * 0.01;
         // Clamped to +-90 degrees so vertical dragging can't carry the model
         // past vertical and flip it upside down - horizontal dragging (yaw,
         // above) has no such limit since spinning all the way around is fine.
         const PITCH_LIMIT = Math.PI / 2;
-        modelRoot.rotation.x = THREE.MathUtils.clamp(
-          modelRoot.rotation.x + dy * 0.01,
-          -PITCH_LIMIT,
-          PITCH_LIMIT,
-        );
+        pitchAngle = THREE.MathUtils.clamp(pitchAngle + dy * 0.01, -PITCH_LIMIT, PITCH_LIMIT);
+
+        yawQuaternion.setFromAxisAngle(worldUpAxis, yawAngle);
+        pitchQuaternion.setFromAxisAngle(pitchAxis, pitchAngle);
+        modelRoot.quaternion.copy(pitchQuaternion).multiply(yawQuaternion);
       };
       const handlePointerUp = (event: PointerEvent) => {
         pointerDown = false;
