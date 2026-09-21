@@ -345,7 +345,18 @@ export const DEFAULT_MAX_SCALE_ANISOTROPY = 1.35;
  *   fit is clean but the "distortion" is probably intentional (see that
  *   field's doc comment) - a good fit alone doesn't imply a good
  *   CANDIDATE, since an intentional aspect-ratio change fits just as
- *   cleanly as an accidental one. */
+ *   cleanly as an accidental one.
+ *
+ * That second check assumes genuine capture distortion is USUALLY closer
+ * to a uniform scale than a drastic one - true for some pipelines, but
+ * not a safe assumption everywhere: app.ts's autoCorrectRenderDocDistortion()
+ * disables it entirely (maxScaleAnisotropy: Infinity) because for THAT
+ * capture pipeline, the distortion being corrected routinely presents AS
+ * a large anisotropic squish - excluding high-anisotropy fits there would
+ * throw out the very thing being detected, not just intentional design
+ * choices. Pass maxScaleAnisotropy: Infinity for any other caller in the
+ * same situation (systemic distortion that's known to look anisotropic on
+ * this data, not merely suspected to be). */
 export function isGoodDistortionFitCandidate(
   result: Pick<AffineDistortionResult, "relativeFitError" | "scaleAnisotropy">,
   options: { maxRelativeFitError?: number; maxScaleAnisotropy?: number } = {},
@@ -386,16 +397,19 @@ export function calculateDistortionMatrix(
  *
  * For posedToNonPosedInPlace, L gets split further via polar decomposition
  * (L = R * S, R a rotation, S a symmetric stretch/shear) and only S is
- * used. Two reasons: (1) R aligns posed's orientation to non-posed SOURCE
- * geometry's own local-space axes, which is often an arbitrary convention
- * with no relation to world space's up direction - baking it in would
- * reorient every corrected object to match whatever the source mesh's
- * local axes happen to be, not to look "upright" in the scene. (2) S, built
- * from SVD singular values (always >= 0), can never itself contain a
- * reflection - so using it alone sidesteps the handedness/chirality
- * question entirely for the default path: no rotation is applied at all,
- * so posed geometry's own chirality is trivially preserved. See
- * HandednessMode for the override that deliberately introduces a flip.
+ * used - R (the same rotation exposed on its own as distortionOrientation
+ * below) applies to an object's placement, not its shape, and app.ts now
+ * applies it once, to the whole scene, rather than baking a possibly-
+ * different R into each individual draw (see distortionOrientation's own
+ * doc comment for why: most placed objects share the scene's up direction
+ * but not a single global forward/right, so a per-object R generally
+ * doesn't mean "upright" for anything other than the one object it was
+ * fit from). S alone, being built from SVD singular values (always >= 0),
+ * also can never itself contain a reflection - so using it alone
+ * sidesteps the handedness/chirality question entirely for the per-draw
+ * shape correction: no rotation is baked in there at all, so posed
+ * geometry's own chirality is trivially preserved. See HandednessMode for
+ * the override that deliberately introduces a flip.
  */
 function analyzeTransformMatrix(
   nonPosedVertices: THREE.Vector3[],
@@ -451,11 +465,15 @@ function analyzeTransformMatrix(
   const nonPosedToPosed = affineFromLinearAndTranslation(nonPosedToPosedLinear, nonPosedCentroid, posedCentroid);
   const posedToNonPosed = affineFromLinearAndTranslation(posedToNonPosedLinear, posedCentroid, nonPosedCentroid);
 
-  // Polar-decompose the posed-facing linear map so we can drop its rotation
-  // and keep only the symmetric stretch/shear - see this function's doc
-  // comment for why. u/v/singularValues come from an SVD of
-  // posedToNonPosedLinear (posedToNonPosedLinear = U * Sigma * V^T);
-  // R = U*V^T is the rotation part, S = V*Sigma*V^T is the stretch part.
+  // Polar-decompose the posed-facing linear map to get an anisotropic
+  // stretch/shear (S) with no rotation baked in - see this function's doc
+  // comment for why only S is used for the per-vertex shape correction.
+  // u/v/singularValues come from an SVD of posedToNonPosedLinear
+  // (posedToNonPosedLinear = U * Sigma * V^T); naiveRotation = U*V^T would
+  // be the rotation part of THIS SAME fit, S = V*Sigma*V^T the stretch
+  // part - naiveRotation is kept only as a handedness signal below, NOT
+  // used as distortionOrientation (see the rotation fit further down for
+  // why).
   const { u, singularValues, v } = svd3x3(posedToNonPosedLinear);
   const naiveRotation = u.clone().multiply(v.clone().transpose());
   const handednessMismatchDetected = naiveRotation.determinant() < 0;
@@ -476,27 +494,29 @@ function analyzeTransformMatrix(
 
   const posedToNonPosedInPlace = affineFromLinearAndTranslation(stretch, posedCentroid, posedCentroid);
 
-  // Rotation-preserving variant (posedToNonPosedOrientedInPlace) needs a
-  // GUARANTEED proper rotation (det=+1) - reflecting posed geometry
-  // (always right-handed - see HandednessMode) would turn it inside out.
-  // The raw polar-decomposition rotation (naiveRotation = u*v^T) already
-  // satisfies that whenever handednessMismatchDetected is false; when
-  // it's true, fall back to the Kabsch-fitted rotation from
-  // analyzeTransform() above, which is always a proper rotation by
-  // construction (it's a genuine rigid-alignment fit, not a polar
-  // decomposition of this fit's own linear map, but a reasonable
-  // substitute for just this edge case) rather than trying to repair
-  // naiveRotation by hand.
-  const orientationRotation = handednessMismatchDetected
-    ? new THREE.Matrix3().setFromMatrix4(
-        new THREE.Matrix4().makeRotationFromQuaternion(
-          analyzeTransform(nonPosedVertices, posedVertices).posedToNonPosedRotation,
-        ),
-      )
-    : naiveRotation;
+  // Fit the rotation SEPARATELY from shape correction, rather than pulling
+  // it out of posedToNonPosedLinear's own polar decomposition (naiveRotation
+  // above). In the noise-free case the two agree exactly - M = R*S, so R IS
+  // M's own rotation part - but they solve genuinely different problems
+  // once real vertex noise/residual is involved: naiveRotation is whatever
+  // rotation happens to fall out of the ONE joint affine fit that best
+  // explains posed from non-posed overall, while this instead directly asks
+  // "once shape is already corrected (stretch applied), what's the best
+  // RIGID alignment of THAT to non-posed?" - the same order these two
+  // corrections are actually applied in (see applyDistortionToScene():
+  // shape baked in first, rotation applied to the whole scene after) and
+  // the more reliable of the two against real capture data. Kabsch-fit
+  // exactly like analyzeTransform() above, just against the
+  // shape-corrected posed vertices instead of the raw ones -
+  // solveOptimalRotation() already guarantees a proper (det=+1) rotation by
+  // construction, so this needs no separate handedness fallback the way the
+  // old naiveRotation-based approach did.
+  const correctedPosedCentered = posedCentered.map((p) => p.clone().applyMatrix3(stretch));
+  const orientationRotation = solveOptimalRotation(computeCovariance(correctedPosedCentered, nonPosedCentered));
   const orientedLinear = orientationRotation.clone().multiply(stretch);
   const posedToNonPosedOrientedInPlace = affineFromLinearAndTranslation(orientedLinear, posedCentroid, posedCentroid);
   const distortionOrientation = matrix3ToQuaternion(orientationRotation);
+
 
   // How well a single affine map actually explains posed from non-posed -
   // see relativeFitError's own doc comment. Measured against

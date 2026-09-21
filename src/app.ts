@@ -18,7 +18,7 @@ import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
-import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, DEFAULT_FIT_ERROR_THRESHOLD, type AffineDistortionResult, type HandednessMode } from "./mesh-tools/calculator";
+import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult, type HandednessMode } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
@@ -145,6 +145,18 @@ export class SceneViewerApp {
    * applyDistortionToScene()'s doc comment for why the latter previously
    * made corrected scenes come out visibly tilted. */
   private sceneRotation = new THREE.Quaternion();
+  /** Index into loadedDraws of whichever object's fit was actually
+   * broadcast by the most recent applyDistortionToScene() call - null
+   * before any correction has run, after a fresh reconstructScene(), or
+   * for a correction with no single source object to point at (the
+   * IntelGPA landmark-pair distortion is fit from a dropped .obj pair, not
+   * from any one loaded draw). Powers the "Highlight correction source"
+   * button (see highlightDistortionSource()) - after the auto-consensus
+   * picker or a manually chosen scale-reference both turned out to
+   * sometimes pick a poor object without it being obvious from the
+   * corrected result alone, being able to just LOOK at which object was
+   * actually used is what makes that trustworthy to judge. */
+  private lastDistortionSourceIndex: number | null = null;
   /** World-space axis (in RAW, pre-sceneRotation coordinates - i.e. as
    * draw.geometryData.positions are actually stored) that
    * detectWorldUpAxis() concluded was most likely "up", set once per
@@ -332,6 +344,7 @@ export class SceneViewerApp {
 
 
   private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
+  private highlightCorrectionSourceBtn = this.el<HTMLButtonElement>("highlight-correction-source-btn");
   private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
@@ -554,6 +567,7 @@ export class SceneViewerApp {
 
 
     this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
+    this.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
     this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
@@ -972,6 +986,8 @@ export class SceneViewerApp {
       Config.sessionConfig.tools.activeTool = null;
       this.cancelGroundPlaneTool();
       this.manualUpRotation = null;
+      this.lastDistortionSourceIndex = null;
+      this.updateHighlightCorrectionSourceBtn();
       if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
       this.cancelVolumeSelectTool();
       this.clearSelectAreaShape();
@@ -2367,7 +2383,7 @@ export class SceneViewerApp {
    * rebuild picks up the new rotation exactly like any other. */
   private applyDistortionToScene(
     distortion: AffineDistortionResult,
-    options: { rebuild?: boolean } = {},
+    options: { rebuild?: boolean; sourceIndex?: number } = {},
   ): { corrected: number; skipped: number } {
     const upAxisMode = this.upAxisSelect.value as "auto" | "x" | "y" | "z" | "manual";
     const upAxisAdjustment = this.buildUpAxisAdjustment(upAxisMode);
@@ -2400,10 +2416,51 @@ export class SceneViewerApp {
       this.sceneRotation = distortion.distortionOrientation.clone();
       this.applySceneRotation();
 
+      // See lastDistortionSourceIndex's own doc comment - undefined
+      // (IntelGPA's landmark-pair distortion, which isn't fit from any one
+      // loaded draw) clears it rather than leaving a stale index from
+      // whatever the previous correction happened to use.
+      this.lastDistortionSourceIndex = options.sourceIndex ?? null;
+      this.updateHighlightCorrectionSourceBtn();
+
       if (options.rebuild ?? true) this.rebuildVisibleScene();
     }
 
     return { corrected, skipped };
+  }
+
+  /** Enables/labels the "Highlight correction source" button to match
+   * lastDistortionSourceIndex's current state - called after every
+   * applyDistortionToScene() and whenever a fresh reconstructScene()
+   * clears it. */
+  private updateHighlightCorrectionSourceBtn(): void {
+    this.highlightCorrectionSourceBtn.disabled = this.lastDistortionSourceIndex === null;
+  }
+
+  /** The "Highlight correction source" button: selects (and scrolls the
+   * object list to) whichever object's fit was actually broadcast by the
+   * most recent distortion correction - manual, automatic RenderDoc, or
+   * IntelGPA landmark (though the last of those clears
+   * lastDistortionSourceIndex instead, since it isn't fit from any one
+   * loaded draw - the button is disabled whenever there's nothing to
+   * point at, so this shouldn't normally be reachable with it null, but
+   * the guard costs nothing). Exists because the auto-consensus picker
+   * (and, just as easily, a manually-chosen scale-reference) can pick an
+   * object whose fit is clean but whose ROTATION doesn't actually
+   * represent the scene's true orientation (e.g. it's genuinely tilted/
+   * mounted at an angle in the world, or just poorly-suited to rotation
+   * extraction) - a failure mode that isn't visible from the corrected
+   * result alone, only from knowing (and looking at) which object was
+   * actually used. */
+  private highlightDistortionSource(): void {
+    const index = this.lastDistortionSourceIndex;
+    if (index === null) return;
+    if (this.isObjectHidden(index)) {
+      this.setStatus("The object used for the last correction is currently hidden by the size filter.");
+      return;
+    }
+    this.selectOnly(index);
+    this.scrollDrawIntoView(index);
   }
 
   /** Fits a distortion from every eligible loaded draw, picks the SINGLE
@@ -2416,22 +2473,24 @@ export class SceneViewerApp {
    *
    * Not every posed/non-posed pair is a good CANDIDATE for computing the
    * distortion FROM, even though every draw still receives it once it's
-   * chosen. isGoodDistortionFitCandidate() (calculator.ts) rejects two
-   * different failure shapes, counted separately below for diagnosability:
-   * - a rigged/skinned mesh's posed shape can genuinely differ from its
-   *   bind pose by more than any single 3x3 matrix can express (different
-   *   bones move independently) - high relativeFitError. Such a mesh can't
-   *   tell us what the distortion IS, but it's still assumed to be
-   *   AFFECTED by the same capture-wide distortion as everything else, so
-   *   it still gets the chosen matrix applied at the end.
-   * - a mesh that fits a single matrix just fine, but that matrix stretches
-   *   one axis a lot more than another - high scaleAnisotropy - is just as
-   *   plausibly an INTENTIONAL difference between the source model and its
-   *   in-game appearance (a prop deliberately stretched to fit a space, a
-   *   LOD authored with different proportions) as it is a capture bug; a
-   *   clean fit doesn't tell those apart, so a drastic aspect-ratio change
-   *   is excluded from candidacy - it's probably not telling us about a
-   *   real, scene-wide distortion at all.
+   * chosen. isGoodDistortionFitCandidate() (calculator.ts) is only used
+   * for its relativeFitError half here (maxScaleAnisotropy: Infinity,
+   * i.e. that check is disabled) - a rigged/skinned mesh's posed shape can
+   * genuinely differ from its bind pose by more than any single 3x3
+   * matrix can express (different bones move independently), which is a
+   * real reason to reject it as a candidate: high relativeFitError.
+   * Such a mesh can't tell us what the distortion IS, but it's still
+   * assumed to be AFFECTED by the same capture-wide distortion as
+   * everything else, so it still gets the chosen matrix applied at the
+   * end. scaleAnisotropy, by contrast, is NOT filtered on here: for THIS
+   * capture pipeline, the distortion being corrected typically presents
+   * AS an anisotropic squish - posed meshes routinely come out stretched
+   * relative to non-posed on some axes more than others even with no
+   * deliberate aspect-ratio authoring involved - so excluding a
+   * high-anisotropy fit would throw out the very distortion this whole
+   * function exists to detect, not just an intentional design choice (see
+   * scaleAnisotropy's own doc comment in calculator.ts for the general
+   * case that filter is meant for elsewhere).
    *
    * Among the remaining candidates, findDistortionConsensus() (calculator.ts)
    * groups them by approximate agreement: if several independently-fitted
@@ -2446,16 +2505,20 @@ export class SceneViewerApp {
    * plus distortion.distortionOrientation (the fit's rotation ALONE)
    * applied once to the whole scene - see that method's doc comment for
    * why rotation is handled as a separate, whole-scene step rather than
-   * baked into each draw individually. */
+   * baked into each draw individually. Even with the consensus-picking
+   * above, the winning object's own fit can still turn out to be a poor
+   * representative for the scene's true orientation (e.g. it's genuinely
+   * mounted/placed at an angle in the world) without that being obvious
+   * from the corrected shape alone - see highlightDistortionSource(),
+   * which is exactly for checking that by eye. */
   private autoCorrectRenderDocDistortion(): void {
     let skippedHighResidual = 0;
-    let skippedHighAnisotropy = 0;
     let skippedNoPair = 0;
     let failed = 0;
 
-    const candidates: Array<{ draw: LoadedDraw; distortion: AffineDistortionResult; linear: THREE.Matrix3 }> = [];
+    const candidates: Array<{ index: number; draw: LoadedDraw; distortion: AffineDistortionResult; linear: THREE.Matrix3 }> = [];
 
-    for (const draw of this.loadedDraws) {
+    for (const [index, draw] of this.loadedDraws.entries()) {
       if (draw.originalPosedPositions === null) {
         skippedNoPair++;
         continue;
@@ -2473,14 +2536,31 @@ export class SceneViewerApp {
         continue;
       }
 
-      candidates.push({ draw, distortion, linear: new THREE.Matrix3().setFromMatrix4(distortion.posedToNonPosedOrientedInPlace) });
+      // See this method's own doc comment for why maxScaleAnisotropy is
+      // disabled here - only a poor relativeFitError disqualifies a
+      // candidate for this capture pipeline.
+      if (!isGoodDistortionFitCandidate(distortion, { maxScaleAnisotropy: Infinity })) {
+        skippedHighResidual++;
+        continue;
+      }
+
+      // Cluster on the SHAPE-ONLY correction (S), not posedToNonPosedOrientedInPlace
+      // (R*S) - R (distortion.distortionOrientation) is expected to differ from
+      // object to object (each object's own bind-pose forward/right convention
+      // vs. its arbitrary placement yaw - see distortionOrientation's doc
+      // comment in calculator.ts), so folding it into the consensus comparison
+      // makes genuinely-agreeing objects look like they disagree, breaking
+      // consensus down to near-singleton clusters. S is the part that's
+      // actually expected to be consistent across unrelated objects (the real,
+      // systemic capture/export distortion), so that's what agreement should
+      // be measured on.
+      candidates.push({ index, draw, distortion, linear: new THREE.Matrix3().setFromMatrix4(distortion.posedToNonPosedInPlace) });
     }
 
     console.log("[reconstruct] RenderDoc distortion candidates", {
       total: this.loadedDraws.length,
       eligible: candidates.length,
       skippedHighResidual,
-      skippedHighAnisotropy,
       skippedNoPair,
       failed,
     });
@@ -2511,7 +2591,7 @@ export class SceneViewerApp {
       scaleAnisotropy: winner.distortion.scaleAnisotropy,
     });
 
-    const { corrected, skipped } = this.applyDistortionToScene(winner.distortion, { rebuild: false });
+    const { corrected, skipped } = this.applyDistortionToScene(winner.distortion, { rebuild: false, sourceIndex: winner.index });
     console.log("[reconstruct] auto-correct RenderDoc distortion", { corrected, skipped });
   }
 
@@ -2620,7 +2700,7 @@ export class SceneViewerApp {
       return;
     }
 
-    const { corrected, skipped } = this.applyDistortionToScene(distortion);
+    const { corrected, skipped } = this.applyDistortionToScene(distortion, { sourceIndex: referenceIndex });
 
     if (corrected === 0) {
       this.setStatus("No objects have a separate posed mesh to correct - nothing to do.");
@@ -3209,6 +3289,38 @@ export class SceneViewerApp {
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
+      // Yaw/pitch tracked as separate spherical-style angles (rather than
+      // mutating modelRoot.rotation.x/.y directly, the old approach) and
+      // recomposed into modelRoot.quaternion on every move.
+      //
+      // Composition order matters here, and it's easy to get backwards:
+      // yaw must be applied FIRST (innermost) and pitch SECOND (outermost)
+      // - i.e. modelRoot.quaternion = pitchQuaternion.multiply(yawQuaternion),
+      // NOT the other way round. Reasoning: the model's own "up" is the
+      // point (0,1,0) in its local space. Rotating that point about the
+      // world Y axis (yaw, whatever the angle) always leaves it exactly
+      // where it started, since it sits ON that axis. So as long as yaw is
+      // applied to the RAW model first, the model's up point ends up at a
+      // position that depends only on the fixed pitch (constant during a
+      // pure horizontal drag) and not at all on the current yaw angle -
+      // meaning purely horizontal dragging can never make the model's up
+      // axis wander, however far it's already been pitched.
+      // Doing it the other way (pitch first, yaw second - tilt the model,
+      // *then* spin the tilted result around world Y) is exactly the
+      // motion of a tilted spinning top: the model's own up axis sweeps
+      // out a visible cone as yaw changes, i.e. the "wobble" this is
+      // fixing.
+      // The pitch axis itself is the camera's actual (fixed - the camera
+      // never rotates, see viewDirection above) screen-right vector,
+      // rather than an arbitrary world axis, so vertical dragging reads as
+      // "tilt the view up/down" rather than introducing a sideways skew
+      // whenever the default diagonal viewing angle isn't axis-aligned.
+      let yawAngle = 0;
+      let pitchAngle = 0;
+      const worldUpAxis = new THREE.Vector3(0, 1, 0);
+      const pitchAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      const yawQuaternion = new THREE.Quaternion();
+      const pitchQuaternion = new THREE.Quaternion();
 
       const handlePointerDown = (event: PointerEvent) => {
         // Left OR middle mouse button rotate - unlike the main viewport
@@ -3228,16 +3340,16 @@ export class SceneViewerApp {
         const dy = event.clientY - lastY;
         lastX = event.clientX;
         lastY = event.clientY;
-        modelRoot.rotation.y += dx * 0.01;
+        yawAngle += dx * 0.01;
         // Clamped to +-90 degrees so vertical dragging can't carry the model
         // past vertical and flip it upside down - horizontal dragging (yaw,
         // above) has no such limit since spinning all the way around is fine.
         const PITCH_LIMIT = Math.PI / 2;
-        modelRoot.rotation.x = THREE.MathUtils.clamp(
-          modelRoot.rotation.x + dy * 0.01,
-          -PITCH_LIMIT,
-          PITCH_LIMIT,
-        );
+        pitchAngle = THREE.MathUtils.clamp(pitchAngle + dy * 0.01, -PITCH_LIMIT, PITCH_LIMIT);
+
+        yawQuaternion.setFromAxisAngle(worldUpAxis, yawAngle);
+        pitchQuaternion.setFromAxisAngle(pitchAxis, pitchAngle);
+        modelRoot.quaternion.copy(pitchQuaternion).multiply(yawQuaternion);
       };
       const handlePointerUp = (event: PointerEvent) => {
         pointerDown = false;
@@ -4239,10 +4351,6 @@ export class SceneViewerApp {
       depthTest: false,
       depthWrite: false,
     });
-    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-    ring.userData.isSelectionVisual = true;
-    ring.renderOrder = renderOrderBase + 1;
-
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.outlineQuadMaterial);
     quad.frustumCulled = false;
     this.outlineQuadScene.add(quad);
