@@ -163,6 +163,10 @@ p {
     }
   }
 
+  select {
+    @apply border-b border-b-1 border-dashed border-b-amber-500 px-2;
+  }
+
   &:has(.disabled) {
     @apply opacity-50 pointer-events-none;
   }
