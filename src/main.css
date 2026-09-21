@@ -704,7 +704,7 @@ input[type="file"] { display: none; }
 .overlay-backdrop-blur { backdrop-filter: blur(1rem); }
 
 .tool-menu-overlay {
-  @apply absolute top-0 left-0 z-10 p-4 w-full;
+  @apply absolute top-0 left-0 z-10 p-4;
 
   .tools {
     @apply flex flex-row gap-2 bg-brown-900/90 px-4 py-2;
