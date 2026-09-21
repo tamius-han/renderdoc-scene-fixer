@@ -6,12 +6,13 @@ import { guessIntelGPAImportTargetFromFilename, guessIntelGPAImportTargetsFromFi
 import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
-import { collectFromDrop, VirtualFileSystem } from '../../filesystem';
+import { collectFromDrop, collectFromInput, VirtualFileSystem } from '../../filesystem';
 import type { AffineDistortionResult } from '../../mesh-tools/calculator';
 import { calculateLandmarkTransform } from '../../mesh-tools/landmark-matching';
 import { UNITS } from '../../util/const.unit-conversion';
 import { axisLetter, remapObjOrientation } from '../../util/axis-orientation';
 import type { ParsedOBJ } from '../../types';
+import { InputAxisMapper } from '../common/input-axis-mapper/cmp.input-axis-mapper';
 
 enum ImportType {
   Unknown = 0,
@@ -60,11 +61,7 @@ export class CaptureImporter extends HTMLElement {
     maxSceneSizeInput: HTMLInputElement;
     enforceInitialScaleLimitCheckbox: HTMLInputElement;
     initialScaleLimitInput: HTMLInputElement;
-
-    // orientation
-    upAxis: HTMLSelectElement;
-    forwardAxis: HTMLSelectElement;
-    rightAxis: HTMLSelectElement;
+    inputAxisMapper: InputAxisMapper;
 
     reconstructBtn: HTMLButtonElement;
     recalculateCorrectionBtn: HTMLButtonElement;
@@ -149,9 +146,6 @@ export class CaptureImporter extends HTMLElement {
     this.elements.enforceInitialScaleLimitCheckbox = this.querySelector("#capture-importer-enforce-initial-scale-limit") as HTMLInputElement;
     this.elements.initialScaleLimitInput = this.querySelector("#capture-importer-initial-scale-limit") as HTMLInputElement;
 
-    this.elements.upAxis = this.querySelector("#capture-importer-up-axis") as HTMLSelectElement;
-    this.elements.forwardAxis = this.querySelector("#capture-importer-forward-axis") as HTMLSelectElement;
-    this.elements.rightAxis = this.querySelector("#capture-importer-right-axis") as HTMLSelectElement;
 
     // reconstruct button
     this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
@@ -266,10 +260,6 @@ export class CaptureImporter extends HTMLElement {
     this.elements.enforceInitialScaleLimitCheckbox.checked = this.appConfig.config.importOptions.forceInitialScaleLimit;
     this.elements.initialScaleLimitInput.value = this.appConfig.config.importOptions.initialScaleLimit as any;
 
-    this.elements.upAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.up;
-    this.elements.forwardAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.forward;
-    this.elements.rightAxis.value = this.appConfig.config.importOptions.inputGeometryOrientation.right;
-
     // disable appropriate fields
     {
       if (!this.elements.enforceMaxSceneSizeCheckbox.checked) {
@@ -324,50 +314,10 @@ export class CaptureImporter extends HTMLElement {
         this.appConfig.config.importOptions.initialScaleLimit = Number(this.elements.initialScaleLimitInput.value);
       });
 
-      this.elements.upAxis.addEventListener("change", () => {
-        this.setInputGeometryOrientation('up', this.elements.upAxis.value);
-      });
-      this.elements.forwardAxis.addEventListener("change", () => {
-        this.setInputGeometryOrientation('forward', this.elements.forwardAxis.value);
-      });
-      this.elements.rightAxis.addEventListener("change", () => {
-        this.setInputGeometryOrientation('right', this.elements.rightAxis.value);
-      });
+
     }
   }
 
-  private axisSelectElement(axis: 'up' | 'forward' | 'right'): HTMLSelectElement {
-    if (axis === 'up') return this.elements.upAxis;
-    if (axis === 'forward') return this.elements.forwardAxis;
-    return this.elements.rightAxis;
-  }
-
-  /** Sets one of the 3 input-geometry orientation fields, keeping the
-   * invariant that all 3 always name a DIFFERENT axis: if the new value
-   * would put `axis` on the same axis (ignoring sign) as one of the other
-   * two fields, that other field is bumped to `axis`'s OLD value instead
-   * of being left colliding. E.g. starting from up:+y, forward:+z,
-   * right:+x, setting up to -z collides with forward (both 'z') - forward
-   * becomes +y (up's old value), leaving up:-z, forward:+y, right:+x. At
-   * most one other field can ever collide, since the invariant holds
-   * before every call. */
-  private setInputGeometryOrientation(axis: 'up' | 'forward' | 'right', value: string): void {
-    const orientation = this.appConfig.config.importOptions.inputGeometryOrientation;
-    const newValue = value as AxisDirection;
-    const oldValue = orientation[axis];
-    if (newValue === oldValue) return;
-
-    for (const other of (['up', 'forward', 'right'] as const)) {
-      if (other === axis) continue;
-      if (axisLetter(orientation[other]) === axisLetter(newValue)) {
-        orientation[other] = oldValue;
-        this.axisSelectElement(other).value = oldValue;
-        break;
-      }
-    }
-
-    orientation[axis] = newValue;
-  }
 
   /** Re-derives intelGpaDistortion from intelGpaLandmarkObjs against the
    * CURRENT orientation settings, in case they were changed any time after

@@ -73,55 +73,7 @@
 
           <div class="field border-b border-b-1 border-b-warm-500 border-dotted">
             <div>Input geometry axis mapping:</div>
-            <div class="flex flex-row justify-end gap-2 text-warm-300">
-              <div class="label pl-4">Up:</div>
-              <div class="input !w-16">
-                <select
-                  id="capture-importer-up-axis"
-                  class="w-16 text-teal-400 !border-b-teal-400"
-                  value="+z"
-                >
-                  <option value="+x">+x</option>
-                  <option value="-x">-x</option>
-                  <option value="+y">+y</option>
-                  <option value="-y">-y</option>
-                  <option value="+z">+z</option>
-                  <option value="-z">-z</option>
-                </select>
-              </div>
-
-              <div class="label pl-4">forward:</div>
-              <div class="input">
-                <select
-                  id="capture-importer-forward-axis"
-                  class="w-16 text-blue-400 !border-b-blue-400"
-                  value="-y"
-                >
-                  <option value="+x">+x</option>
-                  <option value="-x">-x</option>
-                  <option value="+y">+y</option>
-                  <option value="-y">-y</option>
-                  <option value="+z">+z</option>
-                  <option value="-z">-z</option>
-                </select>
-              </div>
-
-              <div class="label pl-4">right:</div>
-              <div class="input">
-                <select
-                  id="capture-importer-right-axis"
-                  class="w-16 text-[#f62] border-b-[#f62]"
-                  value="+x"
-                >
-                  <option value="+x">+x</option>
-                  <option value="-x">-x</option>
-                  <option value="+y">+y</option>
-                  <option value="-y">-y</option>
-                  <option value="+z">+z</option>
-                  <option value="-z">-z</option>
-                </select>
-              </div>
-            </div>
+            <input-axis-mapper id="capture-importer-input-axis-mapper"></input-axis-mapper>
           </div>
 
           <!-- Hide largest % of objects -->
