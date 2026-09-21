@@ -270,6 +270,7 @@ export class SceneViewerApp {
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
       mirrorBtn: this.el("mirror-scene-btn"),
       resetCameraBtn: this.el("reset-camera-btn"),
+      frameSceneBtn: this.el("frame-scene-btn"),
       showResourcesPanelBtn: this.el("show-resources-panel-button"),
       hideResourcesPanelBtn: this.el("hide-resources-panel-button"),
       setAxisMappingBtn: this.el("set-axis-mapping-btn"),
@@ -324,7 +325,6 @@ export class SceneViewerApp {
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
   private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
-  private recenterCamBtn = this.el("recenter-camera-btn");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
   private objectList = this.el('object-list');
@@ -479,7 +479,7 @@ export class SceneViewerApp {
       });
       this.elements.toolsMenu.resetCameraBtn.addEventListener('click', () => {
         // this also doesn't need to hide or cancel any tools
-        this.sceneManager.frameOnScene();
+        this.sceneManager.resetToInitialView();
       });
 
       this.elements.toolsMenu.showResourcesPanelBtn.addEventListener('click', () => {
@@ -572,7 +572,7 @@ export class SceneViewerApp {
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
       if (this.groundPlaneToolActive || this.selectAreaToolActive) event.preventDefault();
     });
-    this.recenterCamBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
+    this.elements.toolsMenu.frameSceneBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
     // Both filter control pairs (import screen + post-reconstruct viewport
     // menu) drive the same underlying value and stay in sync with each
