@@ -99,36 +99,15 @@ export class SceneViewerApp {
   private hidePercent = 0;
   private lastProblemNote = "";
 
-  /** Indices into loadedDraws currently excluded by the "hide largest %"
-   * filter - recomputed by rebuildVisibleScene() whenever the filter
-   * changes, and the single source of truth for "is this object
-   * selectable/visible in the list" (see isObjectHidden()). */
-  private hiddenDrawIndices = new Set<number>();
-  /** Indices manually hidden via the object list's own visibility button -
-   * independent of and layered with hiddenDrawIndices (the "hide largest %"
-   * filter). An object filtered by the size slider always shows 'f' and its
-   * manual state is irrelevant to rendering either way; otherwise it shows
-   * 'v' (visible, default) or 'h' (manually hidden) - see
-   * getVisibilityState(). */
-  private manuallyHiddenIndices = new Set<number>();
-  /** Index into loadedDraws of the object marked as the scale reference in
-   * the object list ("is ref" button - see setLandmark()) - the default
-   * reference object for recalculateTransformCorrection() when it's called
-   * with no explicit index (the standalone Recalculate button). */
-  private scaleReferenceIndex: number | null = null;
-  /** Distortion transform computed from a matched IntelGPA
-   * landmark-source.obj/landmark-output.obj pair (see
-   * intel-gpa-import-helpers.ts / mesh-tools/landmark-matching.ts),
-   * carried in on reconstructScene()'s event detail. When set, it's
-   * applied to every draw automatically (see reconstructScene()) instead
-   * of through the manual scale-reference-object flow, and the "Fix
-   * distortion" tool is hidden since there's nothing left for it to do. */
-  private intelGpaDistortion: AffineDistortionResult | null = null;
-  /** True after toggleRawImport() has switched the scene to show every
-   * draw's draw.originalPosedPositions untouched, instead of whatever
-   * per-draw correction is recorded on it (see
-   * LoadedDraw.appliedDistortionMatrix). */
-  private showingRawImport = false;
+
+  private hiddenDrawIndices = new Set<number>();       // geometry hidden by "hide largest %" filter
+  private manuallyHiddenIndices = new Set<number>();   // geometry hidden manually
+
+  private scaleReferenceIndex: number | null = null;   // index of the draw call for distortion fix calculation
+
+  private intelGpaDistortion: AffineDistortionResult | null = null;  // distortion transform from IntelGPA landmark matching
+
+  private showingRawImport = false;                     // enables or disables auto distortion correction
   /** Rotation applied to the whole scene's content group (not to individual
    * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
    * (filter/visibility changes tear down and recreate the content group).
@@ -269,16 +248,7 @@ export class SceneViewerApp {
    * shader per selection change. */
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
 
-  /** Selection outline: an image-space ("post-process") technique rather
-   * than expanding the mesh's own geometry - see renderSelectionOutlinePass()
-   * for why. outlineMaskGroup holds a plain white copy of each currently
-   * selected (and visible) draw's geometry, rendered every frame into
-   * outlineMaskTarget from the main camera; outlineQuadScene/Camera then
-   * draw a single fullscreen quad that samples that mask and paints a ring
-   * wherever a non-selected pixel is near a selected one. All set up once
-   * in setupSelectionOutlinePass(); outlineMaskGroup's children are
-   * rebuilt from scratch on every selection change (see
-   * rebuildSelectionOutlineMask()). */
+  // stuff for outline rendering
   private outlineMaskScene = new THREE.Scene();
   private outlineMaskGroup = new THREE.Group();
   private outlineMaskTarget: THREE.WebGLRenderTarget | null = null;
