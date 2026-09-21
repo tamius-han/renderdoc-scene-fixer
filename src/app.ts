@@ -268,11 +268,11 @@ export class SceneViewerApp {
       fixDistortionBtn: this.el("fix-distortion-btn"),
       toggleRawImportBtn: this.el("toggle-raw-import-btn"),
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
-      setUpAxisBtn: this.el("set-up-axis-btn"),
       mirrorBtn: this.el("mirror-scene-btn"),
       resetCameraBtn: this.el("reset-camera-btn"),
       showResourcesPanelBtn: this.el("show-resources-panel-button"),
       hideResourcesPanelBtn: this.el("hide-resources-panel-button"),
+      setAxisMappingBtn: this.el("set-axis-mapping-btn"),
 
       selectVolumeSubmenu: {
         menu: this.el("select-by-volume-submenu"),
@@ -303,6 +303,11 @@ export class SceneViewerApp {
         selectGroundPlaneApply180Btn: this.el("select-ground-plane_accept-selection-180"),
         selectGroundPlaneResetBtn: this.el("select-ground-plane_reset-selection"),
         selectGroundPlaneCancelBtn: this.el("select-ground-plane_cancel-selection"),
+      },
+
+      axisMapperSubmenu: {
+        menu: this.el("axis-mapper-submenu"),
+        axisMapper: this.el("axis-mapper-submenu-input-axis-mapper"),
       }
     },
 
@@ -442,6 +447,18 @@ export class SceneViewerApp {
           this.cancelSelectLandmarkTool();
         }
       });
+      this.elements.toolsMenu.setAxisMappingBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        if (Config.sessionConfig.tools.activeTool !== 'axis-mapper') {
+          Config.sessionConfig.tools.activeTool = 'axis-mapper';
+          this.elements.toolsMenu.axisMapperSubmenu.menu.classList.remove('hidden');
+        } else {
+          this.elements.toolsMenu.axisMapperSubmenu.menu.classList.add('hidden');
+          Config.sessionConfig.tools.activeTool = null;
+        }
+      });
+
       this.elements.toolsMenu.toggleRawImportBtn.addEventListener('click', () => this.toggleRawImport());
       this.elements.toolsMenu.selectGroundPlaneBtn.addEventListener('click', () => {
         this.hideAllToolSubmenus();
@@ -455,12 +472,7 @@ export class SceneViewerApp {
           Config.sessionConfig.tools.activeTool = null;
         }
       });
-      this.elements.toolsMenu.setUpAxisBtn.addEventListener('click', () => {
-        this.hideAllToolSubmenus();
-        this.cancelAllTools();
-        // we don't have 'select up axis' submenu yet
-        // this.elements.toolsMenu.setUpAxisSubmenu.menu.classList.remove('hidden');
-      });
+
       this.elements.toolsMenu.mirrorBtn.addEventListener('click', () => {
         // mirror scene doesn't need to hide tool submenus or cancel tools
         this.mirrorSceneAlongX();
@@ -526,6 +538,13 @@ export class SceneViewerApp {
       this.elements.toolsMenu.selectLandmarkSubmenu.selectLandmarkCancelBtn.addEventListener("click", () =>
         this.cancelSelectLandmarkTool(),
       );
+    }
+
+    // setup submenu: axis mapper
+    {
+      this.elements.toolsMenu.axisMapperSubmenu.axisMapper.addEventListener("axis-mapping-changed", () => {
+        // TODO: save axis mapping and apply changes to scene
+      });
     }
   }
 

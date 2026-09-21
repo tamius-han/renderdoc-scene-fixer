@@ -719,3 +719,34 @@ input[type="file"] { display: none; }
   }
 }
 
+.dropdown {
+  @apply relative bg-none text-amber-200;
+
+  .dropdown-container {
+    display: none;
+  }
+
+  &:hover {
+    @apply text-amber-100;
+
+    .dropdown-container {
+      @apply absolute top-0 left-0 p-10 z-[1000] w-full;
+      display: block;
+
+      .dropdown-content {
+        @apply absolute top-10 left-0 z-[1000] bg-brown-900/90 text-warm-300 rounded-md;
+
+        * {
+          @apply text-left w-full px-4 py-2;
+          text-wrap: nowrap;
+
+          &:not(:last-child) {
+            @apply border-b border-b-warm-900;
+          }
+        }
+      }
+    }
+  }
+
+
+}

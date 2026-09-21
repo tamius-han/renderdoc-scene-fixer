@@ -38,7 +38,7 @@ export interface AppConfiguration {
 
 export interface AppSessionConfiguration {
   tools: {
-    activeTool: 'select-by-volume' | 'select-landmark' | 'select-ground-plane' | 'select-up-axis' | null;
+    activeTool: 'select-by-volume' | 'select-landmark' | 'select-ground-plane' | 'select-up-axis' | 'axis-mapper' | null;
 
     selectAreaTool: "sphere" | "box";
     selectAreaMode: "inside" | "outside";

@@ -57,7 +57,6 @@
           <div class="flex flex-col">
             Recalculate transform correction:
             <button id="recalculate-correction-btn">Recalculate</button>
-            <button id="highlight-correction-source-btn" class="ghost" disabled>Highlight correction source</button>
             <label>
               Up axis:
               <select id="up-axis-select">
@@ -95,20 +94,29 @@
         <div id="viewport" class="h-full w-full relative">
           <div class="tool-menu-overlay">
             <div class="tools">
-              <button id="select-volume-btn">Select volume</button>
+              <button id="select-volume-btn">Select by volume</button>
               &middot;
-              <button id="fix-distortion-btn">Fix distortion</button>
+              <div class="dropdown">
+                Distortion fix
+                <div class="dropdown-container">
+                  <div class="dropdown-content">
+                    <button id="toggle-raw-import-btn">Toggle distortion correction</button>
+                    <button id="highlight-correction-source-btn" disabled>Highlight correction source</button>
+                    <button id="fix-distortion-btn">Select distortion correction landmark</button>
+                  </div>
+                </div>
+              </div>
               &middot;
-              <button id="toggle-raw-import-btn">Toggle distortion correction</button>
-              &middot;
-
-              <button id="select-ground-plane-btn">Select ground plane</button>
-              &middot;
-              <span class="hidden">
-                <button id="set-up-axis-btn">Set up axis</button>
-                &middot;
-              </span>
-              <button id="mirror-scene-btn">Mirror</button>
+              <div class="dropdown">
+                Scene orientation
+                <div class="dropdown-container">
+                  <div class="dropdown-content">
+                    <button id="select-ground-plane-btn">Select ground plane</button>
+                    <button id="mirror-scene-btn">Mirror scene</button>
+                    <button id="set-axis-mapping-btn">Set axis mapping</button>
+                  </div>
+                </div>
+              </div>
               &middot;
               <button id="show-resources-panel-button">Show resource panel</button>
               <button id="hide-resources-panel-button" class="hidden">Hide resource panel</button>
@@ -188,6 +196,11 @@
                 Cancel
               </button>
               </div>
+            </div>
+
+            <div id="axis-mapper-submenu" class="submenu hidden flex flex-col">
+              <div>Input geometry axis mapping:</div>
+              <input-axis-mapper id="axis-mapper-submenu-input-axis-mapper"></input-axis-mapper>
             </div>
 
             <div id="fly-speed-indicator" class="mt-4 text-outlined hidden"></div>
