@@ -61,9 +61,9 @@ export class Config {
       initialScaleLimit: 100,
 
       inputGeometryOrientation: {
-        up: '+y',
-        forward: '+z',
-        right: '+x',
+        up: '-z',
+        forward: '+y',
+        right: '-x',
       },
     },
     exportOptions: {
