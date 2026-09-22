@@ -657,17 +657,18 @@ button {
 #empty-hint .arrow { font-size: 22px; display: block; margin-bottom: 8px; color: var(--accent-dim); }
 
 #hud {
-  position: absolute; top: 14px; left: 14px; font-family: var(--mono); font-size: 11px;
+  position: absolute; bottom: 14px; right: 14px; font-family: var(--mono); font-size: 11px;
   color: var(--text-dim); background: rgba(11, 14, 19, 0.6); padding: 7px 10px; border-radius: 7px;
   border: 1px solid var(--line); pointer-events: none;
 }
 
-/* Viewport orientation compass (see OrientationGizmo) - sits above the
-   tool-menu-overlay bar (which has z-10) so it stays visible regardless
-   of that bar's height. Purely a readout: pointer-events is off on the
-   whole thing so it never steals orbit/pan drags from the canvas under it. */
+/* Viewport orientation compass (see OrientationGizmo) - upper-right
+   corner, opposite the tool-menu-overlay bar (top-left) so a wide open
+   submenu can never grow into it. Purely a readout: pointer-events is off
+   on the whole thing so it never steals orbit/pan drags from the canvas
+   under it. */
 .orientation-gizmo {
-  position: absolute; top: 64px; left: 14px; z-index: 20;
+  position: absolute; top: 14px; right: 14px; left: auto; z-index: 20;
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   pointer-events: none; user-select: none;
 }
