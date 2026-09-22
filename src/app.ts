@@ -55,8 +55,8 @@ interface LoadedDraw {
    * export (geometryData IS previewGeometryData, same array - see
    * loadDraw()). Distortion correction always re-fits and re-applies from
    * this copy rather than from draw.geometryData.positions, so
-   * recalculateTransformCorrection() can be re-run (e.g. after changing
-   * the up-axis/handedness option) without compounding a previous run's
+   * recalculateTransformCorrection() can be re-run (e.g. after marking a
+   * different scale-reference object) without compounding a previous run's
    * correction onto itself. */
   originalPosedPositions: number[] | null;
   /** Pristine copy of originalPosedPositions's corresponding normals, same
@@ -2420,6 +2420,20 @@ export class SceneViewerApp {
   ): { corrected: number; skipped: number } {
     const finalMatrix = distortion.posedToNonPosedInPlace;
 
+    // posedCentroid is the one point that's guaranteed to keep the exact
+    // same LOCAL (pre-scale, pre-sceneRotation) coordinates after this
+    // correction as before it - finalMatrix is pivoted about it, so it
+    // maps to itself. That makes it the natural anchor for compensating
+    // the camera below: its WORLD position can still shift, from the
+    // scale/rotation changes a few lines down, even though its local
+    // coordinates don't move - capture where it renders now, before any
+    // of that changes, so it can be compared against where it renders
+    // after.
+    const anchor = distortion.posedCentroid;
+    const rotationBefore = this.getActiveSceneRotation().clone();
+    const scaleBefore = this.fixedScale;
+    const worldBefore = anchor.clone().applyQuaternion(rotationBefore).multiplyScalar(scaleBefore);
+
     let corrected = 0;
     let skipped = 0;
 
@@ -2440,6 +2454,21 @@ export class SceneViewerApp {
       // has actually succeeded, so use it in place of the heuristic guess.
       this.sceneRotation = distortion.distortionOrientation.clone();
       this.applySceneRotation();
+
+      // The correction just baked into every draw's vertices (finalMatrix,
+      // pivoted about `anchor`), the scale change recomputeFixedScale()
+      // may have just made, and the rotation change above can all shift
+      // where the scene's content actually renders in world space, out
+      // from under a camera that hasn't moved - the scene would appear to
+      // "jump away" from wherever the camera was framing it, even though
+      // nothing about the camera itself changed. Move the camera (target +
+      // position together, preserving its offset/orientation - see
+      // translateOrbitCenter()) by the same shift `anchor` itself just
+      // underwent, so the camera keeps looking at the same relative spot
+      // on the (now corrected) content instead of appearing to have moved
+      // away from it.
+      const worldAfter = anchor.clone().applyQuaternion(this.getActiveSceneRotation()).multiplyScalar(this.fixedScale);
+      this.sceneManager.translateOrbitCenter(worldAfter.clone().sub(worldBefore));
 
       // See lastDistortionSourceIndex's own doc comment - undefined
       // (IntelGPA's landmark-pair distortion, which isn't fit from any one

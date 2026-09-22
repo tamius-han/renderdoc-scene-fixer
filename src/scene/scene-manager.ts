@@ -817,24 +817,35 @@ export class SceneManager {
 
   /** Places the camera once, right after import (see reconstructScene()) -
    * distinct from frameOnScene(), which resets to the class's own default
-   * viewing angle centered on the box's center and is reachable any time
-   * via "recenter cam". This instead always sits on the diagonal through
-   * the +x/+y/+z octant and always looks through the scene ORIGIN (not
-   * the bounding box's center - an off-center import should still be
-   * viewed from a predictable, origin-relative angle), placed far enough
-   * back that a sphere centered on the origin and reaching every corner
-   * of the scene's bounding box is fully inside the frustum, times
-   * `padding`. If `maxDistance` is given (the "enforce initial scale
-   * limit" option), the camera is pulled in to at most that distance -
-   * it's fine, and expected, for it to end up closer. */
+   * viewing angle and is reachable any time via "recenter cam" (this one
+   * instead honors the current FOV and an optional maxDistance). Both
+   * frame the scene's OWN bounding-box center now - this one used to
+   * frame the world ORIGIN instead, deliberately, so an off-center import
+   * would still be viewed from a predictable, origin-relative angle - but
+   * that assumed the scene stays reasonably close to the origin, which no
+   * longer holds now that a genuine chirality correction can relocate the
+   * WHOLE scene arbitrarily far from it (see applyDistortionToScene() in
+   * app.ts: the correction is pivoted about whichever reference object's
+   * centroid was used to fit it, not the origin, and unlike a pure
+   * rotation a real reflection doesn't keep everything else's distance
+   * from an unrelated point stable). This still sits on the diagonal
+   * through the +x/+y/+z octant, placed far enough back that a sphere
+   * centered on the scene's bounding-box center and reaching every corner
+   * of that box is fully inside the frustum, times `padding`. If
+   * `maxDistance` is given (the "enforce initial scale limit" option),
+   * the camera is pulled in to at most that distance - it's fine, and
+   * expected, for it to end up closer. */
   placeCameraForImport(padding: number = 1.2, maxDistance?: number): void {
     const box = new THREE.Box3().setFromObject(this.scene);
     if (box.isEmpty()) return;
     this.viewTransition = null;
 
-    // Farthest distance from the ORIGIN (not the box center) to any
-    // corner of the bounding box - the radius of the smallest
-    // origin-centered sphere that fully contains the scene.
+    const center = box.getCenter(new THREE.Vector3());
+
+    // Farthest distance from the box's OWN CENTER (not the world origin)
+    // to any corner - the radius of the smallest sphere, centered on the
+    // scene itself, that fully contains it - see this function's doc
+    // comment for why it's centered here rather than at the origin.
     let radius = 0;
     for (let xi = 0; xi < 2; xi++) {
       for (let yi = 0; yi < 2; yi++) {
@@ -844,7 +855,7 @@ export class SceneManager {
             yi ? box.max.y : box.min.y,
             zi ? box.max.z : box.min.z,
           );
-          radius = Math.max(radius, corner.length());
+          radius = Math.max(radius, corner.distanceTo(center));
         }
       }
     }
@@ -865,11 +876,28 @@ export class SceneManager {
     }
 
     const dir = new THREE.Vector3(1, 1, 1).normalize();
-    this.target.set(0, 0, 0);
+    this.target.copy(center);
     this.offset.copy(dir).multiplyScalar(distance);
     this.camera.up.set(0, 1, 0);
     this.updateCamera();
     this.camera.lookAt(this.target);
+  }
+
+  /** Shifts BOTH `target` and the camera's position by the same `delta`,
+   * leaving `offset` (and therefore the camera's distance/angle relative
+   * to whatever it's looking at) and its orientation completely
+   * unchanged - i.e. the camera's view of the CONTENT stays visually
+   * identical, just re-centered on content that has itself moved by
+   * `delta` in world space. For when the scene's own geometry shifts out
+   * from under an unchanged camera (e.g. app.ts's distortion-correction
+   * pipeline re-baking a translation into every draw's vertices) and the
+   * camera should track that shift rather than appear to have moved away
+   * from the content - contrast repivotAtMouse(), which re-centers the
+   * pivot WITHOUT moving the camera, for the opposite situation (the
+   * camera should move, the content hasn't). */
+  translateOrbitCenter(delta: THREE.Vector3): void {
+    this.target.add(delta);
+    this.updateCamera();
   }
 
   clear(): void {
