@@ -18,7 +18,7 @@ import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
-import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult, type HandednessMode } from "./mesh-tools/calculator";
+import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
@@ -66,6 +66,17 @@ interface LoadedDraw {
    * rather than compounding onto whatever geometryData.normals was left
    * at by a previous run. */
   originalPosedNormals: number[] | null;
+  /** Pristine copy of originalPosedPositions's corresponding UVs, same
+   * lifetime/nullability rules as originalPosedPositions - kept alongside
+   * it for the same reason as originalPosedNormals: applyMatrixToDraw()
+   * needs a fresh, untouched copy to flip triangle winding on when a
+   * correction reflects the mesh, since UV VALUES aren't transformed by
+   * the correction matrix at all (only positions/normals are) - only
+   * their winding/corner order needs to move in lockstep with
+   * positions/normals so each triangle corner's position, normal, and UV
+   * stay correctly paired. Re-deriving fresh each time (like normals)
+   * avoids compounding a previous run's winding flip onto itself. */
+  originalPosedUvs: number[] | null;
   /** The matrix (if any) baked into geometryData.positions FROM
    * originalPosedPositions to produce the current (corrected) state -
    * null if this draw has never been corrected: no posed/non-posed pair
@@ -167,10 +178,9 @@ export class SceneViewerApp {
   /** World-space axis (in RAW, pre-sceneRotation coordinates - i.e. as
    * draw.geometryData.positions are actually stored) that
    * detectWorldUpAxis() concluded was most likely "up", set once per
-   * reconstructScene(). Used both to build sceneRotation and, when the "Up
-   * axis" selector is set to a specific axis instead of "auto", as the
-   * target that override is expressed relative to - see
-   * buildUpAxisAdjustment(). */
+   * reconstructScene(). Used to build sceneRotation before any distortion
+   * fit exists yet - see reconstructScene() and applyDistortionToScene(),
+   * which takes over from it once a fit is available. */
   private worldUpAxis: "x" | "y" | "z" = "y";
   /** True while the "Mark ground plane" tool is armed and collecting the
    * next of its three clicks on the mesh surface - see
@@ -193,17 +203,22 @@ export class SceneViewerApp {
   /** Rotation computed by the ground-plane tool from its three marked
    * points the last time it completed (see finishGroundPlaneTool()) -
    * null until that has happened at least once for the current scene.
-   * Selecting "Manual" in the "Up axis" dropdown applies this instead of
-   * the auto-detected worldUpAxis-to-Y rotation - see
-   * getActiveSceneRotation(). */
+   * Applied instead of the auto-detected worldUpAxis-to-Y rotation
+   * whenever manualUpRotationActive is true - see getActiveSceneRotation(). */
   private manualUpRotation: THREE.Quaternion | null = null;
-  /** Snapshot of (manualUpRotation, upAxisSelect.value) taken the moment
-   * the ground-plane tool is armed (see startGroundPlaneTool()) - restored
-   * verbatim if the user clicks Cancel (see cancelGroundPlaneTool()),
-   * whether that happens mid-placement or during the accept/cancel review
-   * step after the 3rd point. null whenever the tool isn't in the middle
-   * of a run, i.e. there's nothing to revert to. */
-  private groundPlaneRotationSnapshot: { manualUpRotation: THREE.Quaternion | null; upAxisValue: string } | null = null;
+  /** Whether the ground-plane tool's marked rotation (manualUpRotation)
+   * should currently be used in place of the auto-detected
+   * worldUpAxis-to-Y rotation - see getActiveSceneRotation(). Set once the
+   * tool completes (finishGroundPlaneTool()), cleared on a fresh
+   * reconstruct. */
+  private manualUpRotationActive = false;
+  /** Snapshot of (manualUpRotation, manualUpRotationActive) taken the
+   * moment the ground-plane tool is armed (see startGroundPlaneTool()) -
+   * restored verbatim if the user clicks Cancel (see
+   * cancelGroundPlaneTool()), whether that happens mid-placement or during
+   * the accept/cancel review step after the 3rd point. null whenever the
+   * tool isn't in the middle of a run, i.e. there's nothing to revert to. */
+  private groundPlaneRotationSnapshot: { manualUpRotation: THREE.Quaternion | null; manualUpRotationActive: boolean } | null = null;
   /** Which select-area tool ("sphere" or "box") is currently armed and
    * waiting for its single placement click, if any - see
    * startSelectAreaTool()/handleSelectAreaClick(). Left-click in the
@@ -354,8 +369,6 @@ export class SceneViewerApp {
   private highlightCorrectionSourceBtn = this.el<HTMLButtonElement>("highlight-correction-source-btn");
   private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
-  private upAxisSelect = this.el<HTMLSelectElement>("up-axis-select");
-  private handednessSelect = this.el<HTMLSelectElement>("handedness-select");
   private recenterCamBtn = this.el("recenter-camera-btn");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
@@ -582,7 +595,6 @@ export class SceneViewerApp {
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
     window.addEventListener("keydown", (e) => this.handleGizmoKeydown(e));
-    this.upAxisSelect.addEventListener("change", () => this.applySceneRotation());
     // The tools' own right-click handling (cancel + clear) happens in
     // handleSceneObjectPointer() via pointerdown, which fires before the
     // browser's native contextmenu event - this just stops that native
@@ -909,6 +921,10 @@ export class SceneViewerApp {
         previewGeometryData !== geometryData || this.intelGpaDistortion !== null
           ? geometryData.normals.slice()
           : null,
+      originalPosedUvs:
+        previewGeometryData !== geometryData || this.intelGpaDistortion !== null
+          ? geometryData.uvs.slice()
+          : null,
       appliedDistortionMatrix: null,
     });
 
@@ -999,7 +1015,7 @@ export class SceneViewerApp {
       this.manualUpRotation = null;
       this.lastDistortionSourceIndex = null;
       this.updateHighlightCorrectionSourceBtn();
-      if (this.upAxisSelect.value === "manual") this.upAxisSelect.value = "auto";
+      this.manualUpRotationActive = false;
       this.cancelVolumeSelectTool();
       this.clearSelectAreaShape();
       this.sceneManager.clear();
@@ -1352,47 +1368,20 @@ export class SceneViewerApp {
     return new THREE.Vector3(0, 1, 0);
   }
 
-  /** Extra per-object rotation for the "Up axis" selector next to
-   * Recalculate, composed on TOP of posedToNonPosedInPlace's shape-only
-   * correction (see recalculateTransformCorrection()):
-   * - "auto": identity. this.sceneRotation (see reconstructScene()) already
-   *   rotates worldUpAxis to vertical for the WHOLE scene uniformly, and
-   *   posedToNonPosedInPlace never disturbs an object's orientation, so
-   *   nothing extra is needed here for objects to end up world-axis-up.
-   * - "x"/"y"/"z": rotates the CHOSEN axis to wherever worldUpAxis
-   *   currently points, rather than straight to three.js's Y. That's
-   *   deliberate: sceneRotation is still going to rotate worldUpAxis to Y
-   *   at render time regardless of this per-object override, so composing
-   *   "chosen -> worldUpAxis" here (instead of "chosen -> Y" directly)
-   *   means the two rotations chain into exactly "chosen -> worldUpAxis ->
-   *   Y" - the chosen axis ends up vertical in the final display without
-   *   fighting or double-applying sceneRotation.
-   * - "manual": identity, same as "auto" - the ground-plane tool's
-   *   rotation (this.manualUpRotation) already replaces the whole-scene
-   *   rotation directly (see getActiveSceneRotation()) rather than
-   *   composing with worldUpAxis the way a plain axis choice does, so
-   *   there's nothing extra to add per-object here either. */
-  private buildUpAxisAdjustment(mode: "auto" | "x" | "y" | "z" | "manual"): THREE.Quaternion {
-    if (mode === "auto" || mode === "manual") return new THREE.Quaternion();
-    return new THREE.Quaternion().setFromUnitVectors(
-      SceneViewerApp.axisVector(mode),
-      SceneViewerApp.axisVector(this.worldUpAxis),
-    );
-  }
-
   /** Whichever rotation should currently sit on the content group: the
-   * ground-plane tool's marked rotation when "Up axis" is set to "Manual"
-   * and the tool has completed at least once for this scene (see
-   * manualUpRotation), otherwise the auto-detected worldUpAxis-to-Y
-   * rotation computed once per reconstruct (see reconstructScene()). */
+   * ground-plane tool's marked rotation, once it has completed at least
+   * once for this scene and is still active (manualUpRotationActive - see
+   * finishGroundPlaneTool()), otherwise the auto-detected worldUpAxis-to-Y
+   * rotation computed once per reconstruct (see reconstructScene()) and
+   * refined per distortion fit (see applyDistortionToScene()). */
   private getActiveSceneRotation(): THREE.Quaternion {
-    if (this.upAxisSelect.value === "manual" && this.manualUpRotation) return this.manualUpRotation;
+    if (this.manualUpRotationActive && this.manualUpRotation) return this.manualUpRotation;
     return this.sceneRotation;
   }
 
   /** Re-applies getActiveSceneRotation() to whatever's currently in the
    * content group, if anything - called whenever that choice could have
-   * changed: the "Up axis" dropdown and the ground-plane tool completing a
+   * changed: a new distortion fit, or the ground-plane tool completing a
    * new manual rotation. A no-op before anything's been reconstructed. */
   private applySceneRotation(): void {
     const group = this.sceneManager.getContentGroup();
@@ -1413,7 +1402,7 @@ export class SceneViewerApp {
    * handles the tool's own internal state. */
   private startGroundPlaneTool(): void {
     if (this.loadedDraws.length === 0) return;
-    this.groundPlaneRotationSnapshot = { manualUpRotation: this.manualUpRotation, upAxisValue: this.upAxisSelect.value };
+    this.groundPlaneRotationSnapshot = { manualUpRotation: this.manualUpRotation, manualUpRotationActive: this.manualUpRotationActive };
     this.groundPlaneToolActive = true;
     this.groundPlanePoints = [];
     this.clearGroundPlaneVisuals();
@@ -1435,7 +1424,7 @@ export class SceneViewerApp {
   private cancelGroundPlaneTool(): void {
     if (this.groundPlaneRotationSnapshot) {
       this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
-      this.upAxisSelect.value = this.groundPlaneRotationSnapshot.upAxisValue;
+      this.manualUpRotationActive = this.groundPlaneRotationSnapshot.manualUpRotationActive;
       this.applySceneRotation();
       this.groundPlaneRotationSnapshot = null;
     }
@@ -1473,7 +1462,7 @@ export class SceneViewerApp {
   private resetGroundPlaneTool(): void {
     if (this.groundPlaneRotationSnapshot) {
       this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
-      this.upAxisSelect.value = this.groundPlaneRotationSnapshot.upAxisValue;
+      this.manualUpRotationActive = this.groundPlaneRotationSnapshot.manualUpRotationActive;
       this.applySceneRotation();
     }
     this.groundPlaneToolActive = true;
@@ -1624,7 +1613,7 @@ export class SceneViewerApp {
     if (normal.dot(currentLocalUp) < 0) normal.negate();
 
     this.manualUpRotation = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
-    this.upAxisSelect.value = "manual";
+    this.manualUpRotationActive = true;
     this.applySceneRotation();
 
     this.groundPlaneToolActive = false;
@@ -2335,40 +2324,54 @@ export class SceneViewerApp {
 
   //#endregion
 
-  /** Bakes `matrix` onto `draw.originalPosedPositions`/`originalPosedNormals`
-   * (never draw.geometryData.positions/normals - so re-applying a
-   * correction always starts fresh instead of compounding onto whatever
-   * was already there), writing the result into
-   * geometryData.positions/normals/bounds/diagonal and recording `matrix`
-   * on the draw (LoadedDraw.appliedDistortionMatrix) for
+  /** Bakes `matrix` onto `draw.originalPosedPositions`/`originalPosedNormals`/
+   * `originalPosedUvs` (never draw.geometryData.positions/normals/uvs - so
+   * re-applying a correction always starts fresh instead of compounding
+   * onto whatever was already there), writing the result into
+   * geometryData.positions/normals/uvs/bounds/diagonal and recording
+   * `matrix` on the draw (LoadedDraw.appliedDistortionMatrix) for
    * toggleRawImport() to reapply later. Normals go through `matrix`'s
    * normal matrix (inverse-transpose), not `matrix` itself, so they stay
    * correct under the anisotropic stretch this always carries - see
-   * applyNormalMatrixToNormals(). If `matrix`'s linear part is a
-   * reflection (negative determinant - e.g. an automatic or explicit
-   * handedness correction, see HandednessMode in mesh-tools/calculator.ts),
-   * triangle winding is also flipped on both positions and normals
-   * together, so corner correspondence stays intact and triangles don't
-   * turn inside-out - see flipTriangleWindingInPlace()'s doc comment and
+   * applyNormalMatrixToNormals(). UVs aren't transformed by `matrix` at
+   * all (there's no 3D-to-2D equivalent) - they're only along for the
+   * winding flip below, to stay paired with the right corner. If
+   * `matrix`'s linear part is a reflection (negative determinant - e.g. an
+   * automatic handedness correction, see analyzeTransformMatrix's doc
+   * comment in mesh-tools/calculator.ts), triangle winding is flipped on
+   * positions, normals, AND uvs together, so corner correspondence stays
+   * intact, triangles don't turn inside-out, and texture mapping doesn't
+   * scramble - see flipTriangleWindingInPlace()'s doc comment and
    * mirrorSceneAlongX() for the same fix applied manually. Returns false
    * (no-op) for a draw with no separate posed export
    * (originalPosedPositions is null - see loadDraw()) - there's no posed
    * geometry to correct. */
   private applyMatrixToDraw(draw: LoadedDraw, matrix: THREE.Matrix4): boolean {
-    if (draw.originalPosedPositions === null || draw.originalPosedNormals === null) return false;
+    if (draw.originalPosedPositions === null || draw.originalPosedNormals === null || draw.originalPosedUvs === null) return false;
     const correctedPositions = draw.originalPosedPositions.slice();
     this.applyMatrixToPositions(correctedPositions, matrix);
 
     const correctedNormals = draw.originalPosedNormals.slice();
     this.applyNormalMatrixToNormals(correctedNormals, matrix);
 
+    // UV values themselves aren't transformed by `matrix` at all (there's
+    // no meaningful notion of applying a 3D positional/normal transform to
+    // a 2D texture coordinate) - but their WINDING has to move in lockstep
+    // with positions/normals whenever those get rewound below, or corner
+    // correspondence breaks (position/normal corner i would end up paired
+    // with the UV that used to belong to a DIFFERENT corner), which is
+    // exactly what mangles texture mapping on a mirrored mesh.
+    const correctedUvs = draw.originalPosedUvs.slice();
+
     if (new THREE.Matrix3().setFromMatrix4(matrix).determinant() < 0) {
       this.flipTriangleWindingInPlace(correctedPositions, 3);
       this.flipTriangleWindingInPlace(correctedNormals, 3);
+      this.flipTriangleWindingInPlace(correctedUvs, 2);
     }
 
     draw.geometryData.positions = correctedPositions;
     draw.geometryData.normals = correctedNormals;
+    draw.geometryData.uvs = correctedUvs;
     draw.bounds = computeBounds(draw.geometryData.positions);
     draw.diagonal = boundsDiagonal(draw.bounds);
     draw.appliedDistortionMatrix = matrix;
@@ -2378,11 +2381,9 @@ export class SceneViewerApp {
   /** Applies one already-computed distortion's shape-only correction
    * (posedToNonPosedInPlace) to every loaded draw (including hidden ones -
    * hiddenness only affects rendering/selection, not the underlying data),
-   * pivoted about that SAME distortion's posedCentroid, composed with the
-   * current "Up axis" override (see buildUpAxisAdjustment() for why it's
-   * composed this way rather than fighting the whole-scene sceneRotation
-   * set below). Then, separately, points the WHOLE SCENE (sceneRotation,
-   * applied once to the content group - see applySceneRotation()) at
+   * pivoted about that SAME distortion's posedCentroid. Then, separately,
+   * points the WHOLE SCENE (sceneRotation, applied once to the content
+   * group - see applySceneRotation()) at
    * distortion.distortionOrientation - the same fit's rotation ALONE, not
    * baked into any individual draw's vertices (see distortionOrientation's
    * doc comment in calculator.ts for why: baking a per-object rotation
@@ -2417,15 +2418,7 @@ export class SceneViewerApp {
     distortion: AffineDistortionResult,
     options: { rebuild?: boolean; sourceIndex?: number } = {},
   ): { corrected: number; skipped: number } {
-    const upAxisMode = this.upAxisSelect.value as "auto" | "x" | "y" | "z" | "manual";
-    const upAxisAdjustment = this.buildUpAxisAdjustment(upAxisMode);
-    const upAxisAdjustment4 = new THREE.Matrix4().makeRotationFromQuaternion(upAxisAdjustment);
-    const c = distortion.posedCentroid;
-    const pivotedUpAdjustment = new THREE.Matrix4()
-      .makeTranslation(c.x, c.y, c.z)
-      .multiply(upAxisAdjustment4)
-      .multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
-    const finalMatrix = pivotedUpAdjustment.multiply(distortion.posedToNonPosedInPlace);
+    const finalMatrix = distortion.posedToNonPosedInPlace;
 
     let corrected = 0;
     let skipped = 0;
@@ -2719,15 +2712,13 @@ export class SceneViewerApp {
       return;
     }
 
-    const handedness = this.handednessSelect.value as HandednessMode;
-
     const referenceObject = this.loadedDraws[referenceIndex];
     let distortion;
     try {
-      distortion = calculateDistortionMatrix(
-        { geometryData: { positions: referenceObject.originalPosedPositions }, previewGeometryData: referenceObject.previewGeometryData },
-        { handedness },
-      );
+      distortion = calculateDistortionMatrix({
+        geometryData: { positions: referenceObject.originalPosedPositions },
+        previewGeometryData: referenceObject.previewGeometryData,
+      });
     } catch (e) {
       return;
     }
@@ -2818,12 +2809,13 @@ export class SceneViewerApp {
    * that the ground-plane tool, the select-area gizmo, and marker sizing
    * all make about contentGroup.scale.x elsewhere in this file.
    *
-   * Also mirrors originalPosedPositions/originalPosedNormals (when a draw
-   * has them) alongside geometryData.positions/normals -
-   * recalculateTransformCorrection() always re-derives the latter from the
-   * former, so leaving the pristine copies un-mirrored would silently undo
-   * the mirror the next time distortion correction is (re-)run. uvs aren't
-   * re-derived that way, so they only need the fix applied once, here.
+   * Also mirrors originalPosedPositions/originalPosedNormals/
+   * originalPosedUvs (when a draw has them) alongside
+   * geometryData.positions/normals/uvs - recalculateTransformCorrection()
+   * always re-derives the latter from the former (uvs included - see
+   * applyMatrixToDraw()), so leaving any of the pristine copies unmirrored
+   * would silently undo part of the mirror the next time distortion
+   * correction is (re-)run.
    *
    * Doesn't attempt to re-level a previously-computed ground-plane
    * rotation (manualUpRotation) - mirroring can change whether the
@@ -2848,6 +2840,9 @@ export class SceneViewerApp {
       if (draw.originalPosedNormals) {
         this.negateXInPlace(draw.originalPosedNormals);
         this.flipTriangleWindingInPlace(draw.originalPosedNormals, 3);
+      }
+      if (draw.originalPosedUvs) {
+        this.flipTriangleWindingInPlace(draw.originalPosedUvs, 2);
       }
 
       draw.bounds = computeBounds(draw.geometryData.positions);

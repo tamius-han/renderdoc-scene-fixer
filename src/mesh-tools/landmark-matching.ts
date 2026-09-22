@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { FaceVertex, ParsedOBJ } from "../types";
-import { calculateDistortionMatrix, type AffineDistortionOptions, type AffineDistortionResult } from "./calculator";
+import { calculateDistortionMatrix, type AffineDistortionResult } from "./calculator";
 
 /** Result of matchLandmarkCorrespondence(): flat, per-face-corner position
  * arrays (3 floats per corner, 9 per face) for landmarkSource and
@@ -231,17 +231,13 @@ export function matchLandmarkCorrespondence(
 export function calculateLandmarkTransform(
   sourceObj: ParsedOBJ,
   outputObj: ParsedOBJ,
-  options: AffineDistortionOptions = {},
 ): AffineDistortionResult & { ambiguousMatch: boolean } {
   const { sourcePositions, outputPositions, ambiguousMatch } = matchLandmarkCorrespondence(sourceObj, outputObj);
 
-  const result = calculateDistortionMatrix(
-    {
-      geometryData: { positions: outputPositions }, // "posed" slot = output
-      previewGeometryData: { positions: sourcePositions }, // "non-posed" slot = source
-    },
-    options,
-  );
+  const result = calculateDistortionMatrix({
+    geometryData: { positions: outputPositions }, // "posed" slot = output
+    previewGeometryData: { positions: sourcePositions }, // "non-posed" slot = source
+  });
 
   if (ambiguousMatch) {
     console.warn(
