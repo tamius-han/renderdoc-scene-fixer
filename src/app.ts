@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { collectFromDrop, collectFromInput, dirname, joinPath, VirtualFileSystem } from "./filesystem";
-import { loadManifests, type LoadedManifests } from "./manifest";
+import { dirname, joinPath, VirtualFileSystem } from "./filesystem";
+import { type LoadedManifests } from "./manifest";
 import { parseMTL } from "./parsers/mtl";
 import { parseOBJ } from "./parsers/obj";
 import {
@@ -17,7 +17,7 @@ import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from
 import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
-import type { DrawEntry, PassIndexEntry, PassManifest } from "./types";
+import type { DrawEntry } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
@@ -115,8 +115,6 @@ export class SceneViewerApp {
    * rendered scene. Kept in sync across the import-screen and viewport
    * filter controls. */
   private hidePercent = 0;
-  private lastProblemNote = "";
-
 
   private hiddenDrawIndices = new Set<number>();       // geometry hidden by "hide largest %" filter
   private manuallyHiddenIndices = new Set<number>();   // geometry hidden manually
@@ -403,10 +401,6 @@ export class SceneViewerApp {
     const found = document.getElementById(id);
     if (!found) throw new Error(`Missing #${id} in the page`);
     return found as T;
-  }
-
-  private setStatus() {
-
   }
 
   private setupMenu() {
@@ -990,7 +984,6 @@ export class SceneViewerApp {
 
     this.emptyHint.style.display = "none";
     this.hud.style.display = "block";
-    // this.setStatus(`Reconstructing ${selected.length} pass(es): ${selected.join(", ")}`);
 
     try {
       this.clearSelectionVisuals();
@@ -1098,10 +1091,6 @@ export class SceneViewerApp {
             console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
             this.elements.loadingScreen.log(`Exception loading draw eid${draw.eventId}`);
           }
-          if (processed % 50 === 0) {
-            // this.setStatus(`Loading... ${processed} draw(s) processed, ${this.loadedDraws.length} loaded so far`);
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
         }
       }
 
@@ -1176,7 +1165,6 @@ export class SceneViewerApp {
       if (meshNotFoundCount) problems.push(`${meshNotFoundCount} mesh file(s) not found`);
       if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
-      this.lastProblemNote = problems.length ? ` \u2014 PROBLEMS: ${problems.join(", ")} (see console)` : "";
 
       this.elements.loadingScreen.log(`Rebuilding visible scene...`);
       // Goes through setHidePercent() (not a direct rebuildVisibleScene()
@@ -1274,11 +1262,6 @@ export class SceneViewerApp {
     const visibleCount = this.loadedDraws.length - excludedCount;
     const triCount = Math.round(builder.totalVertexCount / 3);
 
-    this.setStatus(
-      `${visibleCount}/${this.loadedDraws.length} object(s) shown (${this.hidePercent}% of largest hidden by filter, ` +
-        `${this.manuallyHiddenIndices.size} manually hidden) \u00b7 ${meshes.length} mesh(es) \u00b7 ` +
-        `~${triCount.toLocaleString()} triangles${this.lastProblemNote}`,
-    );
     this.hud.textContent =
       `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
       `${triCount.toLocaleString()} tris \u00b7 scale \u00d7${this.fixedScale.toExponential(2)} \u00b7 MMB drag to orbit, Shift+MMB to pan, scroll to zoom, A for fly mode`;
@@ -1808,7 +1791,6 @@ export class SceneViewerApp {
    * handleSceneObjectPointer()/handleSelectAreaClick()). */
   private startSelectAreaTool(kind: "sphere" | "box"): void {
     if (this.loadedDraws.length === 0) {
-      this.setStatus("Reconstruct a scene first.");
       return;
     }
     this.cancelGroundPlaneTool(); // mutually exclusive with the ground-plane tool
@@ -1816,8 +1798,6 @@ export class SceneViewerApp {
     this.sceneManager.renderer.domElement.style.cursor = SceneViewerApp.SELECT_AREA_CURSORS[kind];
     this.elements.toolsMenu.selectVolumeSubmenu.selectSphereBtn.classList.toggle("active", kind === "sphere");
     this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.toggle("active", kind === "box");
-    const shapeName = kind === "sphere" ? "Sphere" : "Box";
-    this.setStatus(`${shapeName} select: click the mesh surface to place it (right-click to cancel).`);
   }
 
   /** Disarms whichever select-area tool is active (if any) without placing
@@ -2038,14 +2018,6 @@ export class SceneViewerApp {
     this.noteSelectionTarget(null);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
-
-    const message =
-      op === "replace"
-        ? `Selection replaced: ${matches.length} object(s) selected.`
-        : op === "add"
-          ? `Added ${matches.length} object(s) to selection.`
-          : `Removed ${matches.length} object(s) from selection.`;
-    this.setStatus(message);
   }
 
   /** Called every frame (see SceneManager.onBeforeRender()) to keep the
@@ -2154,7 +2126,6 @@ export class SceneViewerApp {
     const localPosition = group.worldToLocal(worldHit.clone());
     const localScale = new THREE.Vector3(localHalfExtent, localHalfExtent, localHalfExtent);
     this.restoreSelectAreaShape(kind, localPosition, localScale);
-    this.setStatus(`${kind === "sphere" ? "Sphere" : "Box"} select area placed.`);
   }
 
   /** Builds and adds the actual select-area shape mesh at an already-known
@@ -2499,7 +2470,6 @@ export class SceneViewerApp {
     const index = this.lastDistortionSourceIndex;
     if (index === null) return;
     if (this.isObjectHidden(index)) {
-      this.setStatus("The object used for the last correction is currently hidden by the size filter.");
       return;
     }
     this.selectOnly(index);
@@ -2723,7 +2693,6 @@ export class SceneViewerApp {
    * button did nothing whenever only the tool itself had a selection. */
   private recalculateTransformCorrection(referenceIndex: number | null = this.scaleReferenceIndex): void {
     if (this.loadedDraws.length === 0) {
-      this.setStatus("Reconstruct a scene first.");
       return;
     }
     if (referenceIndex === null) {
@@ -2734,7 +2703,7 @@ export class SceneViewerApp {
     let distortion;
     try {
       distortion = calculateDistortionMatrix({
-        geometryData: { positions: referenceObject.originalPosedPositions },
+        geometryData: { positions: referenceObject.originalPosedPositions! },
         previewGeometryData: referenceObject.previewGeometryData,
       });
     } catch (e) {
@@ -2744,13 +2713,11 @@ export class SceneViewerApp {
     const { corrected, skipped } = this.applyDistortionToScene(distortion, { sourceIndex: referenceIndex });
 
     if (corrected === 0) {
-      this.setStatus("No objects have a separate posed mesh to correct - nothing to do.");
       return;
     }
 
     const statusParts = [`Applied per-object distortion correction to ${corrected} object(s)`];
     if (skipped > 0) statusParts.push(`${skipped} skipped (no separate posed mesh)`);
-    this.setStatus(statusParts.join(", ") + ".");
   }
 
   /** Applies a 4x4 affine transform to every vertex in a flat, non-indexed
@@ -2874,7 +2841,6 @@ export class SceneViewerApp {
     if (this.selectAreaShape) this.selectAreaShape.position.x = -this.selectAreaShape.position.x;
 
     this.rebuildVisibleScene();
-    this.setStatus(`Mirrored ${this.loadedDraws.length} object(s) along X.`);
   }
 
   /** Exports the currently-selected (and currently visible) objects as one
@@ -2893,7 +2859,6 @@ export class SceneViewerApp {
   private exportSelectedMeshesAsGlb(): void {
     const activeSelected = this.getActiveSelectedIndices();
     if (activeSelected.length === 0) {
-      this.setStatus("Select one or more objects to export first.");
       return;
     }
 
@@ -2922,7 +2887,6 @@ export class SceneViewerApp {
     const blob = buildGlbBlob(entries, sceneTransform);
     const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
     this.downloadBlob(blob, fileName);
-    this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
   }
 
   /** Triggers a browser download of an already-built blob under the given
@@ -2980,7 +2944,6 @@ export class SceneViewerApp {
       .map((index) => ({ index, draw: this.loadedDraws[index] }))
       .filter((entry): entry is { index: number; draw: LoadedDraw } => !!entry.draw);
     if (draws.length === 0) {
-      this.setStatus("Select one or more objects to export first.");
       return;
     }
 
@@ -3001,7 +2964,6 @@ export class SceneViewerApp {
     const blob = buildGlbBlob(entries, sceneTransform);
     const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
     this.downloadBlob(blob, fileName);
-    this.setStatus(`Exported ${entries.length} object(s) to ${fileName}.`);
   }
 
   /** Builds the ExportMeshEntry list for ONE draw - the per-draw half of

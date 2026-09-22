@@ -1,4 +1,3 @@
-import { AxisDirection } from '../../types/axis-direction.type';
 import { fakeManifest, loadManifests } from "../../manifest";
 import template from './cmp.capture-importer.html?raw';
 import { RenderPassList } from '../common/render-pass/cmp.render-pass-list';
@@ -10,8 +9,8 @@ import { collectFromDrop, collectFromInput, VirtualFileSystem } from '../../file
 import type { AffineDistortionResult } from '../../mesh-tools/calculator';
 import { calculateLandmarkTransform } from '../../mesh-tools/landmark-matching';
 import { UNITS } from '../../util/const.unit-conversion';
-import { axisLetter, remapObjOrientation } from '../../util/axis-orientation';
-import type { ParsedOBJ } from '../../types';
+import { remapObjOrientation } from '../../util/axis-orientation';
+import type { ParsedOBJ, PassIndexEntry } from '../../types';
 import { InputAxisMapper } from '../common/input-axis-mapper/cmp.input-axis-mapper';
 
 enum ImportType {
@@ -163,7 +162,7 @@ export class CaptureImporter extends HTMLElement {
     this.elements.renderPassList.addEventListener("selection-changed", () => {
       this.elements.reconstructBtn.classList.toggle(
         'disabled',
-        !this.elements.renderPassList.manifests.root.passes.some(p => this.elements.renderPassList.manifests.passManifests[p.folder]?.markedForRender)
+        !this.elements.renderPassList.manifests?.root.passes.some((p: PassIndexEntry) => this.elements.renderPassList.manifests?.passManifests[p.folder]?.markedForRender)
       )
     });
   }

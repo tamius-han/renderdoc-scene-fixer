@@ -90,6 +90,8 @@ export class Config {
   config: AppConfiguration;
   static sessionConfig: AppSessionConfiguration = {
     tools: {
+      activeTool: null,
+
       selectAreaTool: 'sphere',
       selectAreaMode: "inside",
     },

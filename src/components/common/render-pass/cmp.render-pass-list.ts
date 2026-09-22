@@ -1,5 +1,5 @@
-import { LoadedManifests } from "../../manifest.ts";
-import { PassIndexEntry } from '../../types';
+import { LoadedManifests } from "../../../manifest.ts";
+import { DrawEntry, PassIndexEntry } from '../../../types';
 
 export class RenderPassList extends HTMLElement {
   private passList!: HTMLDivElement;
@@ -47,7 +47,7 @@ export class RenderPassList extends HTMLElement {
     this.passList.innerHTML = "";
 
     const defaultIndex = this.manifests.root.passes.findIndex(
-      (p) => p.guessedRole?.includes("presented")
+      (p: PassIndexEntry) => p.guessedRole?.includes("presented")
     );
     const selectedDefault = defaultIndex >= 0 ? defaultIndex : 0;
 
@@ -56,7 +56,7 @@ export class RenderPassList extends HTMLElement {
     this.manifests.root.passes.forEach((p: PassIndexEntry, i: number) => {
       const hasPosed = (
         this.manifests!.passManifests[p.folder]?.draws ?? []
-      ).some((d) => d.posedMesh);
+      ).some((d: DrawEntry) => d.posedMesh);
 
       const row = document.createElement("label");
       row.className = "pass-row";

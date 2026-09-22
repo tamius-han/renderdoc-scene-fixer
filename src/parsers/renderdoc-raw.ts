@@ -150,7 +150,7 @@ export async function loadRawCapture(vfs: VirtualFileSystem): Promise<LoadedMani
 
   vfs.set(meshPath, new File([objText], "capture.obj", { type: "text/plain" }));
   vfs.set(mtlPath, new File([mtlText], "capture.mtl", { type: "text/plain" }));
-  vfs.set(texPath, new File([makeOnePixelPng()], "capture.png", { type: "image/png" }));
+  vfs.set(texPath, new File([makeOnePixelPng() as any], "capture.png", { type: "image/png" }));
 
   const passFolder = "raw-capture";
   return {
