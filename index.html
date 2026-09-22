@@ -95,6 +95,8 @@
             <div class="tools">
               <button id="select-volume-btn">Select by volume</button>
               &middot;
+              <button id="lasso-select-btn">Lasso select</button>
+              &middot;
               <div class="dropdown">
                 Distortion fix
                 <div class="dropdown-container">
@@ -146,6 +148,12 @@
                 <button id="select-by-volume_cancel"  class="ghost">Cancel</button>
               </div>
 
+            </div>
+
+            <div id="lasso-select-submenu" class="submenu hidden">
+              <span class="text-warm-300">Click and drag to draw a lasso around objects' centers - Shift adds to the selection, Ctrl removes from it.</span>
+              &middot;
+              <button id="lasso-select-cancel-btn" class="ghost">Cancel</button>
             </div>
 
             <div id="select-landmark-submenu" class="submenu hidden flex flex-row items-center">

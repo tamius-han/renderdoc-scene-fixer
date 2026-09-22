@@ -696,6 +696,19 @@ button {
 .orientation-gizmo--preview svg { width: 48px; height: 48px; }
 .orientation-gizmo--preview .orientation-gizmo-projection { display: none; }
 
+/* Lasso-select's dotted drag path (see ensureLassoOverlay() in app.ts) - a
+   plain 2D overlay sitting over the viewport, unrelated to the three.js
+   scene beneath it. pointer-events is off so it never intercepts the very
+   pointermove/pointerup events driving it (those are bound at the window
+   level). */
+.lasso-select-overlay {
+  position: absolute; top: 0; left: 0; z-index: 15; pointer-events: none;
+}
+.lasso-select-path {
+  fill: none; stroke: var(--accent); stroke-width: 1.5;
+  stroke-dasharray: 5 4; stroke-linejoin: round; stroke-linecap: round;
+}
+
 input[type="file"] { display: none; }
 
 ::-webkit-scrollbar { width: 9px; }

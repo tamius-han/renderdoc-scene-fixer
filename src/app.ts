@@ -202,6 +202,32 @@ export class SceneViewerApp {
    * shape/gizmo recreation (placement, rebuild-triggered recreation) so the
    * user's last choice sticks, unlike the transient gizmo instance itself. */
   private selectAreaGizmoMode: GizmoMode = "translate";
+  /** Whether the lasso-select tool is armed - see startLassoSelectTool()/
+   * cancelLassoSelectTool(). Unlike the ground-plane/select-area tools,
+   * arming this one doesn't wait for a click to place anything: the very
+   * next left-button pointerdown in the viewport starts a drag (see
+   * handleSceneObjectPointer()/handleLassoPointerDown()). */
+  private lassoToolActive = false;
+  /** True from the lasso's pointerdown to its pointerup - distinct from
+   * lassoToolActive (the tool can be armed with no drag currently in
+   * progress). Gates handleLassoPointerMove()/handleLassoPointerUp(),
+   * which are wired at the window level (see wireEvents()) so a drag that
+   * leaves the canvas mid-gesture keeps updating, same reasoning as the
+   * select-area gizmo's own drag tracking. */
+  private lassoDragActive = false;
+  /** Screen-space points (client X/Y, relative to the viewport element's
+   * own bounding rect) of the in-progress lasso drag, in path order - see
+   * handleLassoPointerMove()/updateLassoOverlay(). Cleared at the start of
+   * every new drag and once a drag finishes (successfully or not). */
+  private lassoPoints: { x: number; y: number }[] = [];
+  /** The dotted lasso path's own SVG overlay - a plain absolutely
+   * positioned SVG sitting over the viewport (see ensureLassoOverlay()),
+   * created lazily on first use and reused for every subsequent drag
+   * rather than rebuilt each time. Not part of the three.js scene at all:
+   * this is a 2D screen-space drawing, unrelated to anything the camera
+   * looks at. */
+  private lassoOverlay: SVGSVGElement | null = null;
+  private lassoPolyline: SVGPolylineElement | null = null;
   /** Mirrors SceneManager's fly-mode state (see onFlyStateChange()) purely
    * so the 'G'/'S' gizmo-mode keyboard shortcuts can avoid firing while
    * flying - 'S' collides with both movement schemes' own key bindings
@@ -265,6 +291,7 @@ export class SceneViewerApp {
 
     toolsMenu: {
       selectVolumeBtn: this.el("select-volume-btn"),
+      lassoSelectBtn: this.el("lasso-select-btn"),
       fixDistortionBtn: this.el("fix-distortion-btn"),
       toggleRawImportBtn: this.el("toggle-raw-import-btn"),
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
@@ -285,6 +312,11 @@ export class SceneViewerApp {
         selectAddBtn: this.el("select-by-volume_add"),
         selectRemoveBtn: this.el("select-by-volume_remove"),
         selectCancelBtn: this.el("select-by-volume_cancel"),
+      },
+
+      lassoSelectSubmenu: {
+        menu: this.el("lasso-select-submenu"),
+        cancelBtn: this.el("lasso-select-cancel-btn"),
       },
 
       selectLandmarkSubmenu: {
@@ -428,6 +460,17 @@ export class SceneViewerApp {
           Config.sessionConfig.tools.activeTool = null;
         }
       });
+      this.elements.toolsMenu.lassoSelectBtn.addEventListener('click', () => {
+        this.hideAllToolSubmenus();
+        this.cancelAllTools();
+        if (Config.sessionConfig.tools.activeTool !== 'lasso-select') {
+          Config.sessionConfig.tools.activeTool = 'lasso-select';
+          this.elements.toolsMenu.lassoSelectSubmenu.menu.classList.remove('hidden');
+          this.startLassoSelectTool();
+        } else {
+          this.cancelLassoSelectTool();
+        }
+      });
       this.elements.toolsMenu.fixDistortionBtn.addEventListener('click', () => {
         this.hideAllToolSubmenus();
         this.cancelAllTools();
@@ -511,6 +554,11 @@ export class SceneViewerApp {
       this.elements.toolsMenu.selectVolumeSubmenu.selectCancelBtn.addEventListener("click", () => this.cancelSelectByVolumeTool());
     }
 
+    // setup submenu: lasso select
+    {
+      this.elements.toolsMenu.lassoSelectSubmenu.cancelBtn.addEventListener("click", () => this.cancelLassoSelectTool());
+    }
+
     // setup submenu: select ground plane
     {
       this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneApplyBtn.addEventListener("click", () =>
@@ -570,8 +618,10 @@ export class SceneViewerApp {
     // browser's native contextmenu event - this just stops that native
     // menu from popping up over the viewport afterwards.
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
-      if (this.groundPlaneToolActive || this.selectAreaToolActive) event.preventDefault();
+      if (this.groundPlaneToolActive || this.selectAreaToolActive || this.lassoToolActive) event.preventDefault();
     });
+    window.addEventListener("pointermove", (e) => this.handleLassoPointerMove(e));
+    window.addEventListener("pointerup", (e) => this.handleLassoPointerUp(e));
     this.elements.toolsMenu.frameSceneBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
     // Both filter control pairs (import screen + post-reconstruct viewport
@@ -590,12 +640,14 @@ export class SceneViewerApp {
   //#region tools
   private hideAllToolSubmenus() {
     this.elements.toolsMenu.selectVolumeSubmenu.menu.classList.add("hidden");
+    this.elements.toolsMenu.lassoSelectSubmenu.menu.classList.add("hidden");
     this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add("hidden");
     this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add("hidden");
   }
   private cancelAllTools() {
     this.cancelVolumeSelectTool();
     this.cancelGroundPlaneTool();
+    this.cancelLassoDrag();
   }
   /**
    * Toggles visibility of resource panel.
@@ -2313,6 +2365,202 @@ export class SceneViewerApp {
 
   //#endregion
 
+  //#region lasso select tool
+
+  /** Arms the lasso-select tool: swaps the viewport cursor and shows its
+   * submenu's hint. Doesn't do anything else - unlike ground-plane/select-
+   * area, there's no click-by-click placement state to set up, since the
+   * whole gesture (drag start to drag end) is handled by a single
+   * pointerdown/pointermove/pointerup sequence once armed (see
+   * handleSceneObjectPointer()/handleLassoPointerDown()). */
+  private startLassoSelectTool(): void {
+    if (this.loadedDraws.length === 0) {
+      this.setStatus("Reconstruct a scene first.");
+      return;
+    }
+    this.lassoToolActive = true;
+    this.sceneManager.renderer.domElement.style.cursor = "crosshair";
+    this.setStatus("Lasso select: click and drag around objects' centers (right-click to cancel).");
+  }
+
+  /** Disarms the lasso-select tool (if armed), closes its submenu, and
+   * clears Config.sessionConfig.tools.activeTool - the "I'm done with
+   * lasso select for now" exit, matching cancelVolumeSelectTool()/
+   * cancelSelectGroundPlaneTool()'s role for their own submenus. Also
+   * abandons any drag that happens to be mid-gesture (see
+   * cancelLassoDrag()) - bound to both the submenu's own Cancel button
+   * and a right-click while the tool is armed. */
+  private cancelLassoSelectTool(): void {
+    this.cancelLassoDrag();
+    this.lassoToolActive = false;
+    this.sceneManager.renderer.domElement.style.cursor = "";
+    this.elements.toolsMenu.lassoSelectSubmenu.menu.classList.add("hidden");
+    if (Config.sessionConfig.tools.activeTool === "lasso-select") {
+      Config.sessionConfig.tools.activeTool = null;
+    }
+  }
+
+  /** Abandons a lasso drag in progress, if any, without touching whether
+   * the tool itself is armed - the internal-state-only half of
+   * cancelLassoSelectTool(), called from cancelAllTools() so arming a
+   * DIFFERENT tool mid-drag can't leave a stale drag/overlay behind, the
+   * same split cancelGroundPlaneTool()/cancelVolumeSelectTool() use for
+   * their own submenus. Harmless to call with no drag active. */
+  private cancelLassoDrag(): void {
+    this.lassoDragActive = false;
+    this.lassoPoints = [];
+    this.hideLassoOverlay();
+  }
+
+  /** The lasso's own pointerdown handler, called from
+   * handleSceneObjectPointer() while lassoToolActive - starts tracking a
+   * new drag from scratch (any previous, unfinished one is abandoned
+   * first, though in practice pointerup always already cleared it). */
+  private handleLassoPointerDown(event: PointerEvent): void {
+    event.preventDefault();
+    this.lassoDragActive = true;
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
+    this.lassoPoints = [{ x: event.clientX - rect.left, y: event.clientY - rect.top }];
+    this.updateLassoOverlay();
+  }
+
+  /** Window-level (see wireEvents()) - appends to the in-progress drag's
+   * path and redraws the dotted overlay. A minimum pixel distance from the
+   * last recorded point keeps the path (and the polygon later tested
+   * against it) from accumulating a huge number of near-duplicate points
+   * during a slow drag. No-op unless a lasso drag is actually in
+   * progress. */
+  private handleLassoPointerMove(event: PointerEvent): void {
+    if (!this.lassoDragActive) return;
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const last = this.lassoPoints[this.lassoPoints.length - 1];
+    if (last && Math.hypot(x - last.x, y - last.y) < 3) return;
+    this.lassoPoints.push({ x, y });
+    this.updateLassoOverlay();
+  }
+
+  /** Window-level (see wireEvents()) - finishes the drag and applies the
+   * selection, reading shift/ctrl "AS THE MOUSE IS BEING RELEASED" (i.e.
+   * from this pointerup event specifically, not whatever was held when the
+   * drag started): ctrl (or cmd, matching every other modifier check in
+   * this file) removes the lassoed objects from the current selection,
+   * shift adds them to it, neither replaces it outright. No-op unless a
+   * lasso drag is actually in progress; a drag that never moved enough to
+   * form a real path (fewer than 3 points) is treated as an accidental
+   * click, not a zero-area lasso, and selects nothing. */
+  private handleLassoPointerUp(event: PointerEvent): void {
+    if (!this.lassoDragActive) return;
+    this.lassoDragActive = false;
+    this.hideLassoOverlay();
+
+    const points = this.lassoPoints;
+    this.lassoPoints = [];
+    if (points.length < 3) return;
+
+    const mode: "replace" | "add" | "remove" = event.ctrlKey || event.metaKey ? "remove" : event.shiftKey ? "add" : "replace";
+    this.applyLassoSelection(points, mode);
+  }
+
+  /** Selects every loaded draw whose world-space bounds CENTER (not any
+   * point on its surface - see this feature's own spec) projects inside
+   * the given screen-space polygon, regardless of what's in front of it -
+   * this is a pure screen-space point-in-polygon test against each
+   * object's center, not a raycast, so occlusion never excludes anything
+   * ("even the ones hidden behind other objects"). Hidden-by-filter/
+   * manually-hidden objects are excluded, same as every other selection
+   * path in this file - lasso selects what's actually visible in the
+   * scene, it just doesn't care what else happens to be drawn in front of
+   * it. */
+  private applyLassoSelection(points: { x: number; y: number }[], mode: "replace" | "add" | "remove"): void {
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
+    const camera = this.sceneManager.activeCamera;
+    const group = this.sceneManager.getContentGroup();
+
+    const inside: number[] = [];
+    for (let index = 0; index < this.loadedDraws.length; index++) {
+      if (this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) continue;
+
+      const center = boundsCenter(this.loadedDraws[index].bounds);
+      if (group) center.applyMatrix4(group.matrixWorld);
+
+      const projected = center.project(camera); // NDC space, each axis roughly -1..1
+      if (projected.z < -1 || projected.z > 1) continue; // behind the camera, or beyond the far plane
+
+      const screenX = ((projected.x + 1) / 2) * rect.width;
+      const screenY = ((1 - projected.y) / 2) * rect.height;
+      if (SceneViewerApp.isPointInPolygon(screenX, screenY, points)) inside.push(index);
+    }
+
+    if (mode === "replace") this.selectedIndices.clear();
+    for (const index of inside) {
+      if (mode === "remove") this.selectedIndices.delete(index);
+      else this.selectedIndices.add(index);
+    }
+
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Standard even-odd ray-casting point-in-polygon test: counts how many
+   * polygon edges a horizontal ray from (x, y) to +infinity crosses: odd
+   * means inside, even means outside. The lasso path itself is used
+   * directly as the polygon (implicitly closed back to its first point) -
+   * it doesn't need to be simplified or explicitly closed first, since
+   * this test only cares about edge crossings, not the polygon's
+   * validity/simplicity otherwise. */
+  private static isPointInPolygon(x: number, y: number, points: { x: number; y: number }[]): boolean {
+    let inside = false;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const a = points[i];
+      const b = points[j];
+      const straddles = a.y > y !== b.y > y;
+      if (straddles && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+  }
+
+  /** Creates (on first use) the lasso's own SVG overlay - a plain, 2D,
+   * absolutely positioned SVG covering the viewport, unrelated to the
+   * three.js scene - and returns its polyline element. Sized to match the
+   * viewport once here; since the overlay is only ever visible mid-drag
+   * and a drag can't survive a window resize meaningfully anyway, it isn't
+   * kept in sync with later resizes. */
+  private ensureLassoOverlay(): SVGPolylineElement {
+    if (this.lassoOverlay && this.lassoPolyline) return this.lassoPolyline;
+
+    const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.classList.add("lasso-select-overlay");
+    svg.setAttribute("width", String(rect.width));
+    svg.setAttribute("height", String(rect.height));
+
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.classList.add("lasso-select-path");
+    svg.appendChild(polyline);
+
+    this.viewport.appendChild(svg);
+    this.lassoOverlay = svg;
+    this.lassoPolyline = polyline;
+    return polyline;
+  }
+
+  /** Redraws the dotted lasso path from the current lassoPoints. */
+  private updateLassoOverlay(): void {
+    const polyline = this.ensureLassoOverlay();
+    this.lassoOverlay!.classList.remove("hidden");
+    polyline.setAttribute("points", this.lassoPoints.map((p) => `${p.x},${p.y}`).join(" "));
+  }
+
+  private hideLassoOverlay(): void {
+    this.lassoOverlay?.classList.add("hidden");
+  }
+
+  //#endregion
+
   /** Bakes `matrix` onto `draw.originalPosedPositions` (never
    * draw.geometryData.positions - so re-applying a correction always
    * starts fresh instead of compounding onto whatever was already there),
@@ -4011,6 +4259,11 @@ export class SceneViewerApp {
     if (this.selectAreaToolActive) {
       if (event.button === 2) this.cancelVolumeSelectTool();
       else if (event.button === 0) this.handleSelectAreaClick(event);
+      return;
+    }
+    if (this.lassoToolActive) {
+      if (event.button === 2) this.cancelLassoSelectTool();
+      else if (event.button === 0) this.handleLassoPointerDown(event);
       return;
     }
     if (event.button === 1) return;
