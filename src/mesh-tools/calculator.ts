@@ -13,16 +13,22 @@ function toVector3Array(geometryData: { positions: number[] }): THREE.Vector3[] 
 
 /** How to resolve the left/right handedness (chirality) of the corrected
  * output:
- * - "auto" (default): keep posed geometry's own handedness. The shape-only
- *   correction (see posedToNonPosedInPlace) never introduces a reflection
- *   on its own - see analyzeTransformMatrix's doc comment - so this is a
- *   no-op in practice, not an active "fix".
- * - "left" / "right": force that chirality, flipping Z if it differs from
- *   world space's own convention. World space - and therefore posed
- *   geometry, since it's expressed directly in that space - is always
- *   right-handed in this viewer, because that's three.js/WebGL's fixed
- *   rendering convention, not something that varies per scene. So "right"
- *   is always a no-op here and "left" always flips. */
+ * - "auto" (default): posed/output geometry is NEVER mirrored - it's
+ *   always right-handed here (below). If the fit detects a genuine
+ *   mismatch (handednessMismatchDetected - see AffineDistortionResult),
+ *   that's taken as a sign the non-posed REFERENCE is the wrong one (it
+ *   goes through a user-configurable remap - see remapObjOrientation() -
+ *   unlike posed, which doesn't), and the reference gets mirrored
+ *   internally before fitting to compensate - so posedToNonPosedInPlace
+ *   comes out proper either way.
+ * - "left" / "right": force that chirality on the OUTPUT, deliberately,
+ *   regardless of what's detected (e.g. exporting to a left-handed
+ *   target) - flipping Z if it differs from world space's own convention.
+ *   World space - and therefore posed geometry, since it's expressed
+ *   directly in that space - is always right-handed in this viewer,
+ *   because that's three.js/WebGL's fixed rendering convention, not
+ *   something that varies per scene. So "right" is always a no-op here and
+ *   "left" always flips. */
 export type HandednessMode = "auto" | "left" | "right";
 
 export interface AffineDistortionOptions {
@@ -231,11 +237,14 @@ export interface AffineDistortionResult {
    * in app.ts). This is what recalculateTransformCorrection() applies. */
   posedToNonPosedInPlace: THREE.Matrix4;
   /** Whether the raw vertex correspondence indicated posed and non-posed
-   * geometry differ in handedness/chirality. Informational: with the
-   * default "auto" handedness option, posedToNonPosedInPlace never
-   * introduces a reflection regardless of this flag (see its doc comment),
-   * so this only matters if you're using the "left"/"right" handedness
-   * override, or investigating why a fit looks off. */
+   * geometry differ in handedness/chirality. With the default "auto"
+   * handedness option this actively drives the fit: true here means the
+   * non-posed REFERENCE got mirrored internally before fitting (see
+   * HandednessMode) - posedToNonPosedInPlace itself is unaffected either
+   * way, since posed/output geometry is never mirrored in "auto" mode.
+   * Also useful on its own when investigating why a fit looks off, or
+   * when using the "left"/"right" override (which ignores this flag and
+   * forces a chirality on the output regardless). */
   handednessMismatchDetected: boolean;
   /** Centroid of the POSED vertex set, in the same space as the input
    * positions - exposed so callers can pivot additional corrections (e.g.
@@ -411,15 +420,44 @@ export function calculateDistortionMatrix(
  * geometry's own chirality is trivially preserved. See HandednessMode for
  * the override that deliberately introduces a flip.
  */
+/** Cheap preliminary check for whether posed and non-posed vertex sets
+ * genuinely differ in handedness/chirality: fits the same posed-facing
+ * affine map analyzeTransformMatrix() below does, against the vertices
+ * exactly as given, and polar-decomposes it to see whether its rotation
+ * part would have to be improper (det<0) to explain the data. Kept
+ * separate, and re-run inside the main fit regardless of its answer here,
+ * so the "should we mirror the reference before fitting" decision stays a
+ * simple, self-contained yes/no independent of how the main fit is
+ * structured. Returns false (rather than throwing) on a degenerate input -
+ * the main fit will raise the real error for that case. */
+function detectHandednessMismatch(nonPosedVertices: THREE.Vector3[], posedVertices: THREE.Vector3[]): boolean {
+  const nonPosedCentroid = computeCentroid(nonPosedVertices);
+  const posedCentroid = computeCentroid(posedVertices);
+  const nonPosedCentered = nonPosedVertices.map((p) => p.clone().sub(nonPosedCentroid));
+  const posedCentered = posedVertices.map((p) => p.clone().sub(posedCentroid));
+
+  const nonPosedNonPosedCov = computeCovariance(nonPosedCentered, nonPosedCentered);
+  const posedNonPosedCov = computeCovariance(posedCentered, nonPosedCentered);
+  const nonPosedNonPosedCovInv = nonPosedNonPosedCov.clone().invert();
+  if (isZeroMatrix3(nonPosedNonPosedCovInv)) return false;
+
+  const nonPosedToPosedLinear = posedNonPosedCov.clone().multiply(nonPosedNonPosedCovInv);
+  const posedToNonPosedLinear = nonPosedToPosedLinear.clone().invert();
+  if (isZeroMatrix3(posedToNonPosedLinear)) return false;
+
+  const { u, v } = svd3x3(posedToNonPosedLinear);
+  return u.clone().multiply(v.clone().transpose()).determinant() < 0;
+}
+
 function analyzeTransformMatrix(
-  nonPosedVertices: THREE.Vector3[],
+  nonPosedVerticesInput: THREE.Vector3[],
   posedVertices: THREE.Vector3[],
   options: AffineDistortionOptions = {},
 ): AffineDistortionResult {
-  if (nonPosedVertices.length === 0 || posedVertices.length === 0) {
+  if (nonPosedVerticesInput.length === 0 || posedVertices.length === 0) {
     throw new Error("calculateDistortionMatrix: empty geometry input");
   }
-  if (nonPosedVertices.length !== posedVertices.length) {
+  if (nonPosedVerticesInput.length !== posedVertices.length) {
     // The fit assumes vertex i of one array corresponds to vertex i of the
     // other (same mesh, same vertex order, different pose) - a mismatched
     // count means that assumption doesn't hold and the fit would silently
@@ -430,6 +468,21 @@ function analyzeTransformMatrix(
   }
 
   const handedness: HandednessMode = options.handedness ?? "auto";
+
+  // Posed geometry is always right-handed here (comes straight from a GPU
+  // capture, untouched - see loadDraw()'s doc comment) - so a genuine
+  // mismatch means the NON-POSED/reference side (which DOES go through a
+  // user-configurable remap - see remapObjOrientation()) is the one that's
+  // actually wrong, not posed. "auto" therefore corrects for it by
+  // mirroring the REFERENCE before fitting, below - never by mirroring
+  // posed/output data, which would just drag otherwise-correct capture
+  // data into a mirror image of itself (matching the broken reference
+  // instead of fixing it - this used to be exactly what happened here).
+  const handednessMismatchDetected = detectHandednessMismatch(nonPosedVerticesInput, posedVertices);
+  const nonPosedVertices =
+    handedness === "auto" && handednessMismatchDetected
+      ? nonPosedVerticesInput.map((p) => new THREE.Vector3(p.x, p.y, -p.z))
+      : nonPosedVerticesInput;
 
   const nonPosedCentroid = computeCentroid(nonPosedVertices);
   const posedCentroid = computeCentroid(posedVertices);
@@ -469,25 +522,20 @@ function analyzeTransformMatrix(
   // stretch/shear (S) with no rotation baked in - see this function's doc
   // comment for why only S is used for the per-vertex shape correction.
   // u/v/singularValues come from an SVD of posedToNonPosedLinear
-  // (posedToNonPosedLinear = U * Sigma * V^T); naiveRotation = U*V^T would
-  // be the rotation part of THIS SAME fit, S = V*Sigma*V^T the stretch
-  // part - naiveRotation is kept only as a handedness signal below, NOT
-  // used as distortionOrientation (see the rotation fit further down for
-  // why).
+  // (posedToNonPosedLinear = U * Sigma * V^T); S = V*Sigma*V^T.
   const { u, singularValues, v } = svd3x3(posedToNonPosedLinear);
-  const naiveRotation = u.clone().multiply(v.clone().transpose());
-  const handednessMismatchDetected = naiveRotation.determinant() < 0;
 
   let stretch = buildDiagonalConjugate(v, singularValues);
 
-  // World space (and posed geometry, expressed directly in it) is always
-  // right-handed here - see HandednessMode's doc comment - so only "left"
-  // needs an active flip; "right" and "auto" both leave `stretch` as-is.
-  // Negating stretch's Z column/row is the conventional right<->left
-  // handed conversion axis (mirrors, e.g., the common DirectX/Unity(LH)
-  // <-> OpenGL/three.js(RH) Z-negation convention) - picked for
-  // predictability since this is a deliberate, caller-requested flip
-  // rather than a data-driven guess like handednessMismatchDetected above.
+  // A genuine "auto" mismatch has already been absorbed above (by fitting
+  // against a mirrored reference instead), so stretch already comes out
+  // proper for that case - nothing left to do here for it. Only "left"
+  // forces an OUTPUT flip now, deliberately, regardless of what's
+  // detected (e.g. exporting to a left-handed target) - "right" and a
+  // non-mismatched "auto" both leave stretch as-is. Negating stretch's Z
+  // column/row is the conventional right<->left handed conversion axis
+  // (mirrors, e.g., the common DirectX/Unity(LH) <-> OpenGL/three.js(RH)
+  // Z-negation convention).
   if (handedness === "left") {
     stretch = negateMatrix3RowAndColumn(stretch, 2);
   }
@@ -495,28 +543,28 @@ function analyzeTransformMatrix(
   const posedToNonPosedInPlace = affineFromLinearAndTranslation(stretch, posedCentroid, posedCentroid);
 
   // Fit the rotation SEPARATELY from shape correction, rather than pulling
-  // it out of posedToNonPosedLinear's own polar decomposition (naiveRotation
-  // above). In the noise-free case the two agree exactly - M = R*S, so R IS
-  // M's own rotation part - but they solve genuinely different problems
-  // once real vertex noise/residual is involved: naiveRotation is whatever
-  // rotation happens to fall out of the ONE joint affine fit that best
-  // explains posed from non-posed overall, while this instead directly asks
-  // "once shape is already corrected (stretch applied), what's the best
-  // RIGID alignment of THAT to non-posed?" - the same order these two
-  // corrections are actually applied in (see applyDistortionToScene():
-  // shape baked in first, rotation applied to the whole scene after) and
-  // the more reliable of the two against real capture data. Kabsch-fit
-  // exactly like analyzeTransform() above, just against the
-  // shape-corrected posed vertices instead of the raw ones -
-  // solveOptimalRotation() already guarantees a proper (det=+1) rotation by
-  // construction, so this needs no separate handedness fallback the way the
-  // old naiveRotation-based approach did.
+  // it out of posedToNonPosedLinear's own polar decomposition (the same
+  // decomposition detectHandednessMismatch() above uses, just on this
+  // function's own, possibly-reference-mirrored inputs). In the noise-free
+  // case the two agree exactly - M = R*S, so R IS M's own rotation part -
+  // but they solve genuinely different problems once real vertex
+  // noise/residual is involved: that decomposition's rotation is whatever
+  // falls out of the ONE joint affine fit that best explains posed from
+  // non-posed overall, while this instead directly asks "once shape is
+  // already corrected (stretch applied), what's the best RIGID alignment
+  // of THAT to non-posed?" - the same order these two corrections are
+  // actually applied in (see applyDistortionToScene(): shape baked in
+  // first, rotation applied to the whole scene after) and the more
+  // reliable of the two against real capture data. Kabsch-fit exactly like
+  // analyzeTransform() above, just against the shape-corrected posed
+  // vertices instead of the raw ones - solveOptimalRotation() already
+  // guarantees a proper (det=+1) rotation by construction, so this needs
+  // no separate handedness fallback.
   const correctedPosedCentered = posedCentered.map((p) => p.clone().applyMatrix3(stretch));
   const orientationRotation = solveOptimalRotation(computeCovariance(correctedPosedCentered, nonPosedCentered));
   const orientedLinear = orientationRotation.clone().multiply(stretch);
   const posedToNonPosedOrientedInPlace = affineFromLinearAndTranslation(orientedLinear, posedCentroid, posedCentroid);
   const distortionOrientation = matrix3ToQuaternion(orientationRotation);
-
 
   // How well a single affine map actually explains posed from non-posed -
   // see relativeFitError's own doc comment. Measured against

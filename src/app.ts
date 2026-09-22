@@ -59,6 +59,13 @@ interface LoadedDraw {
    * the up-axis/handedness option) without compounding a previous run's
    * correction onto itself. */
   originalPosedPositions: number[] | null;
+  /** Pristine copy of originalPosedPositions's corresponding normals, same
+   * lifetime/nullability rules as originalPosedPositions - kept alongside
+   * it so applyMatrixToDraw() can re-derive corrected normals fresh from
+   * the untouched originals each time a correction is (re-)applied,
+   * rather than compounding onto whatever geometryData.normals was left
+   * at by a previous run. */
+  originalPosedNormals: number[] | null;
   /** The matrix (if any) baked into geometryData.positions FROM
    * originalPosedPositions to produce the current (corrected) state -
    * null if this draw has never been corrected: no posed/non-posed pair
@@ -897,6 +904,10 @@ export class SceneViewerApp {
         // would see originalPosedPositions === null and skip every draw.
         previewGeometryData !== geometryData || this.intelGpaDistortion !== null
           ? geometryData.positions.slice()
+          : null,
+      originalPosedNormals:
+        previewGeometryData !== geometryData || this.intelGpaDistortion !== null
+          ? geometryData.normals.slice()
           : null,
       appliedDistortionMatrix: null,
     });
@@ -2324,19 +2335,40 @@ export class SceneViewerApp {
 
   //#endregion
 
-  /** Bakes `matrix` onto `draw.originalPosedPositions` (never
-   * draw.geometryData.positions - so re-applying a correction always
-   * starts fresh instead of compounding onto whatever was already there),
-   * writing the result into geometryData.positions/bounds/diagonal and
-   * recording `matrix` on the draw (LoadedDraw.appliedDistortionMatrix)
-   * for toggleRawImport() to reapply later. Returns false (no-op) for a
-   * draw with no separate posed export (originalPosedPositions is null -
-   * see loadDraw()) - there's no posed geometry to correct. */
+  /** Bakes `matrix` onto `draw.originalPosedPositions`/`originalPosedNormals`
+   * (never draw.geometryData.positions/normals - so re-applying a
+   * correction always starts fresh instead of compounding onto whatever
+   * was already there), writing the result into
+   * geometryData.positions/normals/bounds/diagonal and recording `matrix`
+   * on the draw (LoadedDraw.appliedDistortionMatrix) for
+   * toggleRawImport() to reapply later. Normals go through `matrix`'s
+   * normal matrix (inverse-transpose), not `matrix` itself, so they stay
+   * correct under the anisotropic stretch this always carries - see
+   * applyNormalMatrixToNormals(). If `matrix`'s linear part is a
+   * reflection (negative determinant - e.g. an automatic or explicit
+   * handedness correction, see HandednessMode in mesh-tools/calculator.ts),
+   * triangle winding is also flipped on both positions and normals
+   * together, so corner correspondence stays intact and triangles don't
+   * turn inside-out - see flipTriangleWindingInPlace()'s doc comment and
+   * mirrorSceneAlongX() for the same fix applied manually. Returns false
+   * (no-op) for a draw with no separate posed export
+   * (originalPosedPositions is null - see loadDraw()) - there's no posed
+   * geometry to correct. */
   private applyMatrixToDraw(draw: LoadedDraw, matrix: THREE.Matrix4): boolean {
-    if (draw.originalPosedPositions === null) return false;
+    if (draw.originalPosedPositions === null || draw.originalPosedNormals === null) return false;
     const correctedPositions = draw.originalPosedPositions.slice();
     this.applyMatrixToPositions(correctedPositions, matrix);
+
+    const correctedNormals = draw.originalPosedNormals.slice();
+    this.applyNormalMatrixToNormals(correctedNormals, matrix);
+
+    if (new THREE.Matrix3().setFromMatrix4(matrix).determinant() < 0) {
+      this.flipTriangleWindingInPlace(correctedPositions, 3);
+      this.flipTriangleWindingInPlace(correctedNormals, 3);
+    }
+
     draw.geometryData.positions = correctedPositions;
+    draw.geometryData.normals = correctedNormals;
     draw.bounds = computeBounds(draw.geometryData.positions);
     draw.diagonal = boundsDiagonal(draw.bounds);
     draw.appliedDistortionMatrix = matrix;
@@ -2724,6 +2756,25 @@ export class SceneViewerApp {
     }
   }
 
+  /** Transforms every normal in a flat, non-indexed array (3 components per
+   * vertex) by `matrix`'s normal matrix - the inverse-transpose of its
+   * upper-left 3x3 (THREE.Matrix3.getNormalMatrix()), the standard way to
+   * correctly carry direction vectors through a non-uniform linear map
+   * (a plain rotation carries its own inverse-transpose, so this is a
+   * no-op in that common case; it only matters once anisotropic stretch or
+   * a reflection is involved - see applyMatrixToDraw()). Renormalizes each
+   * result. In place. */
+  private applyNormalMatrixToNormals(normals: number[], matrix: THREE.Matrix4): void {
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < normals.length; i += 3) {
+      v.set(normals[i], normals[i + 1], normals[i + 2]).applyMatrix3(normalMatrix).normalize();
+      normals[i] = v.x;
+      normals[i + 1] = v.y;
+      normals[i + 2] = v.z;
+    }
+  }
+
   /** Negates every vertex's X component in a flat, non-indexed array (3
    * components per vertex - positions or normals), in place. */
   private negateXInPlace(values: number[]): void {
@@ -2767,12 +2818,12 @@ export class SceneViewerApp {
    * that the ground-plane tool, the select-area gizmo, and marker sizing
    * all make about contentGroup.scale.x elsewhere in this file.
    *
-   * Also mirrors originalPosedPositions (when a draw has one) alongside
-   * geometryData.positions - recalculateTransformCorrection() always
-   * re-derives the latter from the former, so leaving the pristine copy
-   * un-mirrored would silently undo the mirror the next time distortion
-   * correction is (re-)run. uvs/normals aren't re-derived that way, so
-   * they only need the fix applied once, here.
+   * Also mirrors originalPosedPositions/originalPosedNormals (when a draw
+   * has them) alongside geometryData.positions/normals -
+   * recalculateTransformCorrection() always re-derives the latter from the
+   * former, so leaving the pristine copies un-mirrored would silently undo
+   * the mirror the next time distortion correction is (re-)run. uvs aren't
+   * re-derived that way, so they only need the fix applied once, here.
    *
    * Doesn't attempt to re-level a previously-computed ground-plane
    * rotation (manualUpRotation) - mirroring can change whether the
@@ -2793,6 +2844,10 @@ export class SceneViewerApp {
       if (draw.originalPosedPositions) {
         this.negateXInPlace(draw.originalPosedPositions);
         this.flipTriangleWindingInPlace(draw.originalPosedPositions, 3);
+      }
+      if (draw.originalPosedNormals) {
+        this.negateXInPlace(draw.originalPosedNormals);
+        this.flipTriangleWindingInPlace(draw.originalPosedNormals, 3);
       }
 
       draw.bounds = computeBounds(draw.geometryData.positions);
