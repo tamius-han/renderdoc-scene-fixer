@@ -224,7 +224,7 @@ export class SceneViewerApp {
    * ground-plane tool's own state. */
   private selectAreaShape: THREE.Mesh | null = null;
   private selectAreaKind: "sphere" | "box" | null = null;
-  /** In-scene translate/scale gizmo for selectAreaShape - see
+  /** In-scene translate/scale/rotate gizmo for selectAreaShape - see
    * select-area-gizmo.ts. Recreated alongside the shape itself (not a
    * persistent instance carried across rebuilds - see restoreSelectAreaShape()'s
    * doc comment for why that wouldn't survive a scene rebuild anyway). */
@@ -234,7 +234,7 @@ export class SceneViewerApp {
    * user's last choice sticks, unlike the transient gizmo instance itself. */
   private selectAreaGizmoMode: GizmoMode = "translate";
   /** Mirrors SceneManager's fly-mode state (see onFlyStateChange()) purely
-   * so the 'G'/'S' gizmo-mode keyboard shortcuts can avoid firing while
+   * so the 'G'/'S'/'R' gizmo-mode keyboard shortcuts can avoid firing while
    * flying - 'S' collides with both movement schemes' own key bindings
    * there (see movement-bindings.interface.ts). */
   private isFlying = false;
@@ -1255,14 +1255,23 @@ export class SceneViewerApp {
     // The select-area shape (unlike the ground-plane tool's markers) is
     // user-configured, persistent data, not a transient in-progress tool
     // artifact - a filter/visibility change shouldn't silently discard it -
-    // so its kind/position/scale are captured here and re-applied to a
-    // freshly-created shape in the new content group below, rather than
-    // just clearing it outright.
+    // so its kind/position/scale/orientation are captured here and
+    // re-applied to a freshly-created shape in the new content group below,
+    // rather than just clearing it outright. worldQuaternion is captured
+    // relative to the OLD content group (about to be torn down, quaternion
+    // and all) - see restoreSelectAreaShape()'s own doc comment for why
+    // that's what it expects, not the shape's own (group-relative)
+    // quaternion directly.
+    const previousGroup = this.sceneManager.getContentGroup();
     const previousShape = this.selectAreaKind
       ? {
           kind: this.selectAreaKind,
           position: this.selectAreaShape?.position.clone(),
           scale: this.selectAreaShape?.scale.clone(),
+          worldQuaternion:
+            this.selectAreaShape && previousGroup
+              ? previousGroup.quaternion.clone().multiply(this.selectAreaShape.quaternion)
+              : undefined,
         }
       : null;
     this.clearSelectAreaShape();
@@ -1271,7 +1280,7 @@ export class SceneViewerApp {
     contentGroup.quaternion.copy(this.getActiveSceneRotation());
     this.updateSelectionVisuals();
     if (previousShape?.position && previousShape.scale) {
-      this.restoreSelectAreaShape(previousShape.kind, previousShape.position, previousShape.scale);
+      this.restoreSelectAreaShape(previousShape.kind, previousShape.position, previousShape.scale, previousShape.worldQuaternion);
     }
 
     const visibleCount = this.loadedDraws.length - excludedCount;
@@ -1843,15 +1852,23 @@ export class SceneViewerApp {
     }
   }
 
+  /** Reused across pointInSelectAreaShape() calls (see its own comment) -
+   * safe since findDrawsWithinSelectAreaShape() calls it strictly
+   * sequentially, never concurrently, over the course of one scan. */
+  private static readonly scratchLocalPoint = new THREE.Vector3();
+
   /** Tests whether a LOCAL-space point (content-group space - see
    * findDrawsWithinSelectAreaShape()'s doc comment) falls within the given
    * select-area shape. Sphere: unit sphere generally scaled non-uniformly
    * (a user can drag a single axis handle - see select-area-gizmo.ts), so
-   * this is really an ellipsoid test. Box: axis-aligned, since the shape
-   * never rotates (only translates/scales - same doc comment) and
-   * BoxGeometry(2,2,2) means shape.scale directly IS each axis'
-   * half-extent, same convention the gizmo's own per-axis scale handles
-   * use. */
+   * this is really an ellipsoid test. Box: BoxGeometry(2,2,2) means
+   * shape.scale directly IS each axis' half-extent, same convention the
+   * gizmo's own per-axis scale handles use - but, now that the shape CAN
+   * be rotated (see the rotate-mode gizmo), no longer axis-aligned in
+   * content-group-local space, so the point is first rotated by
+   * invQuaternion (the shape's own local quaternion, inverted - i.e. into
+   * the shape's OWN un-rotated local frame, where it again lines up with
+   * scale's axes) before the exact same axis-aligned test as before. */
   private static pointInSelectAreaShape(
     x: number,
     y: number,
@@ -1859,35 +1876,44 @@ export class SceneViewerApp {
     kind: "sphere" | "box",
     center: THREE.Vector3,
     scale: THREE.Vector3,
+    invQuaternion: THREE.Quaternion,
   ): boolean {
+    const local = SceneViewerApp.scratchLocalPoint.set(x - center.x, y - center.y, z - center.z).applyQuaternion(invQuaternion);
     if (kind === "sphere") {
-      const dx = (x - center.x) / (scale.x || 1e-9);
-      const dy = (y - center.y) / (scale.y || 1e-9);
-      const dz = (z - center.z) / (scale.z || 1e-9);
+      const dx = local.x / (scale.x || 1e-9);
+      const dy = local.y / (scale.y || 1e-9);
+      const dz = local.z / (scale.z || 1e-9);
       return dx * dx + dy * dy + dz * dz <= 1;
     }
-    return (
-      Math.abs(x - center.x) <= scale.x &&
-      Math.abs(y - center.y) <= scale.y &&
-      Math.abs(z - center.z) <= scale.z
-    );
+    return Math.abs(local.x) <= scale.x && Math.abs(local.y) <= scale.y && Math.abs(local.z) <= scale.z;
   }
 
   /** Extracts the placed select-area shape's own triangles (its geometry
    * is already non-indexed - see restoreSelectAreaShape() - so every 3
    * consecutive vertices form one triangle directly), transformed by its
-   * position/scale into the same content-group-local space everything
-   * else here works in. Only needed for "outside" mode's surface-crossing
-   * fallback (see findDrawsWithinSelectAreaShape()) - callers should build
-   * this lazily and reuse it across draws rather than per-draw, since a
+   * full position/scale/quaternion (scale first, then rotate, then
+   * translate - matching how three.js itself composes an object's local
+   * matrix) into the same content-group-local space everything else here
+   * works in. Only needed for "outside" mode's surface-crossing fallback
+   * (see findDrawsWithinSelectAreaShape()) - callers should build this
+   * lazily and reuse it across draws rather than per-draw, since a
    * sphere's geometry alone is a few hundred triangles. */
   private static buildSelectAreaShapeTriangles(shape: THREE.Mesh): THREE.Triangle[] {
     const posAttr = shape.geometry.getAttribute("position");
     const triangles: THREE.Triangle[] = [];
     for (let i = 0; i + 2 < posAttr.count; i += 3) {
-      const a = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).multiply(shape.scale).add(shape.position);
-      const b = new THREE.Vector3(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1)).multiply(shape.scale).add(shape.position);
-      const c = new THREE.Vector3(posAttr.getX(i + 2), posAttr.getY(i + 2), posAttr.getZ(i + 2)).multiply(shape.scale).add(shape.position);
+      const a = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
+      const b = new THREE.Vector3(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
+      const c = new THREE.Vector3(posAttr.getX(i + 2), posAttr.getY(i + 2), posAttr.getZ(i + 2))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
       triangles.push(new THREE.Triangle(a, b, c));
     }
     return triangles;
@@ -1922,20 +1948,22 @@ export class SceneViewerApp {
     const mode = Config.sessionConfig.tools.selectAreaMode;
     const center = shape.position;
     const scale = shape.scale;
+    const invQuaternion = shape.quaternion.clone().invert();
 
     // Conservative local-space AABB for the shape itself, to cheaply skip
     // draws whose own bounds can't possibly overlap it at all before doing
-    // any per-vertex work. Exact for the box (axis-aligned by
-    // construction); a bounding box around the ellipsoid for the sphere.
-    const sphereExtent = Math.max(scale.x, scale.y, scale.z);
-    const shapeMin =
-      kind === "sphere"
-        ? new THREE.Vector3(center.x - sphereExtent, center.y - sphereExtent, center.z - sphereExtent)
-        : new THREE.Vector3(center.x - scale.x, center.y - scale.y, center.z - scale.z);
-    const shapeMax =
-      kind === "sphere"
-        ? new THREE.Vector3(center.x + sphereExtent, center.y + sphereExtent, center.z + sphereExtent)
-        : new THREE.Vector3(center.x + scale.x, center.y + scale.y, center.z + scale.z);
+    // any per-vertex work. Both kinds use their own BOUNDING-SPHERE radius
+    // (rather than a tighter, axis-aligned box) since the shape can now be
+    // rotated (see the rotate-mode gizmo/shape.quaternion above) - unlike
+    // an axis-aligned box, a bounding sphere's radius is intrinsic to the
+    // shape and stays correct (if not perfectly tight) regardless of how
+    // it's oriented: an ellipsoid's farthest surface point from its own
+    // center is always its longest semi-axis, and a box's farthest CORNER
+    // from its own center is always its half-extent vector's own length -
+    // neither changes as the shape rotates about that same center.
+    const boundingRadius = kind === "sphere" ? Math.max(scale.x, scale.y, scale.z) : scale.length();
+    const shapeMin = new THREE.Vector3(center.x - boundingRadius, center.y - boundingRadius, center.z - boundingRadius);
+    const shapeMax = new THREE.Vector3(center.x + boundingRadius, center.y + boundingRadius, center.z + boundingRadius);
 
     let shapeTriangles: THREE.Triangle[] | null = null;
 
@@ -1962,7 +1990,7 @@ export class SceneViewerApp {
       if (mode === "inside") {
         let allInside = true;
         for (let i = 0; i + 2 < positions.length; i += 3) {
-          if (!SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+          if (!SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale, invQuaternion)) {
             allInside = false;
             break;
           }
@@ -1974,7 +2002,7 @@ export class SceneViewerApp {
       // mode === "outside": cheap pass first - any vertex actually inside.
       let anyInside = false;
       for (let i = 0; i + 2 < positions.length; i += 3) {
-        if (SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+        if (SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale, invQuaternion)) {
           anyInside = true;
           break;
         }
@@ -2059,15 +2087,16 @@ export class SceneViewerApp {
     return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
   }
 
-  /** 'G' (translate) / 'S' (scale) gizmo-mode shortcuts, matching Blender's
-   * own grab/scale keys - only while there's actually a shape/gizmo to
-   * affect, and guarded against typing in a form field and against fly
-   * mode (where 'S' is already a movement key in both control schemes -
-   * see movement-bindings.interface.ts). */
+  /** 'G' (translate) / 'S' (scale) / 'R' (rotate) gizmo-mode shortcuts,
+   * matching Blender's own grab/scale/rotate keys - only while there's
+   * actually a shape/gizmo to affect, and guarded against typing in a
+   * form field and against fly mode (where 'S' is already a movement key
+   * in both control schemes - see movement-bindings.interface.ts). */
   private handleGizmoKeydown(event: KeyboardEvent): void {
     if (event.repeat || this.isTypingInFormField() || this.isFlying || !this.selectAreaShape) return;
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
+    else if (event.code === "KeyR") this.setSelectAreaGizmoMode("rotate");
   }
 
   /** Drives both an in-progress gizmo drag (if any) and hover highlighting
@@ -2148,10 +2177,31 @@ export class SceneViewerApp {
    * clearSelectAreaShape()), as a child of the content group so it
    * moves/rotates with the mesh exactly like the ground-plane tool's own
    * markers. Split out from placeSelectAreaShape() so rebuildVisibleScene()
-   * can recreate the shape (from its previous position/scale) in the new
-   * content group after a filter/visibility rebuild, without re-running the
-   * viewport-width sizing math or requiring a fresh click. */
-  private restoreSelectAreaShape(kind: "sphere" | "box", localPosition: THREE.Vector3, localScale: THREE.Vector3): void {
+   * can recreate the shape (from its previous position/scale/orientation)
+   * in the new content group after a filter/visibility rebuild, without
+   * re-running the viewport-width sizing math or requiring a fresh click.
+   *
+   * `worldQuaternion` is the shape's desired orientation in WORLD space
+   * (defaulting to identity - world-aligned - for a freshly-placed shape,
+   * i.e. one nobody's used the rotate-mode gizmo on yet), NOT what ends up
+   * directly on shape.quaternion: that's a LOCAL quaternion, relative to
+   * `group`, which may itself be rotated (e.g. by the ground-plane
+   * alignment tool - see contentGroup.quaternion.copy() call in
+   * rebuildVisibleScene()), so shape.quaternion is set to `group`'s own
+   * rotation INVERTED and then composed with worldQuaternion - putting
+   * group's rotation and this inverse back-to-back cancels out to
+   * identity, leaving exactly worldQuaternion as the shape's effective
+   * WORLD orientation regardless of how `group` itself is rotated. This is
+   * also exactly why the gizmo's own axis/plane/rotate handles are built
+   * from shape.quaternion composed with the content group's rotation
+   * (rather than that rotation alone) - see select-area-gizmo.ts's own
+   * class doc comment. */
+  private restoreSelectAreaShape(
+    kind: "sphere" | "box",
+    localPosition: THREE.Vector3,
+    localScale: THREE.Vector3,
+    worldQuaternion?: THREE.Quaternion,
+  ): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
     this.clearSelectAreaShape();
@@ -2175,6 +2225,7 @@ export class SceneViewerApp {
     const shape = new THREE.Mesh(flatGeometry, material);
     shape.position.copy(localPosition);
     shape.scale.copy(localScale);
+    shape.quaternion.copy(group.quaternion).invert().multiply(worldQuaternion ?? new THREE.Quaternion());
     shape.userData.isSelectAreaShape = true;
     shape.renderOrder = 998;
 
@@ -2280,10 +2331,11 @@ export class SceneViewerApp {
         <div class="flex flex-row gap-2">
           <button class="${mode === "translate" ? "active" : ""}" data-select-area="mode-translate" title="Translate (G)">Move</button>
           <button class="${mode === "scale" ? "active" : ""}" data-select-area="mode-scale" title="Scale (S)">Scale</button>
+          <button class="${mode === "rotate" ? "active" : ""}" data-select-area="mode-rotate" title="Rotate (R)">Rotate</button>
           <button class="ghost" data-select-area="remove">Remove</button>
         </div>
       </div>
-      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move or scale it. Press G/S to switch modes.</p>
+      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move, scale, or rotate it. Press G/S/R to switch modes.</p>
     `;
 
     this.selectOptionsMenu
@@ -2292,6 +2344,9 @@ export class SceneViewerApp {
     this.selectOptionsMenu
       .querySelector('[data-select-area="mode-scale"]')
       ?.addEventListener("click", () => this.setSelectAreaGizmoMode("scale"));
+    this.selectOptionsMenu
+      .querySelector('[data-select-area="mode-rotate"]')
+      ?.addEventListener("click", () => this.setSelectAreaGizmoMode("rotate"));
     this.selectOptionsMenu
       .querySelector('[data-select-area="remove"]')
       ?.addEventListener("click", () => this.clearSelectAreaShape());
