@@ -924,12 +924,26 @@ export class SceneViewerApp {
 
     this.clearSelectionVisuals();
     this.clearGroundPlaneVisuals();
-
+    // The select-area shape (unlike the ground-plane tool's markers) is
+    // user-configured, persistent data, not a transient in-progress tool
+    // artifact - a filter/visibility change shouldn't silently discard it -
+    // so its kind/position/scale/orientation are captured here and
+    // re-applied to a freshly-created shape in the new content group below,
+    // rather than just clearing it outright. worldQuaternion is captured
+    // relative to the OLD content group (about to be torn down, quaternion
+    // and all) - see restoreSelectAreaShape()'s own doc comment for why
+    // that's what it expects, not the shape's own (group-relative)
+    // quaternion directly.
+    const previousGroup = this.sceneManager.getContentGroup();
     const previousShape = this.selectAreaKind
       ? {
           kind: this.selectAreaKind,
           position: this.selectAreaShape?.position.clone(),
           scale: this.selectAreaShape?.scale.clone(),
+          worldQuaternion:
+            this.selectAreaShape && previousGroup
+              ? previousGroup.quaternion.clone().multiply(this.selectAreaShape.quaternion)
+              : undefined,
         }
       : null;
     this.clearSelectAreaShape();
@@ -938,7 +952,7 @@ export class SceneViewerApp {
     contentGroup.quaternion.copy(this.getActiveSceneRotation());
     this.updateSelectionVisuals();
     if (previousShape?.position && previousShape.scale) {
-      this.restoreSelectAreaShape(previousShape.kind, previousShape.position, previousShape.scale);
+      this.restoreSelectAreaShape(previousShape.kind, previousShape.position, previousShape.scale, previousShape.worldQuaternion);
     }
 
     const visibleCount = this.loadedDraws.length - excludedCount;
@@ -1336,6 +1350,11 @@ export class SceneViewerApp {
     }
   }
 
+  /** Reused across pointInSelectAreaShape() calls (see its own comment) -
+   * safe since findDrawsWithinSelectAreaShape() calls it strictly
+   * sequentially, never concurrently, over the course of one scan. */
+  private static readonly scratchLocalPoint = new THREE.Vector3();
+
   private static pointInSelectAreaShape(
     x: number,
     y: number,
@@ -1343,27 +1362,34 @@ export class SceneViewerApp {
     kind: "sphere" | "box",
     center: THREE.Vector3,
     scale: THREE.Vector3,
+    invQuaternion: THREE.Quaternion,
   ): boolean {
+    const local = SceneViewerApp.scratchLocalPoint.set(x - center.x, y - center.y, z - center.z).applyQuaternion(invQuaternion);
     if (kind === "sphere") {
-      const dx = (x - center.x) / (scale.x || 1e-9);
-      const dy = (y - center.y) / (scale.y || 1e-9);
-      const dz = (z - center.z) / (scale.z || 1e-9);
+      const dx = local.x / (scale.x || 1e-9);
+      const dy = local.y / (scale.y || 1e-9);
+      const dz = local.z / (scale.z || 1e-9);
       return dx * dx + dy * dy + dz * dz <= 1;
     }
-    return (
-      Math.abs(x - center.x) <= scale.x &&
-      Math.abs(y - center.y) <= scale.y &&
-      Math.abs(z - center.z) <= scale.z
-    );
+    return Math.abs(local.x) <= scale.x && Math.abs(local.y) <= scale.y && Math.abs(local.z) <= scale.z;
   }
 
   private static buildSelectAreaShapeTriangles(shape: THREE.Mesh): THREE.Triangle[] {
     const posAttr = shape.geometry.getAttribute("position");
     const triangles: THREE.Triangle[] = [];
     for (let i = 0; i + 2 < posAttr.count; i += 3) {
-      const a = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).multiply(shape.scale).add(shape.position);
-      const b = new THREE.Vector3(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1)).multiply(shape.scale).add(shape.position);
-      const c = new THREE.Vector3(posAttr.getX(i + 2), posAttr.getY(i + 2), posAttr.getZ(i + 2)).multiply(shape.scale).add(shape.position);
+      const a = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
+      const b = new THREE.Vector3(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
+      const c = new THREE.Vector3(posAttr.getX(i + 2), posAttr.getY(i + 2), posAttr.getZ(i + 2))
+        .multiply(shape.scale)
+        .applyQuaternion(shape.quaternion)
+        .add(shape.position);
       triangles.push(new THREE.Triangle(a, b, c));
     }
     return triangles;
@@ -1377,20 +1403,22 @@ export class SceneViewerApp {
     const mode = Config.sessionConfig.tools.selectAreaMode;
     const center = shape.position;
     const scale = shape.scale;
+    const invQuaternion = shape.quaternion.clone().invert();
 
     // Conservative local-space AABB for the shape itself, to cheaply skip
     // draws whose own bounds can't possibly overlap it at all before doing
-    // any per-vertex work. Exact for the box (axis-aligned by
-    // construction); a bounding box around the ellipsoid for the sphere.
-    const sphereExtent = Math.max(scale.x, scale.y, scale.z);
-    const shapeMin =
-      kind === "sphere"
-        ? new THREE.Vector3(center.x - sphereExtent, center.y - sphereExtent, center.z - sphereExtent)
-        : new THREE.Vector3(center.x - scale.x, center.y - scale.y, center.z - scale.z);
-    const shapeMax =
-      kind === "sphere"
-        ? new THREE.Vector3(center.x + sphereExtent, center.y + sphereExtent, center.z + sphereExtent)
-        : new THREE.Vector3(center.x + scale.x, center.y + scale.y, center.z + scale.z);
+    // any per-vertex work. Both kinds use their own BOUNDING-SPHERE radius
+    // (rather than a tighter, axis-aligned box) since the shape can now be
+    // rotated (see the rotate-mode gizmo/shape.quaternion above) - unlike
+    // an axis-aligned box, a bounding sphere's radius is intrinsic to the
+    // shape and stays correct (if not perfectly tight) regardless of how
+    // it's oriented: an ellipsoid's farthest surface point from its own
+    // center is always its longest semi-axis, and a box's farthest CORNER
+    // from its own center is always its half-extent vector's own length -
+    // neither changes as the shape rotates about that same center.
+    const boundingRadius = kind === "sphere" ? Math.max(scale.x, scale.y, scale.z) : scale.length();
+    const shapeMin = new THREE.Vector3(center.x - boundingRadius, center.y - boundingRadius, center.z - boundingRadius);
+    const shapeMax = new THREE.Vector3(center.x + boundingRadius, center.y + boundingRadius, center.z + boundingRadius);
 
     let shapeTriangles: THREE.Triangle[] | null = null;
 
@@ -1417,7 +1445,7 @@ export class SceneViewerApp {
       if (mode === "inside") {
         let allInside = true;
         for (let i = 0; i + 2 < positions.length; i += 3) {
-          if (!SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+          if (!SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale, invQuaternion)) {
             allInside = false;
             break;
           }
@@ -1429,7 +1457,7 @@ export class SceneViewerApp {
       // mode === "outside": cheap pass first - any vertex actually inside.
       let anyInside = false;
       for (let i = 0; i + 2 < positions.length; i += 3) {
-        if (SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale)) {
+        if (SceneViewerApp.pointInSelectAreaShape(positions[i], positions[i + 1], positions[i + 2], kind, center, scale, invQuaternion)) {
           anyInside = true;
           break;
         }
@@ -1503,6 +1531,7 @@ export class SceneViewerApp {
     if (event.repeat || this.isTypingInFormField() || this.isFlying || !this.selectAreaShape) return;
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
+    else if (event.code === "KeyR") this.setSelectAreaGizmoMode("rotate");
   }
 
   private handleGizmoPointerMove(event: PointerEvent): void {
@@ -1566,8 +1595,13 @@ export class SceneViewerApp {
     this.restoreSelectAreaShape(kind, localPosition, localScale);
   }
 
+  private restoreSelectAreaShape(
+    kind: "sphere" | "box",
+    localPosition: THREE.Vector3,
+    localScale: THREE.Vector3,
+    worldQuaternion?: THREE.Quaternion,
+  ): void {
 
-  private restoreSelectAreaShape(kind: "sphere" | "box", localPosition: THREE.Vector3, localScale: THREE.Vector3): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
     this.clearSelectAreaShape();
@@ -1587,6 +1621,7 @@ export class SceneViewerApp {
     const shape = new THREE.Mesh(flatGeometry, material);
     shape.position.copy(localPosition);
     shape.scale.copy(localScale);
+    shape.quaternion.copy(group.quaternion).invert().multiply(worldQuaternion ?? new THREE.Quaternion());
     shape.userData.isSelectAreaShape = true;
     shape.renderOrder = 998;
 
@@ -1664,10 +1699,11 @@ export class SceneViewerApp {
         <div class="flex flex-row gap-2">
           <button class="${mode === "translate" ? "active" : ""}" data-select-area="mode-translate" title="Translate (G)">Move</button>
           <button class="${mode === "scale" ? "active" : ""}" data-select-area="mode-scale" title="Scale (S)">Scale</button>
+          <button class="${mode === "rotate" ? "active" : ""}" data-select-area="mode-rotate" title="Rotate (R)">Rotate</button>
           <button class="ghost" data-select-area="remove">Remove</button>
         </div>
       </div>
-      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move or scale it. Press G/S to switch modes.</p>
+      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move, scale, or rotate it. Press G/S/R to switch modes.</p>
     `;
 
     this.selectOptionsMenu
@@ -1676,6 +1712,9 @@ export class SceneViewerApp {
     this.selectOptionsMenu
       .querySelector('[data-select-area="mode-scale"]')
       ?.addEventListener("click", () => this.setSelectAreaGizmoMode("scale"));
+    this.selectOptionsMenu
+      .querySelector('[data-select-area="mode-rotate"]')
+      ?.addEventListener("click", () => this.setSelectAreaGizmoMode("rotate"));
     this.selectOptionsMenu
       .querySelector('[data-select-area="remove"]')
       ?.addEventListener("click", () => this.clearSelectAreaShape());
