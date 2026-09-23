@@ -1,0 +1,421 @@
+<div class="overlay-backdrop-blur fixed top-0 left-0 w-[100vw] h-[100dvh] bg-cool-900/75 hidden z-100 flex flex-col items-center justify-center">
+
+  <!-- Window -->
+  <div class="window max-w-[960px] flex flex-col border border-warm-500 pointer-events-none max-h-[90dvh]">
+
+    <!-- Titlebar -->
+    <div class="py-2 px-4 bg-warm-200 text-brown-900">
+      Help
+    </div>
+
+
+    <!-- content -->
+    <div class="p-8 bg-brown-900 pointer-events-auto overflow-y-auto max-h-[85dvh]">
+      <div class="warning-box">
+        Using Renderdoc to capture game scenes <b>WILL</b> result in game bans from online games that make use of anti-cheat software.<br/>
+        Follow these instructions at your own risk.
+      </div>
+
+      <h1 class="text-center !mt-32 !mb-8">RenderDoc Capture Fixer — user guide</h1>
+
+      <p>The intent of this tool is to simplify capturing and fixing game meshes with RenderDoc. In order to use it, you will also need either</p>
+
+      <div class="flex flex-row gap-8">
+        <div class="flex-1">
+          <ol>
+            <li>
+              <a href="https://renderdoc.org/" target="_blank">RenderDoc</a><small class="opacity-50"><br/>
+              (RenderDoc Scene Exporter addon requires v1.45; older or newer versions may not work)
+            </small></li>
+            <li>
+              <a href="" target="_blank">RenderDoc Scene Exporter</a>
+            </li>
+          </ol>
+        </div>
+        <div class="flex-1">
+          <ol>
+            <li>
+              <a href="https://www.intel.com/content/www/us/en/developer/tools/graphics-performance-analyzers/download.html" target="_blank">Intel GPA suite</a><small class="opacity-50"><br/>
+                (windows-only; Internet Archive: <a href="https://archive.org/details/intel-gpa-framework-25.1" target="_blank">allegedly this</a>)
+              </small>
+            </li>
+          </ol>
+        </div>
+      </div>
+
+      <p>After installing Renderdoc and Renderdoc Scene Exporter addon (or Intel GPA suite), you can start capturing.</p>
+
+      <div class="info-box">
+        By default, Renderdoc saves your game captures to:
+        <ul>
+          <li>
+            <code>%TEMP%</code> on Windows, and
+          </li>
+          <li>
+            <code>/tmp/RenderDoc</code> on Linux.
+          </li>
+        </ul>
+        <p>Note that on Linux, <code>/tmp</code> directory usually exists in your RAM. You might want to change capture directory in Renderdoc settings to a folder on your disk.</p>
+        <p><b class="text-white">BTW: </b>If you're exporting with Intel GPA instead, gods of UX have blessed you with not having to know these things.</p>
+      </div>
+
+      <h2 class="!mt-16">Capturing the game</h2>
+
+      <!-- TAB ROW -->
+      <div class="w-full flex flex-row tab-row">
+        <button class="tab" data-tab="windows-intel">Windows (Intel GPA)</button>
+        <button class="tab" data-tab="windows-renderdoc">Windows (RenderDoc)</button>
+        <button class="tab" data-tab="linux">Linux</button>
+      </div>
+      <!-- CONTENT FIELDS -->
+
+      <!-- INTEL GPA WINDOWS -->
+      <div data-content="windows-intel">
+        <ol>
+          <li>Launch Intel GPA</li>
+          <li>
+            <b>For steam games:</b> in the <code>Executable Path</code> field, enter the path to steam executable.<br/>
+            <b>For other stores:</b> same, just replace steam with other store's launcher.<br/>
+            <b>For standalone software:</b> enter the path to the program's executable.
+            <div class="info-box">
+              Note: the 'three dots' button gives you a file picker.
+            </div>
+          </li>
+          <li>Click <code>Start</code></li>
+          <li>
+            If trying to capture a steam game (or a game from a different store), launch the game from the store's launcher.
+          </li>
+          <li>
+            If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
+            <div class="flex flex-row justify-center p-2">
+              <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+            </div>
+          </li>
+          <li>
+            Capture the scene whenever you want.
+          </li>
+        </ol>
+
+        <div class="expandable">
+          <button class="expandable-activator text-left" type="button" aria-expanded="false">
+            <h3>My game crashes / doesn't launch. Wat do?</h3>
+            <small class="text-amber-300 hover:text-amber-100">Click to expand/collaspe.</small>
+          </button>
+          <div class="expandable-content" hidden>
+            <p>
+              Tools like Intel GPA (and RenderDoc, and NinjaRipper) touch the game's rendering pipeline. Some games are a bit sensitive to that, and will crash or even refuse to launch.
+              If your game doesn't launch with Intel GPA, try using RenderDoc. But if neither work ...
+            </p>
+            <p class="text-center py-8 text-amber-200"><b>
+              TW:</b> while you're probably aware you're in the Bel<i>geek</i> right now, the border with <i>Nerd</i>erlands is fast approaching. Take care.
+            </p>
+            <p>
+              Sometimes, you can work around that by moving your capture spot outside of the game's rendering pipeline. There are two options that allow you to do that (though neither is guaranteed to work for every game):
+            </p>
+            <ol>
+              <li>DXVK</li>
+              <li>Linux <small class="opacity-50">(which is really just DXVK but fancier, where Steam does all the hard work for you)</small></li>
+            </ol>
+            <p>
+              Don't want to install Linux? You don't have to.
+              Many common Linux distributions can be run directly from a USB flash drive, without having to install them on your computer (although your performance may be limited by your USB flash drive).
+              Choice of Linux distribution is up to you. <small class="opacity-50">As of 2026, I suggest CachyOS with KDE. CachyOS because that's what my experience is based on, and KDE because that way your experience will be closest to what you're used to on Windows.</small>
+            </p>
+            <p>
+              Before you go and make a linux live USB, check <a href="https://www.protondb.com/">ProtonDB</a> to see how well your game is supported. ProtonDB can be a bit hit-or-miss at times, but it's a decent rule of thumb.
+            </p>
+            <p>
+              When using Linux from a flash drive, install Steam and Renderdoc (note that if you're using Linux from a flash drive, you typically need to re-install software on every boot).
+              If your game library is on <code>C:</code> drive, you can then add it to Steam in <code>Steam settings > Storage > Add drive</code> and then navigating to your steam install folder.
+              If your game is not on <code>C:</code>, then your options are: a) move it to <code>C:</code>, or b) add new library on Steam on one of your disks and re-install it. <small class="opacity-50">(I'm 0 for 2 on trying to launch games from my non-<code>C:</code> windows steam library. Restoring from a backup might also work, but is untested. I'm 2-for-2 on launching games from my Windows <code>C:</code> drive library).</small>
+            </p>
+            <p>
+              If the game refuses to launch on Linux, right click on game and go to <code>Properties -> Compatibility</code> and check the "force use of a specific Steam Play compatibility tool" checkbox. If the game still don't work, try
+              <code>Proton-cachyOS</code>, <code>Proton Experimental</code>, <code>Proton Hotfix</code>, <code>Proton [biggest number]</code>, googling or asking ChatGPT (in that order).
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- RENDERDOC WINDOWS -->
+      <div data-content="windows-renderdoc">
+        <ol>
+          <li>Go to <code>File > Launch application</code></li>
+          <li>
+            <b>For steam games:</b> in the <code>Executable Path</code> field, enter the path to steam executable.<br/>
+            <b>For other stores:</b> same, just replace steam with other store's launcher.<br/>
+            <b>For standalone software:</b> enter the path to the program's executable.
+            <div class="info-box">
+              Note: the 'three dots' button gives you a file picker.
+            </div>
+          </li>
+          <li>
+            Click <code>Launch</code>.
+          </li>
+          <li>
+            If trying to capture a steam game (or a game from a different store), launch the game from the store's launcher.
+          </li>
+          <li>
+            If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
+            <div class="flex flex-row justify-center p-2">
+              <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+            </div>
+          </li>
+          <li>
+            Capture the scene whenever you want.
+          </li>
+        </ol>
+
+        <div class="expandable">
+          <button class="expandable-activator text-left" type="button" aria-expanded="false">
+            <h3>My game crashes / doesn't launch. Wat do?</h3>
+            <small class="text-amber-300 hover:text-amber-100">Click to expand/collaspe.</small>
+          </button>
+          <div class="expandable-content" hidden>
+            <p>
+              Tools like Renderdoc (and Intel GPA, and NinjaRipper) touch the game's rendering pipeline. Some games are a bit sensitive to that, and will crash or even refuse to launch.
+              If your game doesn't launch with RenderDoc, try using Intel GPA. But if neither work ...
+            </p>
+            <p class="text-center py-8 text-amber-200"><b>
+              TW:</b> while you're probably aware you're in the Bel<i>geek</i> right now, the border with <i>Nerd</i>erlands is fast approaching. Take care.
+            </p>
+            <p>
+              Sometimes, you can work around that by moving your capture spot outside of the game's rendering pipeline. There are two options that allow you to do that (though neither is guaranteed to work for every game):
+            </p>
+            <ol>
+              <li>DXVK</li>
+              <li>Linux <small class="opacity-50">(which is really just DXVK but fancier, where Steam does all the hard work for you)</small></li>
+            </ol>
+            <p>
+              Don't want to install Linux? You don't have to.
+              Many common Linux distributions can be run directly from a USB flash drive, without having to install them on your computer (although your performance may be limited by your USB flash drive).
+              Choice of Linux distribution is up to you. <small class="opacity-50">As of 2026, I suggest CachyOS with KDE. CachyOS because that's what my experience is based on, and KDE because that way your experience will be closest to what you're used to on Windows.</small>
+            </p>
+            <p>
+              Before you go and make a linux live USB, check <a href="https://www.protondb.com/">ProtonDB</a> to see how well your game is supported. ProtonDB can be a bit hit-or-miss at times, but it's a decent rule of thumb.
+            </p>
+            <p>
+              When using Linux from a flash drive, install Steam and Renderdoc (note that if you're using Linux from a flash drive, you typically need to re-install software on every boot).
+              If your game library is on <code>C:</code> drive, you can then add it to Steam in <code>Steam settings > Storage > Add drive</code> and then navigating to your steam install folder.
+              If your game is not on <code>C:</code>, then your options are: a) move it to <code>C:</code>, or b) add new library on Steam on one of your disks and re-install it. <small class="opacity-50">(I'm 0 for 2 on trying to launch games from my non-<code>C:</code> windows steam library. Restoring from a backup might also work, but is untested. I'm 2-for-2 on launching games from my Windows <code>C:</code> drive library).</small>
+            </p>
+            <p>
+              If the game refuses to launch on Linux, right click on game and go to <code>Properties -> Compatibility</code> and check the "force use of a specific Steam Play compatibility tool" checkbox. If the game still don't work, try
+              <code>Proton-cachyOS</code>, <code>Proton Experimental</code>, <code>Proton Hotfix</code>, <code>Proton [biggest number]</code>, googling or asking ChatGPT (in that order).
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- RENDERDOC LINUX -->
+      <div data-content="linux">
+        <ol>
+          <li>Install your game via Steam. If your game is standalone, add it as a non-steam game to steam and set up compatibility tools (proton) as needed.</li>
+          <li>Make sure the game is running.</li>
+          <li><b>Make sure game isn't running via Wayland.</b> At the time of writing this, games won't launch at all under Wayland. Make sure you didn't put <code>PROTON_ENABLE_WAYLAND=1</code> into the launch options.</li>
+          <li>Exit steam</li>
+          <li>Open a terminal (KDE: <code>konsole</code>, other DEs: why don't you use a DE that isn't shit?, WMs: you already know what to do)</li>
+          <li>
+            Run the following command:<br/>
+            <code>sudo renderdoccmd vulkanlayer --register --system</code><br/>
+            <small class="opacity-50">Unless you run Linux from live USB, you only ever need to run this command once per install. This registers renderdoc's vulkan capture system wide, and makes enabling renderdoc capture slightly easier.</small>
+          <li>
+            Use the following command to launch Steam:<br/>
+            <code>ENABLE_VULKAN_RENDERDOC_CAPTURE=1 steam</code><br/>
+            <small class="opacity-50">(this works on CachyOS; other distros may vary)</small>
+          </li>
+          <li>Launch your game via Steam.</li>
+          <li>
+            If the game refuses to launch, right click on the game, go to <code>Preferences -> Compatibility</code> and check the "force use of a specific Steam Play compatibility tool" checkbox. Play around with the option.
+            If you're fresh to Linux, consult with Linux advertisement in the windows tab as I won't repeat it here.
+          </li>
+          <li>
+            If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
+            <div class="flex flex-row justify-center p-2">
+              <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+            </div>
+          </li>
+          <li>
+            Capture the scene whenever you want.
+          </li>
+        </ol>
+      </div>
+
+      <h2 class="!mt-16">After capture</h2>
+
+      <div class="w-full flex flex-row tab-row">
+        <button button class="tab" data-tab="windows-intel">Windows (Intel GPA)</button>
+        <button class="tab" data-tab="windows-renderdoc">Windows (RenderDoc)</button>
+        <button class="tab" data-tab="linux">Linux</button>
+      </div>
+      <div data-content="windows-intel">
+        <ol>
+          <li>Select your capture from the list of captures and double-click it</li>
+          <li><b>WAIT.</b>
+            Intel GPA takes quite some time to load the capture.
+            Impatiently clicking on the capture when it fails to launch in less than 30 seconds will just open the capture multiple times.
+          </li>
+          <li>
+            Click on the model you want to export. This will switch the left sidebar to `Pixel history` tab.
+          </li>
+          <li>
+            In the `Pixel history` tab, select the <code>DrawIndexed</code> call with color that matches the color of the pixel you just clicked. This will highlight parts of the picture in purple.
+            This will also open a second sidebar on the left.
+          </li>
+          <li>
+            If you see a lot more purple than you expected (e.g. say, if the entire picture turns purple), scroll to <i>Input</i> section of the second bar and click the texture
+            that most resembles your screenshot. The correct option will probably be labelled along the lines of <code>T: <number> (SRV)</code>. The line item will also have a
+            thumbnail that isn't just a symbol/icon. If there's multiple options, go and explore.
+          </li>
+          <li>
+            Click that texture in the <i>Input</i> section of the second sidebar. Once you do, the preview image will change.
+          </li>
+          <li>
+            Repeat steps 4-6 until only (a part of) the character or other object you want to export gets highlighted.
+          </li>
+          <li>
+            Control-click on the un-highlighted part, <b>wait for the list of draw calls to update,</b> control-click the draw call with a color square that has the same color as the pixel you clicked.
+            Repeat until everything you want to export is purple.
+          </li>
+          <li>
+            If you worry that you're missing some parts of your character that are obstructed from view, switch the left sidebar to <i>API Log</i>
+            tab and add draw calls near your already-selected draw calls to selection.
+          </li>
+          <li>
+            Once satisfied with your selection, click on the <i>Geometry</i> section in the <i>Output</i> section of the second sidebar on the left.
+            Then, click the export button (upper right corner of the preview panel) and save your scene as `scene.obj`
+          </li>
+          <li>
+            You have probably noticed that everything appeared very squished in the preview panel. To fix that, you also need to pick a landmark.<br/>
+            Landmark is an object that is not rigged or otherwise distorted. Unselect your character and click on some object you can see the same way you selected your character.
+            You need <b>exactly ONE (1)</b> <code>DrawIndexed</code> call. Click <i>Geometry</i> in the <b>Input</b> section of the second sidebar on the left. Rotate the object a bit
+            in order to verify that the object has the exact same shape as it has in the game. If it doesn't, you need to pick a different draw call. If it does, export this input geometry
+            and save it as <code>landmark-source.obj</code>.
+          </li>
+          <li>
+            Click <i>Geometry</i> in the <b>Output</b> section of the second sidebar on the left. Export this geometry and save it as <code>landmark-output.obj</code>.
+          </li>
+          <li>
+            Drag the three files you've just exported (<code>scene.obj</code>, <code>landmark-source.obj</code>, and <code>landmark-output.obj</code>) into this app.
+          </li>
+        </ol>
+      </div>
+      <div data-content="windows-renderdoc">
+        <ol>
+          <li>
+            <code>File > Open Capture</code>. Navigate to your capture directory and open the capture.<br/>
+          </li>
+          <li>Make sure <code>Renderdoc Scene Exporter</code> extension is enabled.</li>
+          <li>
+            Click <code>Tools > Export scene</code> and do the needful™. Create a new folder and export the scene into said folder.
+          </li>
+          <li>
+            Drag the folder into this app.
+          </li>
+        </ol>
+      </div>
+      <div data-content="linux">
+        <ol>
+          <li>
+            Open Renderdoc.
+          </li>
+          <li>
+            <code>File > Open Capture</code>. Navigate to your capture directory and open the capture.<br/>
+          </li>
+          <li>Make sure <code>Renderdoc Scene Exporter</code> extension is enabled.</li>
+          <li>
+            Click <code>Tools > Export scene</code> and do the needful™. Create a new folder and export the scene into said folder.
+          </li>
+          <li>
+            Drag the folder into this app.
+          </li>
+        </ol>
+      </div>
+
+
+      <h2 class="!mt-16">Using this tool</h2>
+
+      <p>If you're reading this, the standard FAFO approach (that is: messing around the program in order to find out) probably doesn't work for you.</p>
+      <p>Not to worry. I have a documentation.</p>
+
+      <h3>Importing stuff into this app</h3>
+      <p>
+        Upon dragging the files into this app, the tool will load the files and populate the <b>Render passes</b> list. If there's more than one option, you need to figure
+        out which one has the meshes you want. Through the magic of trial and error, though usually the geometry you want is going to appear in the <i>FORWARD</i> (or G-buffer) pass
+        with the highest number of draws.
+      </p>
+      <p>
+        If you're importing RenderDoc capture, the import will be quick. If you're importing Intel GPA export, things will take a bit longer.
+      </p>
+      <p>
+        Input options are set to reasonable defaults. This app uses 1 unit = 1 meter scale internally. If you know what scale your game is using, you can define capture unit size
+        in order to correct for that. You <b>do not</b> have to do this, as nothing will break (at least, not too much) if you keep this option as it is.
+      </p>
+      <p>
+        Input geometry axis mapping can different from game engine to game engine. You'll only see if it's set wrong once the scene is loaded and you see your scene mirrored, rotated sideways, or both.
+      </p>
+      <p>
+        If you exported your scene with RenderDoc, <i>Hide largest % of objects</i> should probably be at around 5% in order to get rid of the skybox and other large salad.
+        If you exported with Intel GPA, you should keep this option at 0% and increase it only if necessary. This slider can also be changed after the scene is loaded, so don't worry
+        too much about getting it wrong.
+      </p>
+      <p>
+        "Enforce max scene size" is for when things start breaking because you didn't set capture unit size and the scene gets too big. This option ensures the scene is no more than (value of next field)
+        units across.
+      </p>
+      <p>
+        Click 'reconstruct scene' button to load your scene.
+      </p>
+
+      <h3>Scene viewer</h3>
+      <p>
+        The scene viewer consists of main toolbar (Import, export, help, control options — these are self-explanatory), object sidebar, main viewport, and viewport toolbar.
+      </p>
+      <p>
+        In the objects sidebar, you can see the "hide largest % of objects" slider (which you should change if your view is blocked by skybox, or if the scene is missing objects that don't appear
+        even though you know you most definitely exported them). After that, you can see the list of objects/draw calls.
+      </p>
+      <p>
+        Clicking on an object will select it. Clicking the <code>sel</code> button adds or removes the object from selection (shift-click and control-click also work).
+        Clicking the <code>vis:</code> button toggles visibility of that object. If more objects are selected, visibility of all selected objects will be toggled.
+      </p>
+      <div class="info-box">
+        Note that objects hidden with the <i>Hide largest % of objects</i> slider aren't selectable.
+      </div>
+      <p>
+        In the main viewport, movement works like Plasticity with Blender settings. Middle mouse rotates the scene around a pivot (unlike in Blender, pivot is the surface of the
+        object under your mouse cursor) and shift + middle mouse pans the scene. (Ctrl + middle mouse to zoom is not implemented — use mouse scroll instead).
+      </p>
+      <p>
+        Pressing <code>A</code> toggles fly mode. Use ESDF to move around, space to move up, and control to move down. Mouse movement controls the camera orientation. Press <code>A</code> or escape to exit fly mode.
+      </p>
+      <div class="info-box">
+        You can switch to WASD controls in <i>Control options</i> menu. In <code>WASD</code>, fly mode toggle is <code>F</code>.
+      </div>
+      <p>
+        You can also select objects by clicking them in the scene. As usual, <code>shift + click</code> and <code>control + click</code> behave as you would expect.
+        You can select multiple objects with lasso tool, which becomes active when you click and drag. As usual, <code>shift</code> and <code>ctrl</code> do what you expect them to do.
+      </p>
+      <p>
+        <i>Select by volume</i> opens a toolbar that allows you to spawn a shape (either sphere or a cube). You can then select all the objects within said shape. Read the UI, it's self-explanatory.
+        You can resize shapes by pressing <code>S</code> and grabbing a handle, or move them by pressing <code>G</code> and grabbing a handle. If you selected a cube, you can also rotate the cube by pressing <code>R</code>.
+      </p>
+      <p>
+        If using RenderDoc, you will see a <i>Distortion fix</i> option in the viewport toolbar. In general, the app should have corrected scene distortion automatically. If you think
+        the scene still doesn't look right (i.e. if you think the proportions of objects in scene aren't correct), you can go to <i>Distortion fix</i> → <i>Select distortion correciton landmark</i>.
+        Start clicking objects in the scene. When you click an object, an object preview panel will appear. If the object inside the preview panel matches its appearance in game, click
+        <i>Fix distortion</i> button. If not, try a different object.
+      </p>
+      <p>
+        If the scene appears sideways (rotated by 90° (that's 194° for fellow Americans)), go to <i>Scene orientation</i> → <i>Set axis mapping</i> and play around until the scene looks right.
+        If the scene appears mirrored, flip the sign of <b>ONE</b> of the axes (e.g. change <code>+z</code> to <code>-z</code>, or <code>-y</code> to <code>+y</code>).
+      </p>
+      <p>
+        If the scene appears tilted by any amount other than 90°, go to <i>Scene orientation</i> → <i>Select ground plane</i> and pick three points on a flat, horizontal surface. If everything
+        looks fine, click <i>Confirm plane</i>. You should also know what button to press if the scene appears upside down.
+      </p>
+
+      <h3>Exporting the scene</h3>
+    </div>
+  </div>
+</div>

@@ -12,6 +12,7 @@ import { UNITS } from '../../util/const.unit-conversion';
 import { remapObjOrientation } from '../../util/axis-orientation';
 import type { ParsedOBJ, PassIndexEntry } from '../../types';
 import { InputAxisMapper } from '../common/input-axis-mapper/cmp.input-axis-mapper';
+import { Help } from '../help/cmp.help';
 
 enum ImportType {
   Unknown = 0,
@@ -74,8 +75,11 @@ export class CaptureImporter extends HTMLElement {
     viewportFilterValue: HTMLInputElement;
     statusBar: HTMLElement;
     renderPassList: RenderPassList;
+
+    helpBtn: HTMLButtonElement;
   };
 
+  help?: Help;
 
   constructor() {
     super();
@@ -134,6 +138,7 @@ export class CaptureImporter extends HTMLElement {
     this.elements.renderPassList = this.querySelector(".render-pass-list") as RenderPassList;
 
     this.elements.statusBar = this.querySelector("#status-bar") as HTMLElement;
+    this.elements.helpBtn = this.querySelector("#show-help") as HTMLButtonElement;
 
     // import options
     this.elements.captureUnitUnit = this.querySelector("#capture-importer-capture-unit-unit") as HTMLSelectElement;
@@ -148,6 +153,12 @@ export class CaptureImporter extends HTMLElement {
 
     // reconstruct button
     this.elements.reconstructBtn = this.querySelector("#capture-importer-reconstruct-btn") as HTMLButtonElement;
+
+    // help button
+    this.elements.helpBtn.addEventListener("click", () => {
+      this.help?.show();
+    });
+
   }
 
   /**

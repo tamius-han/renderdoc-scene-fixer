@@ -29,6 +29,7 @@ import { Config, type AppConfiguration } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { remapObjOrientation } from './util/axis-orientation';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
+import { Help } from './components/help/cmp.help';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -136,6 +137,7 @@ export class SceneViewerApp {
       importScene: this.el("menu-import-scene"),
       controlOptions: this.el("menu-control-options"),
       fixExport: this.el("menu-fix-export"),
+      help: this.el("menu-help")
     },
 
     toolsMenu: {
@@ -188,14 +190,16 @@ export class SceneViewerApp {
       }
     },
 
-    captureImporter: this.el<CaptureImporter>("capture-importer"),
-    loadingScreen: this.el<LoadingScreen>("loading-screen"),
-    controlsOverlay: this.el<Overlay>("controls-overlay"),
-    exportOverlay: this.el<ExportMesh>("export-overlay"),
+    overlays: {
+      captureImporter: this.el<CaptureImporter>("capture-importer"),
+      loadingScreen: this.el<LoadingScreen>("loading-screen"),
+      controls: this.el<Overlay>("controls-overlay"),
+      export: this.el<ExportMesh>("export-overlay"),
+      help: this.el<Help>("help-overlay"),
+    }
   };
 
 
-  private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
@@ -256,26 +260,33 @@ export class SceneViewerApp {
 
   private setupMenu() {
     this.elements.menu.importScene.addEventListener('click', () => {
-      this.elements.captureImporter.classList.remove('hidden');
+      this.elements.overlays.captureImporter.classList.remove('hidden');
     });
     this.elements.menu.controlOptions.addEventListener('click', () => {
       console.info('opening control options overlay');
-      this.elements.controlsOverlay.show();
+      this.elements.overlays.controls.show();
     });
-    this.elements.controlsOverlay.addEventListener('control-scheme-updated', (e: any) => {
+    this.elements.overlays.controls.addEventListener('control-scheme-updated', (e: any) => {
       console.log('[app] Control scheme updated:', e.detail.controlScheme);
       this.sceneManager.setControlScheme(e.detail.controlScheme);
     });
     this.elements.menu.fixExport.addEventListener('click', () => {
       console.info('opening export overlay');
-      this.elements.exportOverlay.setSelectedIndices(this.getActiveSelectedIndices());
+      this.elements.overlays.export.setSelectedIndices(this.getActiveSelectedIndices());
       this.renderExportMeshPreview();
-      this.elements.exportOverlay.show();
+      this.elements.overlays.export.show();
     });
-    this.elements.exportOverlay.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
-    this.elements.exportOverlay.addEventListener('start-export', (e: any) =>
+    this.elements.menu.help.addEventListener('click', () => {
+      console.info('opening help overlay');
+      this.elements.overlays.help.show();
+    });
+    this.elements.overlays.export.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
+    this.elements.overlays.export.addEventListener('start-export', (e: any) =>
       this.handleStartExport(e.detail.selectedIndices, e.detail.exportOptions),
     );
+
+    // make help screen accessible from the importer
+    this.elements.overlays.captureImporter.help = this.elements.overlays.help;
   }
 
   private setupToolsMenu() {
@@ -415,13 +426,12 @@ export class SceneViewerApp {
   }
 
   private wireEvents(): void {
-    this.elements.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
+    this.elements.overlays.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
       console.log('received reconstruct-scene:', e);
       this.reconstructScene(e.detail);
     });
 
     this.elements.toolsMenu.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
-    this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
 
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
@@ -724,7 +734,7 @@ export class SceneViewerApp {
 
     this.intelGpaDistortion = intelGpaDistortion ?? null;
     this.elements.toolsMenu.fixDistortionBtn.classList.toggle("hidden", this.intelGpaDistortion !== null);
-    this.elements.captureImporter.classList.add('hidden');
+    this.elements.overlays.captureImporter.classList.add('hidden');
     this.elements.loadingScreen.show();
     this.elements.loadingScreen.log("Starting reconstruction...");
 

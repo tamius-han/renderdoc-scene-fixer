@@ -4,6 +4,7 @@ import { LoadingScreen } from "./loading-screen/cmp.loading-screen";
 import { Overlay } from "./common/overlay/cmp.overlay";
 import { ControlScheme } from "./control-scheme/cmp.control-scheme";
 import { ExportMesh } from './export-mesh/cmp.export-mesh';
+import { Help } from './help/cmp.help';
 import { InputAxisMapper } from './common/input-axis-mapper/cmp.input-axis-mapper';
 
 export function registerWebComponents() {
@@ -14,4 +15,5 @@ export function registerWebComponents() {
   customElements.define("control-scheme", ControlScheme);
   customElements.define("export-mesh", ExportMesh);
   customElements.define("input-axis-mapper", InputAxisMapper);
+  customElements.define("help-component", Help);
 }
