@@ -46,60 +46,17 @@ interface LoadedDraw {
   material: THREE.Material;
   geometryData: GeometryArrays;
   previewGeometryData: GeometryArrays;
-  /** The preview/non-posed mesh exactly as parsed, BEFORE
-   * remapObjOrientation() was applied to produce previewGeometryData -
-   * null whenever there's no separate preview mesh at all (previewRel ===
-   * meshRel, so previewGeometryData just aliases geometryData - see
-   * loadDraw()), since there's nothing to remap in that case. Kept around
-   * so the axis-mapper submenu (unlike the import screen's own mapper,
-   * which only ever affects geometry not yet loaded) can re-derive
-   * previewGeometryData from scratch whenever the input-geometry
-   * orientation changes AFTER a scene is already loaded, without
-   * re-reading or re-parsing any files - see applyAxisMappingChange(). */
-  rawPreviewObj: ParsedOBJ | null;
+
+  rawPreviewObj: ParsedOBJ | null;   // raw non-posed mesh, without any orientation corrections
   bounds: Bounds;
   diagonal: number;
   meshPath: string | null;
   previewPath: string | null;
-  /** Pristine copy of the posed mesh's positions as originally loaded (a
-   * plain copy, never mutated) - null when this draw has no separate posed
-   * export (geometryData IS previewGeometryData, same array - see
-   * loadDraw()). Distortion correction always re-fits and re-applies from
-   * this copy rather than from draw.geometryData.positions, so
-   * recalculateTransformCorrection() can be re-run (e.g. after marking a
-   * different scale-reference object) without compounding a previous run's
-   * correction onto itself. */
+
   originalPosedPositions: number[] | null;
-  /** Pristine copy of originalPosedPositions's corresponding normals, same
-   * lifetime/nullability rules as originalPosedPositions - kept alongside
-   * it so applyMatrixToDraw() can re-derive corrected normals fresh from
-   * the untouched originals each time a correction is (re-)applied,
-   * rather than compounding onto whatever geometryData.normals was left
-   * at by a previous run. */
   originalPosedNormals: number[] | null;
-  /** Pristine copy of originalPosedPositions's corresponding UVs, same
-   * lifetime/nullability rules as originalPosedPositions - kept alongside
-   * it for the same reason as originalPosedNormals: applyMatrixToDraw()
-   * needs a fresh, untouched copy to flip triangle winding on when a
-   * correction reflects the mesh, since UV VALUES aren't transformed by
-   * the correction matrix at all (only positions/normals are) - only
-   * their winding/corner order needs to move in lockstep with
-   * positions/normals so each triangle corner's position, normal, and UV
-   * stay correctly paired. Re-deriving fresh each time (like normals)
-   * avoids compounding a previous run's winding flip onto itself. */
   originalPosedUvs: number[] | null;
-  /** The matrix (if any) baked into geometryData.positions FROM
-   * originalPosedPositions to produce the current (corrected) state -
-   * null if this draw has never been corrected: no posed/non-posed pair
-   * to correct from, or a fit was computed but skipped as a bad candidate
-   * (see isGoodDistortionFitCandidate() in mesh-tools/calculator.ts).
-   * Recorded per-draw, rather than one shared distortion for the whole
-   * scene, because RenderDoc imports now fit each draw's own distortion
-   * INDEPENDENTLY (see autoCorrectRenderDocDistortion()) - IntelGPA's and
-   * the manual "Fix distortion" flow's single scene-wide distortion still
-   * get broadcast the same matrix to every draw, but it's recorded here
-   * per-draw too so toggleRawImport() works the same way regardless of
-   * which flow produced the correction. */
+
   appliedDistortionMatrix: THREE.Matrix4 | null;
 }
 
@@ -113,18 +70,10 @@ export class SceneViewerApp {
   private materialCache = new Map<string, THREE.Material>();
   private untexturedMaterial: THREE.Material | null = null;
 
-  /** Everything loaded by the last reconstruct, kept around so the size
-   * filter can rebuild without re-parsing. Cleared at the start of each
-   * fresh "Reconstruct scene" click. */
   private loadedDraws: LoadedDraw[] = [];
-  /** Computed once per reconstruct from ALL loaded draws (see
-   * computeNormalizationScale) - stays fixed as the filter slider moves, so
-   * hidden objects still count for scale even though they're excluded from
-   * the rendered scene and from camera framing. */
+
   private fixedScale = 1;
-  /** 0-100. How much of the largest-by-diagonal objects to exclude from the
-   * rendered scene. Kept in sync across the import-screen and viewport
-   * filter controls. */
+
   private hidePercent = 0;
 
   private hiddenDrawIndices = new Set<number>();       // geometry hidden by "hide largest %" filter
@@ -135,194 +84,43 @@ export class SceneViewerApp {
   private intelGpaDistortion: AffineDistortionResult | null = null;  // distortion transform from IntelGPA landmark matching
 
   private showingRawImport = false;                     // enables or disables auto distortion correction
-  /** Rotation applied to the whole scene's content group (not to individual
-   * objects) - persisted here so it survives rebuildVisibleScene() rebuilds
-   * (filter/visibility changes tear down and recreate the content group).
-   * Initially set once per reconstructScene() from the auto-detected
-   * world-up axis (see detectWorldUpAxis()) - a crude bounding-box-shape
-   * heuristic, used only until something better is available - and then
-   * REPLACED by applyDistortionToScene() with distortion.distortionOrientation
-   * (calculator.ts) the moment any distortion fix actually succeeds
-   * (manual, IntelGPA, or automatic RenderDoc correction all go through
-   * that same method): a real fit, from actual mesh correspondence, is
-   * strictly more reliable than guessing "up" from overall scene
-   * proportions. Rotation is handled here, as ONE whole-scene transform,
-   * rather than baked into each draw's own vertices individually - see
-   * applyDistortionToScene()'s doc comment for why the latter previously
-   * made corrected scenes come out visibly tilted. */
+
   private sceneRotation = new THREE.Quaternion();
-  /** Index into loadedDraws of whichever object's fit was actually
-   * broadcast by the most recent applyDistortionToScene() call - null
-   * before any correction has run, after a fresh reconstructScene(), or
-   * for a correction with no single source object to point at (the
-   * IntelGPA landmark-pair distortion is fit from a dropped .obj pair, not
-   * from any one loaded draw). Powers the "Highlight correction source"
-   * button (see highlightDistortionSource()) - after the auto-consensus
-   * picker or a manually chosen scale-reference both turned out to
-   * sometimes pick a poor object without it being obvious from the
-   * corrected result alone, being able to just LOOK at which object was
-   * actually used is what makes that trustworthy to judge. */
   private lastDistortionSourceIndex: number | null = null;
-  /** World-space axis (in RAW, pre-sceneRotation coordinates - i.e. as
-   * draw.geometryData.positions are actually stored) that
-   * detectWorldUpAxis() concluded was most likely "up", set once per
-   * reconstructScene(). Used to build sceneRotation before any distortion
-   * fit exists yet - see reconstructScene() and applyDistortionToScene(),
-   * which takes over from it once a fit is available. */
   private worldUpAxis: "x" | "y" | "z" = "y";
-  /** True while the "Mark ground plane" tool is armed and collecting the
-   * next of its three clicks on the mesh surface - see
-   * startGroundPlaneTool()/handleGroundPlaneClick(). Left/right clicks in
-   * the viewport are routed to the tool instead of normal object
-   * selection while this is true (see handleSceneObjectPointer()). */
   private groundPlaneToolActive = false;
-  /** Points placed so far by the ground-plane tool (0-3), in the SAME
-   * local (pre-scale, pre-sceneRotation) space as
-   * draw.geometryData.positions/bounds - i.e. the space addDotPair()'s
-   * callers already use for selection markers - so these stay correctly
-   * attached to the mesh regardless of the content group's current
-   * scale/rotation. Cleared on cancel, on completion, and on any fresh
-   * reconstruct. */
   private groundPlanePoints: THREE.Vector3[] = [];
-  /** Cross + dotted-line markers currently shown by the ground-plane tool
-   * - tracked separately from selectionVisuals (a different, unrelated
-   * overlay system) so the two never interfere with each other. */
+
   private groundPlaneVisuals: THREE.Object3D[] = [];
-  /** Rotation computed by the ground-plane tool from its three marked
-   * points the last time it completed (see finishGroundPlaneTool()) -
-   * null until that has happened at least once for the current scene.
-   * Applied instead of the auto-detected worldUpAxis-to-Y rotation
-   * whenever manualUpRotationActive is true - see getActiveSceneRotation(). */
+
   private manualUpRotation: THREE.Quaternion | null = null;
-  /** Whether the ground-plane tool's marked rotation (manualUpRotation)
-   * should currently be used in place of the auto-detected
-   * worldUpAxis-to-Y rotation - see getActiveSceneRotation(). Set once the
-   * tool completes (finishGroundPlaneTool()), cleared on a fresh
-   * reconstruct. */
   private manualUpRotationActive = false;
-  /** Snapshot of (manualUpRotation, manualUpRotationActive) taken the
-   * moment the ground-plane tool is armed (see startGroundPlaneTool()) -
-   * restored verbatim if the user clicks Cancel (see
-   * cancelGroundPlaneTool()), whether that happens mid-placement or during
-   * the accept/cancel review step after the 3rd point. null whenever the
-   * tool isn't in the middle of a run, i.e. there's nothing to revert to. */
   private groundPlaneRotationSnapshot: { manualUpRotation: THREE.Quaternion | null; manualUpRotationActive: boolean } | null = null;
-  /** Which select-area tool ("sphere" or "box") is currently armed and
-   * waiting for its single placement click, if any - see
-   * startSelectAreaTool()/handleSelectAreaClick(). Left-click in the
-   * viewport places the shape while this is set (see
-   * handleSceneObjectPointer()); right-click cancels, same convention as
-   * the ground-plane tool. Mutually exclusive with groundPlaneToolActive -
-   * arming either tool cancels the other. */
+
+
   private selectAreaToolActive: "sphere" | "box" | null = null;
-  /** The current select-area shape, if one has been placed - a child of
-   * the content group, positioned/scaled in its LOCAL space (see
-   * placeSelectAreaShape()), so it moves/rotates with the mesh like the
-   * ground-plane markers do. Only one shape exists at a time: placing a
-   * new one (of either kind) replaces it - see clearSelectAreaShape().
-   * Cleared on any fresh reconstruct or scene rebuild, same as the
-   * ground-plane tool's own state. */
   private selectAreaShape: THREE.Mesh | null = null;
   private selectAreaKind: "sphere" | "box" | null = null;
-  /** In-scene translate/scale gizmo for selectAreaShape - see
-   * select-area-gizmo.ts. Recreated alongside the shape itself (not a
-   * persistent instance carried across rebuilds - see restoreSelectAreaShape()'s
-   * doc comment for why that wouldn't survive a scene rebuild anyway). */
   private selectAreaGizmo: SelectAreaGizmo | null = null;
-  /** Which mode the NEXT (and current) gizmo should use - persists across
-   * shape/gizmo recreation (placement, rebuild-triggered recreation) so the
-   * user's last choice sticks, unlike the transient gizmo instance itself. */
   private selectAreaGizmoMode: GizmoMode = "translate";
-  /** LASSO_DRAG_THRESHOLD pixels a left-button gesture must travel from
-   * its pointerdown before it's treated as a lasso drag rather than a
-   * plain click - see handleLassoPointerMove(). Below this, releasing
-   * just selects whatever's under the cursor (selectDrawAtPointer()),
-   * same as before lasso-select existed; a drag confirmed past it shows
-   * the dotted path and, on release, selects by polygon instead. */
-  private static readonly LASSO_DRAG_THRESHOLD = 4;
-  /** True from a left-button pointerdown (with no OTHER tool armed - see
-   * handleSceneObjectPointer()) through to its pointerup, regardless of
-   * whether the gesture ends up being a real lasso drag or just a plain
-   * click - lasso-select has no separate "armed" state of its own to
-   * check instead, since it's simply what left-drag does whenever nothing
-   * else has claimed the viewport (Config.sessionConfig.tools.activeTool
-   * === null). Gates handleLassoPointerMove()/handleLassoPointerUp(),
-   * which are wired at the window level (see wireEvents()) so a drag that
-   * leaves the canvas mid-gesture keeps updating, same reasoning as the
-   * select-area gizmo's own drag tracking. */
+
+  private static readonly LASSO_DRAG_THRESHOLD = 4; // drag this many px before engaging lasso tool
   private lassoDragActive = false;
-  /** Whether the CURRENT drag (see lassoDragActive) has traveled past
-   * LASSO_DRAG_THRESHOLD yet - false for a gesture that's still within
-   * click distance of where it started, even though lassoDragActive is
-   * already true. Flips to true (permanently, for this one gesture) the
-   * first time handleLassoPointerMove() sees it cross that threshold,
-   * which is also the moment the dotted overlay first appears and
-   * lassoPoints starts accumulating (seeded with lassoDragStart, so the
-   * point the gesture began at is never lost). */
   private lassoDragConfirmed = false;
-  /** Screen-space point (client X/Y, relative to the viewport element's
-   * own bounding rect) the CURRENT gesture went down at - the threshold
-   * comparison point for lassoDragConfirmed, and the first point of the
-   * polygon once confirmed. */
   private lassoDragStart: { x: number; y: number } | null = null;
-  /** Screen-space points (client X/Y, relative to the viewport element's
-   * own bounding rect) of the in-progress lasso drag, in path order - see
-   * handleLassoPointerMove()/updateLassoOverlay(). Empty until
-   * lassoDragConfirmed flips true, and cleared again once a drag finishes
-   * (successfully or not). */
   private lassoPoints: { x: number; y: number }[] = [];
-  /** The dotted lasso path's own SVG overlay - a plain absolutely
-   * positioned SVG sitting over the viewport (see ensureLassoOverlay()),
-   * created lazily on first use and reused for every subsequent drag
-   * rather than rebuilt each time. Not part of the three.js scene at all:
-   * this is a 2D screen-space drawing, unrelated to anything the camera
-   * looks at. */
+
   private lassoOverlay: SVGSVGElement | null = null;
   private lassoPolyline: SVGPolylineElement | null = null;
-  /** Mirrors SceneManager's fly-mode state (see onFlyStateChange()) purely
-   * so the 'G'/'S' gizmo-mode keyboard shortcuts can avoid firing while
-   * flying - 'S' collides with both movement schemes' own key bindings
-   * there (see movement-bindings.interface.ts). */
+
   private isFlying = false;
-  /** Indices into loadedDraws currently selected in the object list. */
   private selectedIndices = new Set<number>();
-  /** Anchor point for shift-click range selection - the last index selected
-   * via a plain or ctrl click (NOT updated by shift-clicks themselves, so
-   * repeated shift-clicks all extend/shrink from the same anchor - standard
-   * list multi-select convention). */
   private lastClickedIndex: number | null = null;
-  /** Which loaded draw the resource panel is currently tracking - always
-   * the most recently selected object (see noteSelectionTarget()), or
-   * null when nothing is selected. Independent of whether the panel is
-   * actually visible right now - see syncResourcePanelVisibility(). */
   private resourcePanelIndex: number | null = null;
-  /** Viewport-relative px position the resource panel was last placed or
-   * dragged to - persists across selection changes and hide/show toggles
-   * for the rest of the session. Null until the panel is shown for the
-   * first time, at which point it defaults to the bottom-left corner -
-   * see positionResourcePanel(). */
   private resourcePanelPosition: { left: number; top: number } | null = null;
-  /** Which of the resource panel's two tabs is active when more than one
-   * object is selected (see renderResourcePanel()) - irrelevant, and
-   * ignored, for a single-object selection, which never shows tabs at
-   * all. Manual thumbnail clicks in the multi-select row can flip this
-   * back to "last" (see featureResourcePanelObject()); otherwise it's
-   * purely a user choice that persists until they click the other tab. */
   private resourcePanelActiveTab: "last" | "all" = "last";
 
-  /** Every Object3D currently added to the content group for the selection
-   * highlight (screen-space outline meshes + the two dot-marker Points
-   * pairs) -
-   * tracked here so they can be cleanly removed/disposed on the next
-   * selection or scene rebuild, independent of the main content meshes'
-   * own lifecycle (see clearSelectionVisuals()). */
   private selectionVisuals: THREE.Object3D[] = [];
-  /** One compiled "selected = flat orange / else = darkened" shader
-   * material per unique base (untouched) material - see
-   * buildSelectionShaderMaterial(). Keyed by the base material so it
-   * survives rebuildVisibleScene() (which recreates every Mesh but reuses
-   * the same underlying per-draw material instances) without recompiling a
-   * shader per selection change. */
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
 
   // stuff for outline rendering
@@ -399,14 +197,10 @@ export class SceneViewerApp {
 
   private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
-  private recenterCamBtn = this.el("recenter-camera-btn");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
   private objectList = this.el('object-list');
   private viewport = this.el<HTMLElement>("viewport");
-  // Placeholder values - recomputed from the actual viewport height and the
-  // panel's real rendered content every time a resource panel is opened,
-  // see computeResourcePanelMinSize() and renderResourcePanel().
   private resourcePanelMinSize = { width: 360, height: 420 };
   private resourcePanelSize = { ...this.resourcePanelMinSize };
 
@@ -582,8 +376,6 @@ export class SceneViewerApp {
       this.elements.toolsMenu.selectVolumeSubmenu.selectCancelBtn.addEventListener("click", () => this.cancelSelectByVolumeTool());
     }
 
-
-
     // setup submenu: select ground plane
     {
       this.elements.toolsMenu.selectGroundPlaneSubmenu.selectGroundPlaneApplyBtn.addEventListener("click", () =>
@@ -630,16 +422,11 @@ export class SceneViewerApp {
 
     this.elements.toolsMenu.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
     this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
-    // Gizmo drag tracking - window-level, not canvas-level, so an
-    // in-progress drag keeps updating even if the cursor leaves the canvas
-    // mid-gesture (same reasoning as SceneManager's own orbit/pan drags).
+
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
     window.addEventListener("keydown", (e) => this.handleGizmoKeydown(e));
-    // The tools' own right-click handling (cancel + clear) happens in
-    // handleSceneObjectPointer() via pointerdown, which fires before the
-    // browser's native contextmenu event - this just stops that native
-    // menu from popping up over the viewport afterwards.
+
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
       if (this.groundPlaneToolActive || this.selectAreaToolActive || this.lassoDragActive) event.preventDefault();
     });
@@ -647,9 +434,6 @@ export class SceneViewerApp {
     window.addEventListener("pointerup", (e) => this.handleLassoPointerUp(e));
     this.elements.toolsMenu.frameSceneBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
-    // Both filter control pairs (import screen + post-reconstruct viewport
-    // menu) drive the same underlying value and stay in sync with each
-    // other - see setHidePercent().
     for (const slider of [this.viewportFilterSlider]) {
       slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
     }
@@ -688,16 +472,6 @@ export class SceneViewerApp {
     this.toggleResourcePanel(Config.sessionConfig.resourcesPanel.visible);
   }
 
-  /** Updates which object the resource panel is tracking, then re-derives
-   * whether the panel should be visible at all - call this immediately
-   * after every place that finishes mutating this.selectedIndices.
-   * `candidate` is "the object this particular action was about", if any
-   * (the clicked/shift-clicked/ctrl-clicked index) - not necessarily
-   * what ends up selected (a ctrl-click can just as easily deselect it),
-   * so membership is re-checked here rather than assumed. Pass null when
-   * no single object fits that description (a volume-select affecting
-   * many at once, or an action that clears the selection outright) and
-   * whatever's still selected is used instead. */
   private noteSelectionTarget(candidate: number | null): void {
     if (candidate !== null && this.selectedIndices.has(candidate)) {
       this.resourcePanelIndex = candidate;
@@ -710,15 +484,6 @@ export class SceneViewerApp {
     this.syncLandmarkSubmenuState();
   }
 
-  /** The single source of truth for whether the resource panel DOM should
-   * exist right now: there being a selected object to show it for, AND
-   * either the user's own show/hide toggle being on, or the "fix
-   * distortion" tool being active - that tool forces the panel open
-   * (regardless of the toggle) the moment a landmark object is selected,
-   * since seeing that object's resources is the whole point of picking a
-   * landmark. Hidden whenever nothing's selected regardless of either of
-   * those. Safe to call redundantly - only touches the DOM when something's
-   * actually changed (see renderResourcePanel()'s own early-out). */
   private syncResourcePanelVisibility(): void {
     const forcedByLandmarkTool = Config.sessionConfig.tools.activeTool === "select-landmark";
     if ((Config.sessionConfig.resourcesPanel.visible || forcedByLandmarkTool) && this.resourcePanelIndex !== null) {
@@ -732,16 +497,6 @@ export class SceneViewerApp {
     this.viewport.querySelector<HTMLElement>(".resource-panel")?.remove();
   }
 
-  /** Keeps the "fix distortion" (select-landmark) submenu's hint/apply
-   * button in sync with whether a landmark object is currently selected.
-   * No selection yet: show the "select a landmark" hint, hide the apply
-   * button. An object selected: hide the hint, show the apply button
-   * labeled "Fix distortion" (this submenu doesn't otherwise reuse "Apply"
-   * for anything else, so the label can just be set unconditionally here
-   * rather than only once at setup). Call after every selection change
-   * (see noteSelectionTarget()) and whenever the tool itself is
-   * activated/deactivated (see the fixDistortionBtn handler), since both
-   * affect whether a landmark counts as "selected" right now. */
   private syncLandmarkSubmenuState(): void {
     const { hint, notHint, selectLandmarkApplyBtn } = this.elements.toolsMenu.selectLandmarkSubmenu;
     const landmarkSelected =
@@ -752,13 +507,7 @@ export class SceneViewerApp {
     if (landmarkSelected) selectLandmarkApplyBtn.textContent = "Fix distortion";
   }
 
-  /** Deselects the currently selected landmark object, if any - shared by
-   * the submenu's Reset and Cancel buttons (resetSelectLandmarkTool() /
-   * cancelSelectLandmarkTool()), which differ only in whether the submenu
-   * and the tool itself stay active afterwards. Goes through the normal
-   * selection-clearing path (noteSelectionTarget(), refreshSelectionVisuals(),
-   * renderObjectListState()) rather than just emptying selectedIndices
-   * directly, so the resource panel and object list stay in sync too. */
+
   private clearLandmarkSelection(): void {
     this.selectedIndices.clear();
     this.lastClickedIndex = null;
@@ -767,20 +516,10 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** The submenu's "Reset" button: deselects the current landmark (back to
-   * the "select a landmark" hint - see syncLandmarkSubmenuState(), which
-   * clearLandmarkSelection() triggers via noteSelectionTarget()) but, unlike
-   * Cancel, leaves the tool active and the submenu open so a different
-   * landmark can be picked right away. */
   private resetSelectLandmarkTool(): void {
     this.clearLandmarkSelection();
   }
 
-  /** The submenu's own "Cancel" button: clearLandmarkSelection() plus
-   * closing the submenu and clearing Config.sessionConfig.tools.activeTool -
-   * the "I'm done with fix distortion for now" exit, matching
-   * cancelSelectByVolumeTool()/cancelSelectGroundPlaneTool()'s role for
-   * their own submenus. */
   private cancelSelectLandmarkTool(): void {
     this.clearLandmarkSelection();
     this.elements.toolsMenu.selectLandmarkSubmenu.menu.classList.add("hidden");
@@ -791,15 +530,6 @@ export class SceneViewerApp {
     this.syncLandmarkSubmenuState();
   }
 
-  /** The submenu's Apply button (labeled "Fix distortion" - see
-   * syncLandmarkSubmenuState()): runs recalculateTransformCorrection()
-   * using the selected landmark as the reference object, then exits the
-   * tool the same way Cancel does - mirroring acceptGroundPlaneTool()'s
-   * "closes the submenu and clears activeTool, same as the Cancel button"
-   * convention. Guarded on resourcePanelIndex rather than assuming the
-   * button can't be clicked without a selection - the button's own
-   * hidden/shown state (syncLandmarkSubmenuState()) already keeps that from
-   * happening in practice, but the guard costs nothing. */
   private applySelectLandmarkTool(): void {
     if (this.resourcePanelIndex === null) return;
     this.recalculateTransformCorrection(this.resourcePanelIndex);
@@ -825,28 +555,6 @@ export class SceneViewerApp {
     return this.untexturedMaterial;
   }
 
-  /** Installs the same "fake flat per-face lighting" trick used for the
-   * selected-mesh shader (see buildSelectionShaderMaterial() below) onto a
-   * plain MeshBasicMaterial: a per-face normal computed in the fragment
-   * shader from screen-space derivatives (dFdx/dFdy) of view-space
-   * position, dotted with a fixed pseudo-light direction, and used to
-   * scale the material's own diffuse color. There's no real light
-   * anywhere in this scene (see buildSelectionShaderMaterial()'s doc
-   * comment), so without this an untextured mesh - no map, i.e. no
-   * per-fragment detail at all - renders as one uniform flat color with
-   * zero depth cues: a "grey blob", most noticeable on IntelGPA imports,
-   * which never carry materials/textures at all (see manifest.ts's
-   * fakeManifest()). Deriving the face normal from screen-space
-   * derivatives rather than trusting the geometry's own normal attribute
-   * means this works regardless of whether that attribute is missing,
-   * default, or smoothed - no geometry changes needed (no
-   * toNonIndexed()/computeVertexNormals(), unlike
-   * applyFlatFaceVertexColors() below, which bakes into vertex colors
-   * instead for the cases - like the select-area gizmo shape - that want
-   * it that way). abs() rather than a plain clamp/dot: OBJ meshes here
-   * don't reliably have consistent winding, and there's no real light to
-   * "face away from" - this just keeps a facet from going fully black
-   * when its normal happens to point away from the pseudo-light. */
   private applyFlatFaceShading(material: THREE.MeshBasicMaterial): void {
     material.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
@@ -895,9 +603,6 @@ export class SceneViewerApp {
     return { key: texPath, material: threeMaterial };
   }
 
-  /** Parses one draw's OBJ/MTL/texture and appends it to this.loadedDraws -
-   * this is the expensive, I/O-bound step, done once per reconstruct. Scene
-   * *building* (merging + filtering) is separate, see rebuildVisibleScene(). */
   private async loadDraw(
     draw: DrawEntry,
     passDir: string,
@@ -922,21 +627,12 @@ export class SceneViewerApp {
       const previewText = await this.vfs.readText(previewPath);
       if (previewText) {
         const previewObj = parseOBJ(previewText);
-        // Non-posed/bind-pose meshes are artist-authored source assets,
-        // which can use a different up/forward/right convention than the
-        // app's own (see remapObjOrientation()'s doc comment) - unlike the
-        // POSED mesh above, which comes from GPU capture and is assumed
-        // already in the app's frame, so it's left alone. Also what makes
-        // autoCorrectRenderDocDistortion()'s posedToNonPosedOrientedInPlace
-        // meaningful - see its doc comment in calculator.ts.
+
         const remappedPreviewObj = remapObjOrientation(
           previewObj,
           this.appConfig.config.importOptions.inputGeometryOrientation,
         );
         previewGeometryData = objToGeometryArrays(remappedPreviewObj);
-        // Kept unremapped (see rawPreviewObj's own doc comment) so the
-        // main-screen axis-mapper submenu can re-derive previewGeometryData
-        // later without re-reading this file.
         rawPreviewObj = previewObj;
       }
     }
@@ -953,17 +649,6 @@ export class SceneViewerApp {
       meshPath: meshRel,
       previewPath: previewRel,
       originalPosedPositions:
-        // A genuine RenderDoc posed/non-posed pair (previewRel resolved to
-        // a DIFFERENT file than meshRel) needs correcting the normal way.
-        // An IntelGPA-derived draw (see manifest.ts's fakeManifest(),
-        // which always sets posedMesh === mesh - there's no separate
-        // bind-pose export for a flat scene.obj) has no such pair, but
-        // still needs a pristine "as imported" snapshot: the ONE
-        // landmark-derived distortion (this.intelGpaDistortion, already
-        // set by the time this runs - see reconstructScene()) is applied
-        // directly to this draw's raw geometry, not to a posed/non-posed
-        // difference within it. Without this, applyDistortionToScene()
-        // would see originalPosedPositions === null and skip every draw.
         previewGeometryData !== geometryData || this.intelGpaDistortion !== null
           ? geometryData.positions.slice()
           : null,
@@ -1036,12 +721,7 @@ export class SceneViewerApp {
       return;
     }
     this.vfs = vfs;
-    // Carried in from an IntelGPA landmark-pair import (see
-    // cmp.capture-importer.ts) - null for a plain RenderDoc-only import.
-    // The "Fix distortion" tool is only meaningful for the latter (it
-    // fits a correction from a manually marked scale-reference object),
-    // so hide it whenever a precomputed one is already going to be
-    // applied automatically below.
+
     this.intelGpaDistortion = intelGpaDistortion ?? null;
     this.elements.toolsMenu.fixDistortionBtn.classList.toggle("hidden", this.intelGpaDistortion !== null);
     this.elements.captureImporter.classList.add('hidden');
@@ -1054,10 +734,6 @@ export class SceneViewerApp {
 
     try {
       this.clearSelectionVisuals();
-      // A fresh reconstruct starts a genuinely new scene - any in-progress
-      // or previously-completed ground-plane marking, and any placed
-      // select-area shape, belonged to the old one and no longer mean
-      // anything against new geometry.
       this.hideAllToolSubmenus();
       Config.sessionConfig.tools.activeTool = null;
       this.cancelGroundPlaneTool();
@@ -1068,9 +744,7 @@ export class SceneViewerApp {
       this.cancelVolumeSelectTool();
       this.clearSelectAreaShape();
       this.sceneManager.clear();
-      // Full reload: previous draws/materials/textures are genuinely done
-      // with now, unlike a filter-only rebuild (see rebuildVisibleScene)
-      // which reuses all of this.
+
       for (const material of this.materialCache.values()) material.dispose();
       this.materialCache.clear();
       if (this.untexturedMaterial) {
@@ -1084,17 +758,9 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
-      // A fresh reconstruct means no distortion has been applied to it
-      // yet - any previous scene's raw/corrected toggle state doesn't
-      // carry over (per-draw correction state resets naturally too, since
-      // loadedDraws was just wiped above and freshly loaded draws start
-      // with appliedDistortionMatrix: null - see loadDraw()).
+
       this.showingRawImport = false;
       this.updateToggleRawImportBtn();
-      // loadedDraws is about to be wiped, so anything the panel was
-      // pointing at is gone - just drop it, same as any other "nothing
-      // selected" case. Its dragged position is left alone, though, since
-      // that's a user preference that outlives any one scene.
       this.noteSelectionTarget(null);
 
       let noMeshPathCount = 0;
@@ -1140,10 +806,6 @@ export class SceneViewerApp {
                 this.elements.loadingScreen.log(`Mesh file not found for eid${draw.eventId}`);
               }
             } else {
-              // Global index into loadedDraws (loadDraw() just pushed this
-              // draw onto it) - NOT the per-pass manifest index, which
-              // would collide across multiple selected passes since each
-              // pass's manifest.draws restarts at 0.
               const globalIndex = this.loadedDraws.length - 1;
               const loadedDraw = this.loadedDraws[globalIndex];
               const stats = {
@@ -1163,11 +825,6 @@ export class SceneViewerApp {
 
       this.elements.loadingScreen.log(`Finished processing all passes. Calculating scale and/or initial scale ...`);
 
-      // Normalization scale is computed ONCE here, from every loaded draw
-      // regardless of the size filter, and then held fixed - see
-      // computeNormalizationScale() and rebuildVisibleScene(). World-space
-      // up-axis detection piggybacks on the same combined bounding box -
-      // see detectWorldUpAxis().
       this.fixedScale = 1;
       this.worldUpAxis = "y";
       this.sceneRotation = new THREE.Quaternion();
@@ -1177,11 +834,6 @@ export class SceneViewerApp {
         const size = overall.max.clone().sub(overall.min);
         const maxDim = Math.max(size.x, size.y, size.z);
 
-        // "1 capture unit = <captureUnitSize> <captureUnitUnit>" - convert
-        // that straight into meters, since the app's own scale is fixed
-        // at 1 app unit = 1 meter. This (not an arbitrary normalization)
-        // is the primary driver of fixedScale; computeNormalizationScale()
-        // below only steps in afterwards to clamp an out-of-range result.
         const unitScale =
           (importOptions.captureUnitSize || 1) *
           ((UNIT_CONVERSION as Record<string, number>)[importOptions.captureUnitUnit] ?? 1);
@@ -1212,15 +864,6 @@ export class SceneViewerApp {
         });
       }
 
-      // IntelGPA import: apply the precomputed landmark distortion to
-      // every draw now, BEFORE the first rebuildVisibleScene() below -
-      // rebuild is deferred (see applyDistortionToScene()'s `rebuild`
-      // option) so the scene is only actually built once, already
-      // corrected, rather than once distorted then again once fixed.
-      // A plain RenderDoc import has no landmark pair to broadcast, so it
-      // gets autoCorrectRenderDocDistortion()'s independent per-draw fits
-      // instead - the two are mutually exclusive, never both run for the
-      // same import (see intelGpaDistortion's own doc comment).
       if (this.intelGpaDistortion) {
         const { corrected, skipped } = this.applyDistortionToScene(this.intelGpaDistortion, { rebuild: false });
         console.log("[reconstruct] auto-applied IntelGPA landmark distortion", { corrected, skipped });
@@ -1234,10 +877,7 @@ export class SceneViewerApp {
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
 
       this.elements.loadingScreen.log(`Rebuilding visible scene...`);
-      // Goes through setHidePercent() (not a direct rebuildVisibleScene()
-      // call) so the configured "Hide largest % of objects" value is
-      // actually applied - and reflected in the viewport slider/text - on
-      // this first build, not just on later interactive changes.
+
       this.setHidePercent(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
       this.elements.loadingScreen.log(`Visible scene rebuilt.`);
 
@@ -1255,22 +895,9 @@ export class SceneViewerApp {
     this.elements.loadingScreen.hide();
   }
 
-  /** Rebuilds the rendered scene from this.loadedDraws according to both
-   * the "hide largest %" filter AND per-object manual visibility, WITHOUT
-   * re-reading or re-parsing any files - this is what makes dragging the
-   * filter slider (and toggling an object's own visibility) instant. Hidden
-   * objects were already counted in this.fixedScale (computed once from
-   * every loaded draw in reconstructScene()) but are excluded here, so
-   * frameOnScene() - which measures whatever's actually in the scene -
-   * naturally only frames the camera on what's currently visible. Also
-   * recomputes hiddenDrawIndices, which the object list uses to gray out /
-   * disable selection on anything the filter is currently excluding. */
   private rebuildVisibleScene(): void {
     if (this.loadedDraws.length === 0) return;
 
-    // "Hide largest % of objects" = hide that fraction of objects BY COUNT,
-    // ranked by size (bounding-box diagonal) - the simplest, most
-    // predictable reading of a 0-100% slider.
     const sorted = this.loadedDraws
       .map((draw, index) => ({ draw, index }))
       .sort((a, b) => b.draw.diagonal - a.draw.diagonal);
@@ -1282,9 +909,6 @@ export class SceneViewerApp {
     for (const index of this.selectedIndices) {
       if (this.hiddenDrawIndices.has(index)) this.selectedIndices.delete(index);
     }
-    // The resource panel may have been tracking one of the objects just
-    // dropped above - re-derive it (falls back to whatever's still
-    // selected, or hides the panel if that was the last one).
     this.noteSelectionTarget(null);
 
     const builder = new SceneMeshBuilder();
@@ -1298,18 +922,9 @@ export class SceneViewerApp {
     });
     const meshes = builder.buildAll();
 
-    // Must clear our own overlay objects BEFORE sceneManager.clear() runs -
-    // they live inside the content group that's about to be torn down and
-    // rebuilt, and sceneManager.clear() only disposes the Mesh objects it
-    // owns directly, not these app-level Points markers.
     this.clearSelectionVisuals();
     this.clearGroundPlaneVisuals();
-    // The select-area shape (unlike the ground-plane tool's markers) is
-    // user-configured, persistent data, not a transient in-progress tool
-    // artifact - a filter/visibility change shouldn't silently discard it -
-    // so its kind/position/scale are captured here and re-applied to a
-    // freshly-created shape in the new content group below, rather than
-    // just clearing it outright.
+
     const previousShape = this.selectAreaKind
       ? {
           kind: this.selectAreaKind,
@@ -1336,14 +951,6 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Toggles manual per-object visibility (independent of the "hide
-   * largest %" filter - see manuallyHiddenIndices). If the clicked object
-   * isn't part of the current selection, only it is toggled. If it IS
-   * selected, every selected object is set to the opposite of the clicked
-   * object's CURRENT state (Blender's own convention for toggling
-   * visibility with a multi-selection active). No-ops on filtered ('f')
-   * objects - their visibility button is disabled anyway, but this guards
-   * against it regardless. */
   private toggleDrawVisibility(index: number): void {
     if (this.isObjectHidden(index)) return;
 
@@ -1362,10 +969,6 @@ export class SceneViewerApp {
     this.rebuildVisibleScene();
   }
 
-  /** Adds the object to the selection if it isn't selected, removes it if
-   * it is. Used both for ctrl-clicks and as the effective behavior of a
-   * plain click on the dedicated "selection" button - see
-   * handleObjectClick(). */
   private toggleDrawSelection(index: number): void {
     if (this.isObjectHidden(index)) return;
     if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
@@ -1376,9 +979,6 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Marks/unmarks the draw at index as the scale reference object. Only one
-   * object may be the scale reference at a time, so marking a new one
-   * replaces the previous one. */
   private setLandmark(index: number): void {
     if (this.isObjectHidden(index)) return;
     this.scaleReferenceIndex = this.scaleReferenceIndex === index ? null : index;
@@ -1407,38 +1007,17 @@ export class SceneViewerApp {
     return new THREE.Vector3(0, 1, 0);
   }
 
-  /** Whichever rotation should currently sit on the content group: the
-   * ground-plane tool's marked rotation, once it has completed at least
-   * once for this scene and is still active (manualUpRotationActive - see
-   * finishGroundPlaneTool()), otherwise the auto-detected worldUpAxis-to-Y
-   * rotation computed once per reconstruct (see reconstructScene()) and
-   * refined per distortion fit (see applyDistortionToScene()). */
   private getActiveSceneRotation(): THREE.Quaternion {
     if (this.manualUpRotationActive && this.manualUpRotation) return this.manualUpRotation;
     return this.sceneRotation;
   }
 
-  /** Re-applies getActiveSceneRotation() to whatever's currently in the
-   * content group, if anything - called whenever that choice could have
-   * changed: a new distortion fit, or the ground-plane tool completing a
-   * new manual rotation. A no-op before anything's been reconstructed. */
   private applySceneRotation(): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
     group.quaternion.copy(this.getActiveSceneRotation());
   }
 
-  /** Arms the ground-plane tool: shows the submenu's "select 3 points" hint
-   * (with the accept/cancel actions row hidden - see showGroundPlaneHint()),
-   * snapshots the rotation state so Cancel can restore it later, and
-   * switches the viewport cursor to a crosshair to start collecting the
-   * next 3 left-clicks on mesh surface (see
-   * handleSceneObjectPointer()/handleGroundPlaneClick()). Left-clicks
-   * elsewhere while armed are effectively no-ops (see raycastMeshSurface())
-   * rather than falling through to normal object selection. Showing/hiding
-   * the submenu ITSELF, and Config.sessionConfig.tools.activeTool, are the
-   * caller's job (see setupToolsMenu()'s top-level dispatcher) - this only
-   * handles the tool's own internal state. */
   private startGroundPlaneTool(): void {
     if (this.loadedDraws.length === 0) return;
     this.groundPlaneRotationSnapshot = { manualUpRotation: this.manualUpRotation, manualUpRotationActive: this.manualUpRotationActive };
@@ -1449,17 +1028,6 @@ export class SceneViewerApp {
     this.showGroundPlaneHint();
   }
 
-  /** Aborts the ground-plane tool and restores whatever rotation was active
-   * before it was armed (see groundPlaneRotationSnapshot's doc comment) if
-   * a preview was pending - used for a right-click abort mid-placement,
-   * cancelAllTools() (switching to a different top-level tool or toggling
-   * this one off via its own button), and reconstructScene()'s
-   * per-reconstruct reset. Doesn't touch the submenu's own open/closed
-   * state or Config.sessionConfig.tools.activeTool - see
-   * cancelSelectGroundPlaneTool() for the submenu's own Cancel button,
-   * which wraps this plus that bookkeeping. Harmless to call when the tool
-   * isn't active/pending - there's simply nothing to restore in that
-   * case. */
   private cancelGroundPlaneTool(): void {
     if (this.groundPlaneRotationSnapshot) {
       this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
@@ -1474,12 +1042,6 @@ export class SceneViewerApp {
     this.showGroundPlaneHint();
   }
 
-  /** The ground-plane submenu's own "Cancel" button: cancelGroundPlaneTool()
-   * (whether that's abandoning mid-placement or reverting a pending
-   * preview) plus closing the submenu and clearing
-   * Config.sessionConfig.tools.activeTool - the "I'm done with the
-   * ground-plane tool for now" exit, matching cancelSelectByVolumeTool()'s
-   * role for the volume-select submenu. */
   private cancelSelectGroundPlaneTool(): void {
     this.cancelGroundPlaneTool();
     this.elements.toolsMenu.selectGroundPlaneSubmenu.menu.classList.add("hidden");
@@ -1488,16 +1050,6 @@ export class SceneViewerApp {
     }
   }
 
-  /** The submenu's "Reset" button: reverts any pending 3-point preview
-   * rotation back to whatever was active before the tool was armed - same
-   * restore step as cancelGroundPlaneTool() - but, unlike Cancel, keeps
-   * the tool armed (groundPlaneRotationSnapshot is deliberately left set,
-   * not nulled, so a later Cancel/Reset/Accept still has the original,
-   * pre-tool rotation to work from) and the submenu open, clearing the
-   * placed points and going back to the "select 3 points" hint so a new
-   * plane can be marked right away - essentially re-arming the tool the
-   * same way startGroundPlaneTool() does, without taking a fresh
-   * snapshot. */
   private resetGroundPlaneTool(): void {
     if (this.groundPlaneRotationSnapshot) {
       this.manualUpRotation = this.groundPlaneRotationSnapshot.manualUpRotation;
@@ -1511,15 +1063,6 @@ export class SceneViewerApp {
     this.showGroundPlaneHint();
   }
 
-  /** Keeps the previewed rotation from the just-completed 3-click marking
-   * (see finishGroundPlaneTool()) - the Accept button, or (with
-   * flip180Depth) the "Accept, flipped 180°" button for when the auto-
-   * picked normal direction came out upside down. The flip is applied
-   * AFTER the leveling rotation (a world-space, i.e. post-leveling,
-   * rotation about Z - the resulting scene's own depth axis at that point)
-   * so it both corrects the up/down mistake and spins the scene half a
-   * turn to match, rather than just negating Y on its own. Also closes the
-   * submenu and clears activeTool, same as the Cancel button. */
   private acceptGroundPlaneTool(flip180Depth: boolean): void {
     if (flip180Depth && this.manualUpRotation) {
       const flipDepth = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
@@ -1538,27 +1081,16 @@ export class SceneViewerApp {
     }
   }
 
-  /** Shows the ground-plane submenu's "select 3 points" hint and hides its
-   * accept/cancel actions row - the state the submenu starts in each time
-   * the tool is (re)armed, before 3 points have been placed. */
   private showGroundPlaneHint(): void {
     this.elements.toolsMenu.selectGroundPlaneSubmenu.hint.classList.remove("hidden");
     this.elements.toolsMenu.selectGroundPlaneSubmenu.actions.classList.add("hidden");
   }
 
-  /** Swaps the ground-plane submenu from its hint over to the accept/cancel
-   * actions row - called once the 3rd point is placed and the preview
-   * rotation has already been computed and applied (see
-   * finishGroundPlaneTool()). */
   private showGroundPlaneActions(): void {
     this.elements.toolsMenu.selectGroundPlaneSubmenu.hint.classList.add("hidden");
     this.elements.toolsMenu.selectGroundPlaneSubmenu.actions.classList.remove("hidden");
   }
 
-  /** Builds a Raycaster for the given pointer event, from the camera
-   * through wherever it landed on the canvas in NDC space - the shared
-   * first step behind raycastMeshSurface() and the gizmo hit-testing in
-   * handleSceneObjectPointer()/handleGizmoPointerMove(). */
   private buildViewportRaycaster(event: PointerEvent): THREE.Raycaster {
     const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
     const mouse = new THREE.Vector2(
@@ -1570,11 +1102,6 @@ export class SceneViewerApp {
     return raycaster;
   }
 
-  /** Raycasts the viewport at the given pointer event against mesh surface
-   * only (excluding selection-highlight, ground-plane-marker,
-   * select-area-shape, and gizmo-handle overlays, via the same
-   * userData-tag convention as pickDrawAtPointer()), returning the
-   * world-space hit point, or null if the ray missed everything. */
   private raycastMeshSurface(event: PointerEvent): THREE.Vector3 | null {
     const raycaster = this.buildViewportRaycaster(event);
     const contentGroup = this.sceneManager.getContentGroup();
@@ -1591,12 +1118,6 @@ export class SceneViewerApp {
     return hits.length > 0 ? hits[0].point.clone() : null;
   }
 
-  /** Handles one left-click while the ground-plane tool is armed: raycasts
-   * for mesh surface under the cursor (ignored if it missed), records the
-   * point (converted to the content group's local space - see
-   * groundPlanePoints' doc comment), draws its cross marker and, from the
-   * second point on, a dotted line back to the previous one. The third
-   * point triggers finishGroundPlaneTool(). */
   private handleGroundPlaneClick(event: PointerEvent): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
@@ -1615,16 +1136,6 @@ export class SceneViewerApp {
     if (this.groundPlanePoints.length === 3) this.finishGroundPlaneTool();
   }
 
-  /** Called once the third point is placed: fits the plane through all
-   * three marked points, computes the rotation that makes that plane
-   * horizontal (its normal vertical), previews it as manualUpRotation
-   * (switching "Up axis" to "Manual" and applying it immediately so the
-   * result is visible right away), then swaps the submenu over to its
-   * accept/cancel row - see showGroundPlaneActions(). The rotation isn't
-   * final yet: it only sticks if the user clicks Accept (or "Accept,
-   * flipped 180°"); Cancel reverts it (see cancelGroundPlaneTool()). The
-   * three crosses/dashes stay up throughout the review step, and are only
-   * cleared once that's resolved either way. */
   private finishGroundPlaneTool(): void {
     const [p0, p1, p2] = this.groundPlanePoints;
     const edgeA = p1.clone().sub(p0);
@@ -1632,22 +1143,12 @@ export class SceneViewerApp {
     const normal = edgeA.cross(edgeB);
 
     if (normal.lengthSq() < 1e-12) {
-      // Collinear points can't define a plane - clear everything and stay
-      // armed so the user can just place 3 fresh points, rather than
-      // silently closing the tool on them with no feedback (setStatus() is
-      // currently a no-op, so there's no message we could show instead).
       this.groundPlanePoints = [];
       this.clearGroundPlaneVisuals();
       return;
     }
     normal.normalize();
 
-    // Keep whichever side is currently "up" up, rather than risking an
-    // arbitrary flip depending on the order the three points happened to
-    // be clicked in - compares against the LOCAL-space direction that
-    // currently renders as world-up. (If this guess comes out wrong
-    // anyway, that's exactly what the "Accept, flipped 180°" button is
-    // for - see acceptGroundPlaneTool().)
     const currentLocalUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.getActiveSceneRotation().clone().invert());
     if (normal.dot(currentLocalUp) < 0) normal.negate();
 
@@ -1660,31 +1161,17 @@ export class SceneViewerApp {
     this.showGroundPlaneActions();
   }
 
-  /** Unions every loaded draw's LOCAL (pre-scale) bounds together - the
-   * space groundPlanePoints/select-area shape positions all live in.
-   * Shared by groundPlaneMarkerSize() and the select-area tool's slider
-   * ranges (see renderSelectAreaOptionsPanel()). */
   private overallLocalBounds(): Bounds {
     let overall: Bounds = this.loadedDraws[0].bounds;
     for (let i = 1; i < this.loadedDraws.length; i++) overall = unionBounds(overall, this.loadedDraws[i].bounds);
     return overall;
   }
 
-  /** Marker/dash size for the ground-plane tool's dotted connector lines: a
-   * small fraction of the whole loaded scene's local-space (pre-scale)
-   * bounding diagonal - the same space groundPlanePoints live in - so
-   * dashes read at a sensible size regardless of how big or small the
-   * loaded scene is. (The cross markers themselves are fixed-pixel-size
-   * screen-space sprites - see addGroundPlaneCross() - so they don't need
-   * this.) */
   private groundPlaneMarkerSize(): number {
     if (this.loadedDraws.length === 0) return 1;
     return Math.max(boundsDiagonal(this.overallLocalBounds()) * 0.015, 1e-6);
   }
 
-  /** Lazily-built, shared texture for the ground-plane cross markers: a
-   * black-outlined orange "X" on a transparent background - built once and
-   * reused for every marker rather than regenerated per click. */
   private static groundPlaneCrossTexture: THREE.Texture | null = null;
 
   private static getGroundPlaneCrossTexture(): THREE.Texture {
@@ -1709,9 +1196,6 @@ export class SceneViewerApp {
       ctx.stroke();
     };
 
-    // Black outline drawn first, thicker, with the orange "X" stroked
-    // narrower on top of it - same layered outline-underneath/fill-on-top
-    // approach as addDotPair()'s two-Points selection-dot marker pairs.
     strokeX(size * 0.26, "#000000");
     strokeX(size * 0.14, `#${SELECTION_COLOR.getHexString()}`);
 
@@ -1721,15 +1205,6 @@ export class SceneViewerApp {
     return texture;
   }
 
-  /** Adds one black-outlined orange "X" marker at the given LOCAL position,
-   * as a single-point Points object using getGroundPlaneCrossTexture() as
-   * its sprite. Points are always screen-aligned billboards, so this
-   * always faces the camera "for free" with no per-frame work needed - and
-   * sizeAttenuation:false (literal pixel size via gl_PointSize, not scaled
-   * by distance) keeps it a constant, readable size regardless of how far
-   * the camera is, matching addDotPair()'s selection-dot convention.
-   * depthTest:false so it stays visible through occluding geometry, same
-   * as those dots. */
   private addGroundPlaneCross(point: THREE.Vector3): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
@@ -1753,8 +1228,6 @@ export class SceneViewerApp {
     this.groundPlaneVisuals.push(cross);
   }
 
-  /** Adds a dotted line between two LOCAL points, connecting consecutive
-   * ground-plane markers. */
   private addGroundPlaneDottedLine(from: THREE.Vector3, to: THREE.Vector3): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
@@ -1776,12 +1249,6 @@ export class SceneViewerApp {
     this.groundPlaneVisuals.push(line);
   }
 
-  /** Removes and disposes every currently-tracked ground-plane marker -
-   * mirrors clearSelectionVisuals()'s must-run-before-teardown handling,
-   * since these also live inside the content group. Never disposes the
-   * shared cross texture itself (see getGroundPlaneCrossTexture()) - only
-   * each marker's own geometry/material. Safe to call with nothing to
-   * clear. */
   private clearGroundPlaneVisuals(): void {
     const group = this.sceneManager.getContentGroup();
     for (const obj of this.groundPlaneVisuals) {
@@ -1798,14 +1265,6 @@ export class SceneViewerApp {
 
   //#region select-area tool (sphere/box)
 
-  /** Placeholder cursor icons for the two select-area tools - each a small
-   * inline SVG data URI (orange outline shape, transparent background), so
-   * the tool is fully functional out of the box. REPLACE these two data
-   * URIs (or swap in `url("/path/to/real-image.png") 0 0, crosshair`
-   * instead) once the real cursor images are provided - per spec, the
-   * click/hotspot point is the UPPER-LEFT corner (0 0) of each image, which
-   * is why both are built with their "clickable" corner at (0,0) rather
-   * than centered. */
   private static readonly SELECT_AREA_CURSORS: Record<"sphere" | "box", string> = {
     sphere:
       `url('data:image/svg+xml;utf8,` +
@@ -1821,9 +1280,6 @@ export class SceneViewerApp {
       `</svg>') 0 0, crosshair`,
   };
 
-  /** Arms/disarms one of the select-area tools - see
-   * startSelectAreaTool()/cancelSelectAreaTool(). Clicking the currently-
-   * armed tool's own button again disarms it. */
   private toggleVolumeSelectTool(enable?: boolean): void {
     if (!enable) {
       this.cancelVolumeSelectTool();
@@ -1852,10 +1308,6 @@ export class SceneViewerApp {
     }
   }
 
-  /** Arms the given select-area tool: swaps the viewport cursor for that
-   * tool's custom image (see SELECT_AREA_CURSORS) and waits for the next
-   * left-click on mesh surface to place the shape (see
-   * handleSceneObjectPointer()/handleSelectAreaClick()). */
   private startSelectAreaTool(kind: "sphere" | "box"): void {
     if (this.loadedDraws.length === 0) {
       return;
@@ -1867,10 +1319,6 @@ export class SceneViewerApp {
     this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.toggle("active", kind === "box");
   }
 
-  /** Disarms whichever select-area tool is active (if any) without placing
-   * anything - restores the normal cursor. Does NOT remove an
-   * already-placed shape (see clearSelectAreaShape() for that); harmless to
-   * call when no tool is active. */
   private cancelVolumeSelectTool(): void {
     this.selectAreaToolActive = null;
     this.sceneManager.renderer.domElement.style.cursor = "";
@@ -1878,14 +1326,7 @@ export class SceneViewerApp {
     this.elements.toolsMenu.selectVolumeSubmenu.selectBoxBtn.classList.remove("active");
   }
 
-  /** The submenu's "Cancel" button: abandons the select-by-volume tool
-   * entirely - disarms placement if a shape is still waiting to be placed
-   * (cancelVolumeSelectTool()), discards any already-placed shape and its
-   * gizmo/options panel (clearSelectAreaShape()), and closes the submenu.
-   * No selection change. Distinct from right-clicking mid-placement (which
-   * only disarms placement, leaving a previously-placed shape alone) -
-   * this is the "I'm done with volume-select for now" exit, matching the
-   * top-level tool button's own toggle-off branch plus shape cleanup. */
+
   private cancelSelectByVolumeTool(): void {
     this.cancelVolumeSelectTool();
     this.clearSelectAreaShape();
@@ -1895,15 +1336,6 @@ export class SceneViewerApp {
     }
   }
 
-  /** Tests whether a LOCAL-space point (content-group space - see
-   * findDrawsWithinSelectAreaShape()'s doc comment) falls within the given
-   * select-area shape. Sphere: unit sphere generally scaled non-uniformly
-   * (a user can drag a single axis handle - see select-area-gizmo.ts), so
-   * this is really an ellipsoid test. Box: axis-aligned, since the shape
-   * never rotates (only translates/scales - same doc comment) and
-   * BoxGeometry(2,2,2) means shape.scale directly IS each axis'
-   * half-extent, same convention the gizmo's own per-axis scale handles
-   * use. */
   private static pointInSelectAreaShape(
     x: number,
     y: number,
@@ -1925,14 +1357,6 @@ export class SceneViewerApp {
     );
   }
 
-  /** Extracts the placed select-area shape's own triangles (its geometry
-   * is already non-indexed - see restoreSelectAreaShape() - so every 3
-   * consecutive vertices form one triangle directly), transformed by its
-   * position/scale into the same content-group-local space everything
-   * else here works in. Only needed for "outside" mode's surface-crossing
-   * fallback (see findDrawsWithinSelectAreaShape()) - callers should build
-   * this lazily and reuse it across draws rather than per-draw, since a
-   * sphere's geometry alone is a few hundred triangles. */
   private static buildSelectAreaShapeTriangles(shape: THREE.Mesh): THREE.Triangle[] {
     const posAttr = shape.geometry.getAttribute("position");
     const triangles: THREE.Triangle[] = [];
@@ -1945,27 +1369,6 @@ export class SceneViewerApp {
     return triangles;
   }
 
-  /** Returns the indices (into loadedDraws) of every currently-visible draw
-   * considered "within" the placed select-area shape, per
-   * Config.sessionConfig.tools.selectAreaMode:
-   *  - "inside" ("Fully" in the UI): ALL of the draw's vertices must fall
-   *    within the shape.
-   *  - "outside" ("Partially" in the UI): the draw merely has to intersect
-   *    the shape - resolved cheaply by "does any vertex fall inside it"
-   *    first (the overwhelming majority of real cases), falling back to an
-   *    exact triangle/triangle test against the shape's own surface (see
-   *    buildSelectAreaShapeTriangles()) only when that's inconclusive -
-   *    e.g. a large flat mesh passing through a small shape without any of
-   *    its own vertices happening to land inside it.
-   *
-   * draw.geometryData.positions and the shape's position/scale are both
-   * already expressed in the SAME content-group-local space (draws are
-   * added to the content group with no further per-object transform - see
-   * rebuildVisibleScene() - and the shape's LOCAL position comes from
-   * exactly that space too - see placeSelectAreaShape()'s
-   * group.worldToLocal() call), so none of this needs any coordinate
-   * conversion. Hidden draws (filtered out or manually hidden, matching
-   * every other selection path's own combined check) are skipped. */
   private findDrawsWithinSelectAreaShape(): number[] {
     const shape = this.selectAreaShape;
     const kind = this.selectAreaKind;
@@ -2059,12 +1462,6 @@ export class SceneViewerApp {
     return matches;
   }
 
-  /** The submenu's Replace/Add/Remove buttons: applies the current
-   * select-area shape (see findDrawsWithinSelectAreaShape()) to the object
-   * selection. No-op (including no status message) when no shape has been
-   * placed yet, so it's harmless to wire up unconditionally. Leaves the
-   * shape/gizmo/submenu in place afterwards - unlike "Cancel" - so the
-   * shape can be nudged and the operation repeated. */
   private applyVolumeSelection(op: "replace" | "add" | "remove"): void {
     if (!this.selectAreaShape || !this.selectAreaKind) return;
 
@@ -2079,17 +1476,11 @@ export class SceneViewerApp {
       for (const index of matches) this.selectedIndices.delete(index);
     }
 
-    // No single object is "the" one here - fall back to whatever's still
-    // selected (deterministically, the highest index) rather than pick an
-    // arbitrary match.
     this.noteSelectionTarget(null);
     this.refreshSelectionVisuals();
     this.renderObjectListState();
   }
 
-  /** Called every frame (see SceneManager.onBeforeRender()) to keep the
-   * gizmo's transform current - a no-op whenever there's nothing to
-   * update. */
   private updateSelectAreaGizmoTransform(): void {
     const gizmo = this.selectAreaGizmo;
     const group = this.sceneManager.getContentGroup();
@@ -2097,9 +1488,6 @@ export class SceneViewerApp {
     gizmo.update(this.sceneManager.activeCamera, group.quaternion, group.scale.x || 1);
   }
 
-  /** Switches the gizmo's mode (and remembers the choice for the next
-   * shape/gizmo too - see selectAreaGizmoMode's doc comment), then
-   * refreshes the options panel so its Move/Scale buttons reflect it. */
   private setSelectAreaGizmoMode(mode: GizmoMode): void {
     this.selectAreaGizmoMode = mode;
     this.selectAreaGizmo?.setMode(mode);
@@ -2111,19 +1499,12 @@ export class SceneViewerApp {
     return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
   }
 
-  /** 'G' (translate) / 'S' (scale) gizmo-mode shortcuts, matching Blender's
-   * own grab/scale keys - only while there's actually a shape/gizmo to
-   * affect, and guarded against typing in a form field and against fly
-   * mode (where 'S' is already a movement key in both control schemes -
-   * see movement-bindings.interface.ts). */
   private handleGizmoKeydown(event: KeyboardEvent): void {
     if (event.repeat || this.isTypingInFormField() || this.isFlying || !this.selectAreaShape) return;
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
   }
 
-  /** Drives both an in-progress gizmo drag (if any) and hover highlighting
-   * (if not) - see wireEvents()'s window-level "pointermove" listener. */
   private handleGizmoPointerMove(event: PointerEvent): void {
     const gizmo = this.selectAreaGizmo;
     if (!gizmo) return;
@@ -2136,9 +1517,6 @@ export class SceneViewerApp {
       return;
     }
 
-    // Hover feedback only - never while a placement tool is armed (those
-    // take priority over the gizmo entirely - see handleSceneObjectPointer()),
-    // and only while the cursor is actually over the canvas.
     if (this.groundPlaneToolActive || this.selectAreaToolActive) {
       gizmo.setHighlight(null);
       return;
@@ -2156,10 +1534,6 @@ export class SceneViewerApp {
     this.selectAreaGizmo.endDrag();
   }
 
-  /** Handles one left-click while a select-area tool is armed: raycasts for
-   * mesh surface under the cursor (ignored if it missed), places the shape
-   * there, then disarms the tool - this is a single-click placement, unlike
-   * the ground-plane tool's three. */
   private handleSelectAreaClick(event: PointerEvent): void {
     const kind = this.selectAreaToolActive;
     if (!kind) return;
@@ -2169,9 +1543,6 @@ export class SceneViewerApp {
     this.cancelVolumeSelectTool();
   }
 
-  /** Places (replacing any existing one - see clearSelectAreaShape()) a
-   * new select-area shape centered on worldHit, sized so it initially
-   * covers 10% of the viewport's width. */
   private placeSelectAreaShape(kind: "sphere" | "box", worldHit: THREE.Vector3): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
@@ -2195,23 +1566,12 @@ export class SceneViewerApp {
     this.restoreSelectAreaShape(kind, localPosition, localScale);
   }
 
-  /** Builds and adds the actual select-area shape mesh at an already-known
-   * LOCAL position/scale (replacing any existing shape - see
-   * clearSelectAreaShape()), as a child of the content group so it
-   * moves/rotates with the mesh exactly like the ground-plane tool's own
-   * markers. Split out from placeSelectAreaShape() so rebuildVisibleScene()
-   * can recreate the shape (from its previous position/scale) in the new
-   * content group after a filter/visibility rebuild, without re-running the
-   * viewport-width sizing math or requiring a fresh click. */
+
   private restoreSelectAreaShape(kind: "sphere" | "box", localPosition: THREE.Vector3, localScale: THREE.Vector3): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
     this.clearSelectAreaShape();
 
-    // Unit shapes (radius/half-extent 1, i.e. spanning -1..1 per axis) so
-    // mesh.scale directly IS each axis' half-extent in local space -
-    // that's what the gizmo's per-axis scale handles edit (see
-    // select-area-gizmo.ts).
     const geometry = kind === "sphere" ? new THREE.SphereGeometry(1, 24, 16) : new THREE.BoxGeometry(2, 2, 2);
     const flatGeometry = geometry.toNonIndexed();
     flatGeometry.computeVertexNormals();
@@ -2234,13 +1594,6 @@ export class SceneViewerApp {
     this.selectAreaShape = shape;
     this.selectAreaKind = kind;
 
-    // A fresh gizmo INSTANCE (not a persisted/reattached one) - it's a
-    // child of this same content group, which gets fully torn down and
-    // rebuilt (see SceneManager.clear()) on every filter/visibility
-    // change, so nothing about a previous instance could survive that
-    // anyway. Sized (minScale) from the whole scene's own diagonal so
-    // dragging a scale handle to near-zero can't collapse the shape
-    // entirely, same reasoning the old slider UI's scaleMin used.
     this.selectAreaGizmo = new SelectAreaGizmo(shape, this.selectAreaGizmoMode);
     this.selectAreaGizmo.setMinScale(Math.max(boundsDiagonal(this.overallLocalBounds()) * 0.0005, 1e-9));
     group.add(this.selectAreaGizmo.object3d);
@@ -2248,18 +1601,6 @@ export class SceneViewerApp {
     this.renderSelectAreaOptionsPanel();
   }
 
-  /** Bakes a per-triangle (genuinely flat/faceted, not smoothed) "shaded"
-   * look into vertex colors for use with an UNLIT material
-   * (MeshBasicMaterial + vertexColors:true). The main scene has no lights
-   * at all - every other mesh in it uses MeshBasicMaterial too (see
-   * resolveMaterial()/getUntexturedMaterial()) - so a normally-LIT material
-   * like MeshStandardMaterial would just render pitch black here instead of
-   * visibly faceted; this fakes the same "flat per-face" look without
-   * needing any scene lighting. Expects geometry.toNonIndexed() +
-   * computeVertexNormals() to already have been called (see
-   * placeSelectAreaShape()), so each triangle's 3 vertices are unique to it
-   * and share exactly that triangle's face normal - meaning all 3 get
-   * exactly the same baked color, i.e. a uniform, flat-shaded face. */
   private applyFlatFaceVertexColors(geometry: THREE.BufferGeometry): void {
     const normalAttr = geometry.getAttribute("normal");
     const count = normalAttr.count;
@@ -2307,15 +1648,6 @@ export class SceneViewerApp {
     this.renderSelectAreaOptionsPanel();
   }
 
-  /** Rebuilds the "select area" options panel (#select-options-menu) from
-   * scratch to match the current selectAreaShape - empty/hidden when
-   * there's no shape placed, otherwise a small panel with Move/Scale
-   * gizmo-mode buttons (reflecting selectAreaGizmoMode) and a Remove
-   * button. Actual translating/scaling happens via the in-scene gizmo
-   * itself (see select-area-gizmo.ts) or the 'G'/'S' shortcuts
-   * (handleGizmoKeydown()), not through this panel. Called on every
-   * placement, mode switch, and removal - there's no persistent DOM to
-   * keep in sync incrementally, so it's simplest to just rebuild. */
   private renderSelectAreaOptionsPanel(): void {
     const kind = this.selectAreaKind;
     if (!kind) {
@@ -2352,16 +1684,6 @@ export class SceneViewerApp {
   //#endregion
 
   //#region lasso select tool
-
-  /** Abandons a lasso gesture in progress, if any - called from
-   * cancelAllTools() so arming a DIFFERENT tool mid-gesture can't leave a
-   * stale drag/overlay behind, the same reason cancelGroundPlaneTool()/
-   * cancelVolumeSelectTool() exist for their own tools. Also reachable via
-   * a right-click while dragging (see handleSceneObjectPointer()).
-   * Harmless to call with no gesture in progress. Deliberately does NOT
-   * fall back to selectDrawAtPointer() the way a normal release short of
-   * the drag threshold would - a right-click specifically means "abandon
-   * this", not "treat it as a click instead". */
   private cancelLassoDrag(): void {
     this.lassoDragActive = false;
     this.lassoDragConfirmed = false;
@@ -2370,15 +1692,6 @@ export class SceneViewerApp {
     this.hideLassoOverlay();
   }
 
-  /** The default left-button-drag behavior whenever no other tool is
-   * armed (Config.sessionConfig.tools.activeTool === null) - see
-   * handleSceneObjectPointer(), which calls this instead of its usual
-   * immediate click-to-select the moment nothing else has claimed the
-   * viewport. Doesn't select or draw anything yet: which this gesture
-   * turns out to be (a plain click, or a real lasso drag) is only known
-   * once it either crosses LASSO_DRAG_THRESHOLD (handleLassoPointerMove())
-   * or ends (handleLassoPointerUp()) - starting a genuinely new drag here
-   * every time keeps that decision fully self-contained per-gesture. */
   private handleLassoPointerDown(event: PointerEvent): void {
     event.preventDefault();
     this.lassoDragActive = true;
@@ -2388,19 +1701,6 @@ export class SceneViewerApp {
     this.lassoPoints = [];
   }
 
-  /** Window-level (see wireEvents()) - no-op unless a gesture is actually
-   * in progress (lassoDragActive). Below LASSO_DRAG_THRESHOLD pixels from
-   * lassoDragStart, this does nothing at all: no overlay, no accumulated
-   * points, so a plain click never has so much as a flash of lasso UI.
-   * The first time that threshold is crossed, lassoDragConfirmed flips
-   * (permanently, for this one gesture - see its own doc comment),
-   * lassoPoints is seeded with lassoDragStart so the point the gesture
-   * began at isn't lost, and the dotted overlay appears for the first
-   * time. From then on, a new point is appended - and the overlay
-   * redrawn - only once the cursor has moved at least a few pixels from
-   * the last recorded one, which keeps the path (and the polygon later
-   * tested against it) from accumulating a huge number of near-duplicate
-   * points during a slow drag. */
   private handleLassoPointerMove(event: PointerEvent): void {
     if (!this.lassoDragActive) return;
     const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
@@ -2420,21 +1720,6 @@ export class SceneViewerApp {
     this.updateLassoOverlay();
   }
 
-  /** Window-level (see wireEvents()) - finishes whatever gesture
-   * handleLassoPointerDown() started. No-op unless one is actually in
-   * progress.
-   *
-   * If it never crossed LASSO_DRAG_THRESHOLD (lassoDragConfirmed still
-   * false), this was just a plain click the whole time - falls back to
-   * selectDrawAtPointer(), exactly the immediate single-object selection
-   * that would have run on pointerdown before lasso-select existed.
-   *
-   * Otherwise, applies the lasso polygon: reading shift/ctrl "AS THE
-   * MOUSE IS BEING RELEASED" (i.e. from this pointerup event specifically,
-   * not whatever was held when the drag started) - ctrl (or cmd, matching
-   * every other modifier check in this file) removes the lassoed objects
-   * from the current selection, shift adds them to it, neither replaces
-   * it outright. */
   private handleLassoPointerUp(event: PointerEvent): void {
     if (!this.lassoDragActive) return;
     this.lassoDragActive = false;
@@ -2455,16 +1740,6 @@ export class SceneViewerApp {
     this.applyLassoSelection(points, mode);
   }
 
-  /** Selects every loaded draw whose world-space bounds CENTER (not any
-   * point on its surface - see this feature's own spec) projects inside
-   * the given screen-space polygon, regardless of what's in front of it -
-   * this is a pure screen-space point-in-polygon test against each
-   * object's center, not a raycast, so occlusion never excludes anything
-   * ("even the ones hidden behind other objects"). Hidden-by-filter/
-   * manually-hidden objects are excluded, same as every other selection
-   * path in this file - lasso selects what's actually visible in the
-   * scene, it just doesn't care what else happens to be drawn in front of
-   * it. */
   private applyLassoSelection(points: { x: number; y: number }[], mode: "replace" | "add" | "remove"): void {
     const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
     const camera = this.sceneManager.activeCamera;
@@ -2497,13 +1772,6 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Standard even-odd ray-casting point-in-polygon test: counts how many
-   * polygon edges a horizontal ray from (x, y) to +infinity crosses: odd
-   * means inside, even means outside. The lasso path itself is used
-   * directly as the polygon (implicitly closed back to its first point) -
-   * it doesn't need to be simplified or explicitly closed first, since
-   * this test only cares about edge crossings, not the polygon's
-   * validity/simplicity otherwise. */
   private static isPointInPolygon(x: number, y: number, points: { x: number; y: number }[]): boolean {
     let inside = false;
     for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -2515,12 +1783,6 @@ export class SceneViewerApp {
     return inside;
   }
 
-  /** Creates (on first use) the lasso's own SVG overlay - a plain, 2D,
-   * absolutely positioned SVG covering the viewport, unrelated to the
-   * three.js scene - and returns its polyline element. Sized to match the
-   * viewport once here; since the overlay is only ever visible mid-drag
-   * and a drag can't survive a window resize meaningfully anyway, it isn't
-   * kept in sync with later resizes. */
   private ensureLassoOverlay(): SVGPolylineElement {
     if (this.lassoOverlay && this.lassoPolyline) return this.lassoPolyline;
 
@@ -2553,14 +1815,6 @@ export class SceneViewerApp {
 
   //#endregion
 
-  /** Bakes `matrix` onto `draw.originalPosedPositions` (never
-   * draw.geometryData.positions - so re-applying a correction always
-   * starts fresh instead of compounding onto whatever was already there),
-   * writing the result into geometryData.positions/bounds/diagonal and
-   * recording `matrix` on the draw (LoadedDraw.appliedDistortionMatrix)
-   * for toggleRawImport() to reapply later. Returns false (no-op) for a
-   * draw with no separate posed export (originalPosedPositions is null -
-   * see loadDraw()) - there's no posed geometry to correct. */
   private applyMatrixToDraw(draw: LoadedDraw, matrix: THREE.Matrix4): boolean {
     if (draw.originalPosedPositions === null || draw.originalPosedNormals === null || draw.originalPosedUvs === null) return false;
     const correctedPositions = draw.originalPosedPositions.slice();
@@ -2569,13 +1823,6 @@ export class SceneViewerApp {
     const correctedNormals = draw.originalPosedNormals.slice();
     this.applyNormalMatrixToNormals(correctedNormals, matrix);
 
-    // UV values themselves aren't transformed by `matrix` at all (there's
-    // no meaningful notion of applying a 3D positional/normal transform to
-    // a 2D texture coordinate) - but their WINDING has to move in lockstep
-    // with positions/normals whenever those get rewound below, or corner
-    // correspondence breaks (position/normal corner i would end up paired
-    // with the UV that used to belong to a DIFFERENT corner), which is
-    // exactly what mangles texture mapping on a mirrored mesh.
     const correctedUvs = draw.originalPosedUvs.slice();
 
     if (new THREE.Matrix3().setFromMatrix4(matrix).determinant() < 0) {
@@ -2593,57 +1840,12 @@ export class SceneViewerApp {
     return true;
   }
 
-  /** Applies one already-computed distortion's shape-only correction
-   * (posedToNonPosedInPlace) to every loaded draw (including hidden ones -
-   * hiddenness only affects rendering/selection, not the underlying data),
-   * pivoted about that SAME distortion's posedCentroid. Then, separately,
-   * points the WHOLE SCENE (sceneRotation, applied once to the content
-   * group - see applySceneRotation()) at
-   * distortion.distortionOrientation - the same fit's rotation ALONE, not
-   * baked into any individual draw's vertices (see distortionOrientation's
-   * doc comment in calculator.ts for why: baking a per-object rotation
-   * into each draw individually fights that object's own real, legitimate
-   * placement yaw - most placed objects share the scene's up direction,
-   * not a single global forward/right - and previously made the
-   * reconstructed scene come out visibly tilted). Shared by:
-   * - recalculateTransformCorrection(), which fits `distortion` from a
-   *   user-marked scale-reference object and broadcasts it to the whole
-   *   scene;
-   * - reconstructScene()'s automatic IntelGPA-landmark correction, which
-   *   instead already comes with `distortion` precomputed from the
-   *   dropped landmark-source.obj/landmark-output.obj pair (see
-   *   mesh-tools/landmark-matching.ts) and applies it the same way, with
-   *   no scale-reference object involved at all;
-   * - autoCorrectRenderDocDistortion() below, which fits a distortion from
-   *   every eligible draw and picks the single most-corroborated one.
-   *
-   * All three now go through this exact same shape-then-rotate split -
-   * there's no longer a separate "keep the fit's rotation baked into each
-   * draw" mode (this used to also take a `matrixField` choosing between
-   * posedToNonPosedInPlace and posedToNonPosedOrientedInPlace; the latter
-   * baked R per-draw, which is what caused the tilt this split fixes).
-   *
-   * `rebuild` controls whether this also recomputes fixedScale and calls
-   * rebuildVisibleScene() once corrected - reconstructScene() passes
-   * false since it still has its own rebuild (hide-percent, camera
-   * placement, etc.) to run afterwards regardless; sceneRotation is set
-   * (and applySceneRotation() called) either way, so that subsequent
-   * rebuild picks up the new rotation exactly like any other. */
   private applyDistortionToScene(
     distortion: AffineDistortionResult,
     options: { rebuild?: boolean; sourceIndex?: number } = {},
   ): { corrected: number; skipped: number } {
     const finalMatrix = distortion.posedToNonPosedInPlace;
 
-    // posedCentroid is the one point that's guaranteed to keep the exact
-    // same LOCAL (pre-scale, pre-sceneRotation) coordinates after this
-    // correction as before it - finalMatrix is pivoted about it, so it
-    // maps to itself. That makes it the natural anchor for compensating
-    // the camera below: its WORLD position can still shift, from the
-    // scale/rotation changes a few lines down, even though its local
-    // coordinates don't move - capture where it renders now, before any
-    // of that changes, so it can be compared against where it renders
-    // after.
     const anchor = distortion.posedCentroid;
     const rotationBefore = this.getActiveSceneRotation().clone();
     const scaleBefore = this.fixedScale;
@@ -2670,25 +1872,9 @@ export class SceneViewerApp {
       this.sceneRotation = distortion.distortionOrientation.clone();
       this.applySceneRotation();
 
-      // The correction just baked into every draw's vertices (finalMatrix,
-      // pivoted about `anchor`), the scale change recomputeFixedScale()
-      // may have just made, and the rotation change above can all shift
-      // where the scene's content actually renders in world space, out
-      // from under a camera that hasn't moved - the scene would appear to
-      // "jump away" from wherever the camera was framing it, even though
-      // nothing about the camera itself changed. Move the camera (target +
-      // position together, preserving its offset/orientation - see
-      // translateOrbitCenter()) by the same shift `anchor` itself just
-      // underwent, so the camera keeps looking at the same relative spot
-      // on the (now corrected) content instead of appearing to have moved
-      // away from it.
       const worldAfter = anchor.clone().applyQuaternion(this.getActiveSceneRotation()).multiplyScalar(this.fixedScale);
       this.sceneManager.translateOrbitCenter(worldAfter.clone().sub(worldBefore));
 
-      // See lastDistortionSourceIndex's own doc comment - undefined
-      // (IntelGPA's landmark-pair distortion, which isn't fit from any one
-      // loaded draw) clears it rather than leaving a stale index from
-      // whatever the previous correction happened to use.
       this.lastDistortionSourceIndex = options.sourceIndex ?? null;
       this.updateHighlightCorrectionSourceBtn();
 
@@ -2698,29 +1884,11 @@ export class SceneViewerApp {
     return { corrected, skipped };
   }
 
-  /** Enables/labels the "Highlight correction source" button to match
-   * lastDistortionSourceIndex's current state - called after every
-   * applyDistortionToScene() and whenever a fresh reconstructScene()
-   * clears it. */
+
   private updateHighlightCorrectionSourceBtn(): void {
     this.elements.toolsMenu.highlightCorrectionSourceBtn.disabled = this.lastDistortionSourceIndex === null;
   }
 
-  /** The "Highlight correction source" button: selects (and scrolls the
-   * object list to) whichever object's fit was actually broadcast by the
-   * most recent distortion correction - manual, automatic RenderDoc, or
-   * IntelGPA landmark (though the last of those clears
-   * lastDistortionSourceIndex instead, since it isn't fit from any one
-   * loaded draw - the button is disabled whenever there's nothing to
-   * point at, so this shouldn't normally be reachable with it null, but
-   * the guard costs nothing). Exists because the auto-consensus picker
-   * (and, just as easily, a manually-chosen scale-reference) can pick an
-   * object whose fit is clean but whose ROTATION doesn't actually
-   * represent the scene's true orientation (e.g. it's genuinely tilted/
-   * mounted at an angle in the world, or just poorly-suited to rotation
-   * extraction) - a failure mode that isn't visible from the corrected
-   * result alone, only from knowing (and looking at) which object was
-   * actually used. */
   private highlightDistortionSource(): void {
     const index = this.lastDistortionSourceIndex;
     if (index === null) return;
@@ -2731,12 +1899,6 @@ export class SceneViewerApp {
     this.scrollDrawIntoView(index);
   }
 
-
-  /**
-   * Calculates distortion matrices for all draw calls and finds the most
-   * likely transform matrix for the scene. It is assumed that the most
-   * common transform matrix is the correct one.
-   */
   private autoCorrectRenderDocDistortion(): void {
     const logLine = this.elements.loadingScreen.log('Calculating object distortions ...');
     const updateLogLineEvery = 7;
@@ -2828,12 +1990,6 @@ export class SceneViewerApp {
     console.log("[reconstruct] auto-correct RenderDoc distortion", { corrected, skipped });
   }
 
-  /** Recomputes fixedScale from the CURRENT union of every loadedDraw's
-   * bounds - the same unit-conversion + optional max-scene-size clamp used
-   * whenever scale needs re-establishing after the underlying geometry
-   * changes shape (after a distortion correction - see
-   * applyDistortionToScene() - and after toggling raw/corrected import -
-   * see toggleRawImport()). No-op if there are no loaded draws. */
   private recomputeFixedScale(): void {
     if (this.loadedDraws.length === 0) return;
     let overall: Bounds = this.loadedDraws[0].bounds;
@@ -2850,14 +2006,6 @@ export class SceneViewerApp {
     this.fixedScale = unitScale * clampScale;
   }
 
-  /** Flips the whole scene between the RAW imported posed geometry
-   * (draw.originalPosedPositions, exactly as loaded) and each draw's own
-   * last-applied correction (LoadedDraw.appliedDistortionMatrix - set by
-   * applyMatrixToDraw(), whether that ran through the IntelGPA/manual
-   * "Fix distortion" flows' single scene-wide distortion or
-   * autoCorrectRenderDocDistortion()'s independent per-draw fits). Lets
-   * you compare the two without re-fitting or re-dropping files each
-   * time. No-op if nothing has been corrected yet for the current scene. */
   private toggleRawImport(): void {
     if (this.loadedDraws.length === 0) return;
     if (!this.loadedDraws.some((draw) => draw.appliedDistortionMatrix !== null)) return;
@@ -2890,29 +2038,9 @@ export class SceneViewerApp {
    * and the full-reload reset in reconstructScene()). */
   private updateToggleRawImportBtn(): void {
     const btn = this.elements.toolsMenu.toggleRawImportBtn;
-    // const hasDistortion = this.appliedDistortion !== null;
-    // btn.classList.toggle("hidden", !hasDistortion);
-    // btn.classList.toggle("active", this.showingRawImport);
     btn.textContent = this.showingRawImport ? "Enable distortion correction" : "Disable distortion correction";
   }
 
-  /** Handles the axis-mapper submenu's "axis-mapping-changed" event - the
-   * main-screen counterpart to the import screen's own input-axis-mapper
-   * (cmp.capture-importer.ts), which only ever affects geometry that
-   * hasn't been loaded/parsed yet. Here a scene may already be loaded, so
-   * the new orientation has to be back-applied to every already-parsed
-   * draw: re-derives previewGeometryData from each draw's rawPreviewObj
-   * (see its own doc comment) using the config's now-updated
-   * inputGeometryOrientation, entirely from the already-parsed data - no
-   * file is re-read. Draws with no separate preview mesh (rawPreviewObj
-   * === null - previewGeometryData just aliases geometryData, which is
-   * assumed already in the app's frame, see loadDraw()) are unaffected,
-   * same as on the import screen.
-   *
-   * previewGeometryData is never rendered in the main viewport directly
-   * (rebuildVisibleScene() always uses draw.geometryData - the POSED
-   * mesh), so two more things are needed for the change to actually be
-   * visible, not just baked into data nothing currently reads: */
   private applyAxisMappingChange(): void {
     if (this.loadedDraws.length === 0) return;
 
@@ -2925,75 +2053,21 @@ export class SceneViewerApp {
     }
     if (!remappedAny) return;
 
-    // 1) The MAIN SCENE: previewGeometryData is the fit target distortion
-    // correction is calculated against, so a previously-applied fit is
-    // now stale w.r.t. the axis convention it was computed under -
-    // refitting/reapplying it is what actually moves draw.geometryData
-    // (rebuildVisibleScene()'s own source), via
-    // recalculateTransformCorrection() -> applyDistortionToScene(), which
-    // already calls rebuildVisibleScene() itself once it does.
-    // lastDistortionSourceIndex - whichever object's fit was actually
-    // broadcast last time - is used ahead of scaleReferenceIndex because
-    // the common case (autoCorrectRenderDocDistortion()'s own consensus
-    // pick, run automatically on reconstruct) never touches
-    // scaleReferenceIndex at all; that's only set by the separate,
-    // optional "is ref" marking. Skipped entirely while the raw/
-    // uncorrected import is being shown on purpose (toggleRawImport()) -
-    // recalculateTransformCorrection() would silently flip back to the
-    // corrected view as a side effect (see applyDistortionToScene()),
-    // which an axis-mapping tweak shouldn't do on its own; toggling raw
-    // import back off afterwards re-applies the (now up to date, from the
-    // loop above) fit's own already-recorded matrix, not a stale one - see
-    // toggleRawImport()'s own doc comment. No-op either way when nothing
-    // has been fit yet (both indices null) - there's no correction to go
-    // stale.
     const referenceIndex = this.lastDistortionSourceIndex ?? this.scaleReferenceIndex;
     if (referenceIndex !== null && !this.showingRawImport) {
       this.recalculateTransformCorrection(referenceIndex);
     }
 
-    // 2) The PREVIEW PANEL: renderResourcePanel() early-outs on an
-    // unchanged selection/tab "signature" - fine for its usual callers
-    // (every plain selection tweak, most of which don't touch geometry at
-    // all), but wrong here, since the geometry just changed under the
-    // SAME selection. Force it to rebuild from scratch so the currently
-    // selected object's preview (and, on the "All selected" tab, every
-    // other selected thumbnail) picks up the refreshed
-    // previewGeometryData/geometryData immediately, not only after the
-    // next selection change happens to bust the signature. No-op when
-    // nothing's selected/the panel isn't open (see refreshResourcePanel()).
     this.refreshResourcePanel();
   }
 
-  /** Forces the resource panel to rebuild from scratch for whatever it's
-   * currently tracking, bypassing renderResourcePanel()'s own signature
-   * early-out (keyed on selection/tab, not content) - for callers that
-   * mutate a loaded draw's geometry in place without changing the
-   * selection, e.g. applyAxisMappingChange(). No-op when nothing's
-   * selected or the panel is hidden
-   * (Config.sessionConfig.resourcesPanel.visible is off), matching
-   * syncResourcePanelVisibility()'s own behavior. */
   private refreshResourcePanel(): void {
     if (this.resourcePanelIndex === null) return;
     this.removeResourcePanel();
     this.syncResourcePanelVisibility();
   }
 
-  /** Fits the matrix-based transform-correction from a reference object's
-   * posed/non-posed vertex pair (geometryData/previewGeometryData - see
-   * loadDraw()) and broadcasts it to every loaded draw via
-   * applyDistortionToScene() above.
-   *
-   * `referenceIndex` defaults to the object list's own "is ref" marker
-   * (this.scaleReferenceIndex - see setLandmark()), used by the standalone
-   * Recalculate button (recalculateCorrectionBtn). The "Fix distortion"
-   * tool's own Apply button (applySelectLandmarkTool()) instead passes the
-   * object selected through THAT tool explicitly - previously this method
-   * took no parameter at all, so that call silently passed its argument
-   * into nothing (JS doesn't enforce arity at runtime) and this always
-   * fell back to scaleReferenceIndex regardless, which is null unless the
-   * separate "is ref" button was ALSO clicked - i.e. the tool's Apply
-   * button did nothing whenever only the tool itself had a selection. */
+
   private recalculateTransformCorrection(referenceIndex: number | null = this.scaleReferenceIndex): void {
     if (this.loadedDraws.length === 0) {
       return;
@@ -3023,8 +2097,6 @@ export class SceneViewerApp {
     if (skipped > 0) statusParts.push(`${skipped} skipped (no separate posed mesh)`);
   }
 
-  /** Applies a 4x4 affine transform to every vertex in a flat, non-indexed
-   * positions array (x0,y0,z0,x1,y1,z1,...), in place. */
   private applyMatrixToPositions(positions: number[], matrix: THREE.Matrix4): void {
     const v = new THREE.Vector3();
     for (let i = 0; i < positions.length; i += 3) {
@@ -3035,14 +2107,7 @@ export class SceneViewerApp {
     }
   }
 
-  /** Transforms every normal in a flat, non-indexed array (3 components per
-   * vertex) by `matrix`'s normal matrix - the inverse-transpose of its
-   * upper-left 3x3 (THREE.Matrix3.getNormalMatrix()), the standard way to
-   * correctly carry direction vectors through a non-uniform linear map
-   * (a plain rotation carries its own inverse-transpose, so this is a
-   * no-op in that common case; it only matters once anisotropic stretch or
-   * a reflection is involved - see applyMatrixToDraw()). Renormalizes each
-   * result. In place. */
+
   private applyNormalMatrixToNormals(normals: number[], matrix: THREE.Matrix4): void {
     const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
     const v = new THREE.Vector3();
@@ -3054,22 +2119,10 @@ export class SceneViewerApp {
     }
   }
 
-  /** Negates every vertex's X component in a flat, non-indexed array (3
-   * components per vertex - positions or normals), in place. */
   private negateXInPlace(values: number[]): void {
     for (let i = 0; i < values.length; i += 3) values[i] = -values[i];
   }
 
-  /** Swaps triangle corners 1 and 2 (of 0/1/2) throughout a flat,
-   * non-indexed, per-corner array - `componentsPerVertex` floats per
-   * corner, exactly 3 corners per triangle. This is the standard fix for
-   * the winding-order reversal a mirror transform causes: reflecting
-   * through a single axis flips a mesh "inside out" (its stored normals,
-   * and any normal later re-derived from winding via a cross product,
-   * would end up pointing inward) unless the corner order within each
-   * triangle is also reversed to compensate. Works in place; called on
-   * positions, normals, AND uvs together (see mirrorSceneAlongX()) so all
-   * three stay aligned corner-for-corner. */
   private flipTriangleWindingInPlace(values: number[], componentsPerVertex: number): void {
     const triStride = componentsPerVertex * 3;
     for (let base = 0; base + triStride <= values.length; base += triStride) {
@@ -3083,32 +2136,7 @@ export class SceneViewerApp {
     }
   }
 
-  /** Mirrors the whole loaded scene along the X (left/right) axis: negates
-   * every vertex's X position and X normal component, then flips each
-   * triangle's winding order (see flipTriangleWindingInPlace()) so normals
-   * - whether the stored ones or ones later re-derived from winding - keep
-   * pointing outward instead of the mesh turning inside-out, which is what
-   * a bare X negation alone would do (mirroring is an orientation-
-   * reversing transform).
-   *
-   * Applied directly to each draw's own vertex data, not as an outer
-   * group-level transform (e.g. contentGroup.scale.x = -1): a negative
-   * axis scale would break the single-positive-uniform-scalar assumption
-   * that the ground-plane tool, the select-area gizmo, and marker sizing
-   * all make about contentGroup.scale.x elsewhere in this file.
-   *
-   * Also mirrors originalPosedPositions/originalPosedNormals/
-   * originalPosedUvs (when a draw has them) alongside
-   * geometryData.positions/normals/uvs - recalculateTransformCorrection()
-   * always re-derives the latter from the former (uvs included - see
-   * applyMatrixToDraw()), so leaving any of the pristine copies unmirrored
-   * would silently undo part of the mirror the next time distortion
-   * correction is (re-)run.
-   *
-   * Doesn't attempt to re-level a previously-computed ground-plane
-   * rotation (manualUpRotation) - mirroring can change whether the
-   * originally-marked plane is still level afterward, so re-running
-   * "Select ground plane" is the way to fix that if needed. */
+
   private mirrorSceneAlongX(): void {
     if (this.loadedDraws.length === 0) return;
 
@@ -3137,28 +2165,12 @@ export class SceneViewerApp {
       draw.diagonal = boundsDiagonal(draw.bounds);
     }
 
-    // A placed volume-select shape's position was recorded relative to the
-    // mesh as it stood before the mirror - fix up just its X so it stays
-    // where it visually was on the (now-mirrored) mesh. Its scale doesn't
-    // need any change: a mirrored sphere/box is still the same shape.
     if (this.selectAreaShape) this.selectAreaShape.position.x = -this.selectAreaShape.position.x;
 
     this.rebuildVisibleScene();
   }
 
-  /** Exports the currently-selected (and currently visible) objects as one
-   * self-contained .glb file: drag-and-drop (or File > Import > glTF 2.0)
-   * into Blender loads a separate object per mesh, each with its material
-   * and texture already embedded - no external file references, no
-   * separate texture files to lose track of. See gltf-exporter.ts for the
-   * actual glTF/GLB building; this just gathers the selected draws'
-   * already-loaded (and, if applicable, already-corrected/mirrored) data
-   * and triggers the browser download.
-   *
-   * "Selected" uses the exact same definition updateSelectionVisuals()
-   * does elsewhere (selectedIndices minus anything currently hidden), so
-   * this always exports what's actually highlighted/visible on screen,
-   * not some separate notion of selection. */
+
   private exportSelectedMeshesAsGlb(): void {
     const activeSelected = this.getActiveSelectedIndices();
     if (activeSelected.length === 0) {
@@ -3177,10 +2189,6 @@ export class SceneViewerApp {
       };
     });
 
-    // Bakes the scene's CURRENT orientation/scale (ground-plane leveling,
-    // up-axis, fixedScale) into a single root node in the export instead
-    // of each mesh's own vertex data - see ExportSceneTransform's doc
-    // comment - so exporting matches whatever's presently on screen.
     const group = this.sceneManager.getContentGroup();
     const sceneTransform: ExportSceneTransform = {
       quaternion: this.getActiveSceneRotation(),
@@ -3207,41 +2215,6 @@ export class SceneViewerApp {
     URL.revokeObjectURL(url);
   }
 
-  /** Handles the "Fix & export" dialog's 'start-export' event: builds and
-   * downloads a .glb from whichever draws the dialog was told about (see
-   * ExportMesh.setSelectedIndices(), set from the fixExport handler in
-   * setupMenu()) using the dialog's own pending export options - the same
-   * options renderExportMeshPreview() already previews live:
-   * - exportType picks posed (draw.geometryData) vs non-posed
-   *   (draw.previewGeometryData) vertex data.
-   * - exportTextures picks the draw's own (possibly textured) material vs
-   *   the shared flat grey untextured one (see getUntexturedMaterial()) -
-   *   buildGlbBlob() already exports an untextured MeshBasicMaterial as a
-   *   flat baseColorFactor with no baseColorTexture, so reusing that one
-   *   material is enough to get a textureless export, no separate "strip
-   *   the texture" step needed.
-   * - splitLooseParts/fillHoles run each draw's geometry through fill.ts's
-   *   splitGeometryByLooseParts()/groupFixedMeshes() (see
-   *   buildExportEntriesForDraw()) - with splitLooseParts off, each draw
-   *   exports as a single mesh exactly as loaded ("Export should export
-   *   meshes as is"), and fillHoles is forced off with it (see
-   *   ExportMesh.syncDependentDisabledStates()) - a hole is only a
-   *   meaningful concept per split-out part.
-   * - resizeExportedObject uniformly rescales the WHOLE exported selection
-   *   (after everything above) so its bounding box is approximateHeight
-   *   tall along Y (see applyExportResize()), overriding whatever scale
-   *   the scene would otherwise have exported at.
-   *
-   * For a non-posed export, the scene's overall orientation (ground-plane
-   * leveling, up-axis - see exportSelectedMeshesAsGlb()'s own doc comment)
-   * is deliberately NOT baked in: that describes how POSED meshes sit
-   * relative to each other in the reconstructed scene, but non-posed/
-   * original meshes were never placed relative to each other to begin
-   * with (see attachMultiMeshPreview()'s doc comment) - baking a
-   * scene-level leveling rotation onto them would just be wrong, so
-   * they're exported as authored (identity rotation) instead; resize (if
-   * requested) still applies on top of that identity rotation the same
-   * way it does for posed exports. */
   private handleStartExport(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): void {
     const draws = selectedIndices
       .map((index) => ({ index, draw: this.loadedDraws[index] }))
@@ -3269,19 +2242,6 @@ export class SceneViewerApp {
     this.downloadBlob(blob, fileName);
   }
 
-  /** Builds the ExportMeshEntry list for ONE draw - the per-draw half of
-   * handleStartExport() above, applying splitLooseParts/fillHoles (see
-   * fill.ts). With splitLooseParts off, this is just the single original
-   * entry, unchanged from before. With it on, the draw's geometry is split
-   * into its connected ("loose") parts via splitGeometryByLooseParts(),
-   * and - if fillHoles is also on - each part is run through
-   * groupFixedMeshes(), which fills any boundary-edge holes it finds and
-   * reports what happened to it; that status is appended to the exported
-   * name (e.g. "Draw #3 (eid 12) part 2 [filled]"), i.e. "group and name
-   * mesh objects by their status", the same idea as the old fill.js's
-   * groupFixedMeshes_safe(). Every resulting part shares the draw's one
-   * material - splitting/filling only ever adds geometry, never changes
-   * what it's textured with. */
   private buildExportEntriesForDraw(
     index: number,
     draw: LoadedDraw,
@@ -3325,21 +2285,6 @@ export class SceneViewerApp {
     }));
   }
 
-  /** Uniformly rescales `sceneTransform.scale` (mutated in place - the
-   * entries themselves are untouched, since the single root-node scale
-   * already applies to all of them) so the combined bounding box of every
-   * entry, AFTER sceneTransform's own rotation, is `targetHeight` tall
-   * along Y - "as tall as export-options-approximate-height". Rotation is
-   * applied first because that's the orientation the exported file will
-   * actually be viewed/printed in - resizing in the mesh's own unrotated
-   * space could make the WRONG axis come out at the target height.
-   * Rotating each entry's full 8-corner bounding box (not just its
-   * min/max points) is necessary because an axis-aligned box's own
-   * min/max corners don't map to the rotated box's min/max after an
-   * arbitrary rotation - only the union of all 8 transformed corners
-   * does. Leaves sceneTransform.scale untouched if the combined geometry
-   * has ~0 height (an empty entry list, or geometry perfectly flat along
-   * Y) to avoid dividing by ~0. */
   private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {
     let combined: Bounds | null = null;
     for (const entry of entries) {
@@ -3369,11 +2314,6 @@ export class SceneViewerApp {
     const rotatedHeight = maxY - minY;
     if (rotatedHeight < 1e-9) return;
 
-    // targetHeight is an absolute size, independent of whatever "natural"
-    // scale the reconstructed scene happened to end up at - this REPLACES
-    // sceneTransform.scale rather than multiplying it, discarding the
-    // previous scale (ground-plane/up-axis-driven, or 1 for a non-posed
-    // export) entirely rather than adjusting it.
     sceneTransform.scale = targetHeight / rotatedHeight;
   }
 
@@ -3400,49 +2340,6 @@ export class SceneViewerApp {
     this.attachMultiMeshPreview(container, [draw], { interactive: true, ...options });
   }
 
-  /** Shared implementation behind the single-object interactive preview
-   * (attachMeshPreview() - the "Last selected object" tab/the object-list
-   * row's own preview), the "All selected objects" tab (all currently
-   * selected draws together), the per-object/combined thumbnails in the
-   * resource panel's multi-select row, and the "Fix & export" dialog's own
-   * preview (see renderExportMeshPreview()). Every mesh is added to the
-   * scene at its own natural local coordinates (i.e. with no relative
-   * offset applied between them - non-posed meshes were never placed
-   * relative to each other to begin with, and posed ones already carry
-   * whatever relative placement the capture gave them), then the WHOLE
-   * assembly is centered/scaled as one rigid unit from the union of their
-   * individual bounds, exactly the way the original single-mesh version
-   * centered/scaled just the one mesh.
-   *
-   * `poseMode` (defaults to "non-posed", matching every pre-existing
-   * caller's behavior) picks which of a draw's two vertex sets to preview:
-   * "posed" uses draw.geometryData (the scene/output positions), matching
-   * the export dialog's "Export with poses" option; "non-posed" uses
-   * draw.previewGeometryData (falling back to geometryData for draws with
-   * no separate posed export - see loadDraw()), matching "Export
-   * original".
-   *
-   * `textured` (defaults to true, again matching every pre-existing
-   * caller) picks the material: true clones the draw's own material as
-   * before (whatever texture it has, or the shared untextured fallback -
-   * see resolveMaterial()/getUntexturedMaterial()); false ignores the
-   * draw's material entirely and uses a plain grey MeshStandardMaterial
-   * with flatShading - unlike the main scene (which has no lights, hence
-   * needing applyFlatFaceVertexColors()'s baked-vertex-color trick to fake
-   * faceting on an unlit material), this preview scene adds its own real
-   * lights below, so flatShading here just works: the shader derives each
-   * face's normal from screen-space derivatives instead of interpolating
-   * the smooth per-vertex ones, giving a genuinely per-face-faceted look
-   * with ordinary lighting.
-   *
-   * `interactive`=true wires up the orbit-drag/wheel-zoom handling and
-   * keeps rendering every frame via requestAnimationFrame, same as
-   * before. `interactive`=false (the non-interactive thumbnails) renders
-   * exactly once - there's nothing that will ever change afterwards - and
-   * frees the GL context immediately rather than holding one open per
-   * thumbnail: a big multi-selection can easily produce more thumbnails
-   * than a browser's simultaneous-WebGL-context limit if they're left
-   * open indefinitely. */
   private attachMultiMeshPreview(
     container: HTMLElement,
     draws: LoadedDraw[],
@@ -3464,11 +2361,7 @@ export class SceneViewerApp {
 
     const modelRoot = new THREE.Group();
     scene.add(modelRoot);
-    // Everything actually being previewed lives one level further in, so
-    // the center/scale transform below can be applied to the assembly as
-    // a whole while modelRoot itself is left free for pure
-    // drag-to-rotate, exactly like the original code did with its single
-    // mesh directly.
+
     const contentGroup = new THREE.Group();
     modelRoot.add(contentGroup);
 
@@ -3491,38 +2384,17 @@ export class SceneViewerApp {
         material = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, flatShading: true, side: THREE.DoubleSide });
       }
 
-      // No per-mesh repositioning here, for either pose mode - each mesh
-      // keeps exactly the relative offset to the others that its own
-      // source data gives it (whether that's real shared scene placement
-      // for posed data, or whatever relative offset the non-posed/preview
-      // export happens to carry). It's the SELECTION AS A WHOLE that gets
-      // centered at the origin, as one rigid move applied once below to
-      // contentGroup (built from the union of every individual mesh's
-      // bounds, computed here without moving anything) - see the
-      // centering step right after this loop.
       contentGroup.add(new THREE.Mesh(geometry, material));
 
       const bounds = computeBounds(sourceData.positions);
       overallBounds = overallBounds ? unionBounds(overallBounds, bounds) : bounds;
     }
-    // Empty selection shouldn't be reachable in practice, but fall back to
-    // a small unit cube rather than propagate Infinity/NaN into the fit
-    // math below.
+
     if (!overallBounds) overallBounds = { min: new THREE.Vector3(-0.5, -0.5, -0.5), max: new THREE.Vector3(0.5, 0.5, 0.5) };
 
     const center = boundsCenter(overallBounds);
     const rawSize = overallBounds.max.clone().sub(overallBounds.min);
 
-    // The whole assembly (relative offsets between meshes untouched - see
-    // the loop above) is centered at the origin as ONE rigid move, then
-    // scaled down (never up) to fit inside a 100x100x100 cube if it
-    // doesn't already - applied as contentGroup's own position/scale (not
-    // baked into the geometry) so it's purely a property of this preview
-    // render, not of sourceData itself. Object3D's local matrix scales
-    // geometry BEFORE translating by position, so position has to be
-    // -scale*center (not just -center) for the result to be "centered,
-    // then scaled" rather than "centered by an unscaled offset, then
-    // scaled off-center".
     const PREVIEW_CUBE_SIZE = 100;
     const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-6);
     const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
@@ -3533,13 +2405,6 @@ export class SceneViewerApp {
     const radius = Math.max(size.length() * 0.5, 0.25);
     const targetFill = 0.875;
 
-    // Aspect-aware: as the panel is resized non-uniformly, the container
-    // (and therefore the canvas - see resize() below, which now fills it
-    // fully rather than a centered square) can end up wider or taller than
-    // square. camera.fov is the VERTICAL fov, so for a portrait-ish aspect
-    // the horizontal fov is the tighter constraint instead - use whichever
-    // is smaller so the model stays approximately fully covering the
-    // canvas regardless of its current shape.
     const computeFitDistance = (aspect: number): number => {
       const vFov = (camera.fov * Math.PI) / 180;
       const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
@@ -3549,13 +2414,6 @@ export class SceneViewerApp {
 
     let fitDistance = computeFitDistance(1);
 
-    // Same diagonal look direction the main scene's camera starts from
-    // (see getDefaultViewDirection()) - the model itself starts at
-    // identity rotation (dragging, see handlePointerMove() below, is the
-    // only thing that ever rotates it) and the camera supplies this angle
-    // instead, so "current view" is always exactly "camera position/
-    // orientation", with no separate baked-in model rotation to account
-    // for elsewhere (see the gizmo proxy math below).
     const viewDirection = getDefaultViewDirection();
     camera.position.copy(viewDirection).multiplyScalar(fitDistance);
     camera.lookAt(0, 0, 0);
@@ -3567,17 +2425,10 @@ export class SceneViewerApp {
     const fill = new THREE.HemisphereLight(0xb8d7ff, 0x1c2430, 0.75);
     scene.add(fill);
 
-    // currentDistance = fitDistance * zoomRatio - keeping the user's zoom as
-    // a RATIO (rather than an absolute distance) means resizing the panel
-    // (which changes fitDistance, see resize() below) preserves how far
-    // they'd zoomed in/out instead of resetting it.
     let zoomRatio = 1;
     let currentDistance = fitDistance;
 
     const resize = () => {
-      // Fill the container's actual (possibly non-square) size, rather
-      // than a centered square inscribed within it - "canvas should grow
-      // to fill the available space" as the panel is resized.
       const width = Math.max(1, container.clientWidth);
       const height = Math.max(1, container.clientHeight);
       renderer.setSize(width, height, false);
@@ -3585,35 +2436,13 @@ export class SceneViewerApp {
       camera.aspect = aspect;
       fitDistance = computeFitDistance(aspect);
       currentDistance = fitDistance * zoomRatio;
-      // Distance changes (zoom/resize), but the DIRECTION the camera sits
-      // along never does - camera.lookAt(0,0,0) from further/closer along
-      // the same ray produces the same orientation every time, so the
-      // gizmo proxy math below doesn't need to treat camera.quaternion as
-      // something that changes per frame.
+
       camera.position.copy(viewDirection).multiplyScalar(currentDistance);
       camera.lookAt(0, 0, 0);
       camera.updateProjectionMatrix();
     };
 
     if (options.interactive) {
-      // Small always-visible compass in the preview's own corner, reusing
-      // the same OrientationGizmo the main viewport uses (see
-      // scene-manager.ts) - just repositioned/shrunk via the
-      // "orientation-gizmo--preview" CSS modifier. It normally reads the
-      // CAMERA's orientation directly, but here the camera itself never
-      // rotates after setup (only its distance changes, along the fixed
-      // viewDirection - see resize()/handleWheel()) while dragging spins
-      // modelRoot instead (see handlePointerMove() below) - so it's fed a
-      // small proxy object holding the COMBINED orientation (updated in
-      // tick()): world axis -> rotated by the model's current drag
-      // rotation -> viewed from the camera's fixed diagonal angle. That
-      // combined value is modelRoot.quaternion inverted and then
-      // multiplied by camera.quaternion (apply the model's rotation
-      // first, then the camera's, matching OrientationGizmo.update()'s
-      // own "invert what's passed in, then apply" convention) - at rest
-      // (no drag yet) this correctly shows the same diagonal angle
-      // camera.quaternion alone would, and updates further as the model
-      // is dragged.
       const gizmo = new OrientationGizmo();
       gizmo.element.classList.add("orientation-gizmo--preview");
       container.appendChild(gizmo.element);
@@ -3622,32 +2451,7 @@ export class SceneViewerApp {
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
-      // Yaw/pitch tracked as separate spherical-style angles (rather than
-      // mutating modelRoot.rotation.x/.y directly, the old approach) and
-      // recomposed into modelRoot.quaternion on every move.
-      //
-      // Composition order matters here, and it's easy to get backwards:
-      // yaw must be applied FIRST (innermost) and pitch SECOND (outermost)
-      // - i.e. modelRoot.quaternion = pitchQuaternion.multiply(yawQuaternion),
-      // NOT the other way round. Reasoning: the model's own "up" is the
-      // point (0,1,0) in its local space. Rotating that point about the
-      // world Y axis (yaw, whatever the angle) always leaves it exactly
-      // where it started, since it sits ON that axis. So as long as yaw is
-      // applied to the RAW model first, the model's up point ends up at a
-      // position that depends only on the fixed pitch (constant during a
-      // pure horizontal drag) and not at all on the current yaw angle -
-      // meaning purely horizontal dragging can never make the model's up
-      // axis wander, however far it's already been pitched.
-      // Doing it the other way (pitch first, yaw second - tilt the model,
-      // *then* spin the tilted result around world Y) is exactly the
-      // motion of a tilted spinning top: the model's own up axis sweeps
-      // out a visible cone as yaw changes, i.e. the "wobble" this is
-      // fixing.
-      // The pitch axis itself is the camera's actual (fixed - the camera
-      // never rotates, see viewDirection above) screen-right vector,
-      // rather than an arbitrary world axis, so vertical dragging reads as
-      // "tilt the view up/down" rather than introducing a sideways skew
-      // whenever the default diagonal viewing angle isn't axis-aligned.
+
       let yawAngle = 0;
       let pitchAngle = 0;
       const worldUpAxis = new THREE.Vector3(0, 1, 0);
@@ -3656,10 +2460,7 @@ export class SceneViewerApp {
       const pitchQuaternion = new THREE.Quaternion();
 
       const handlePointerDown = (event: PointerEvent) => {
-        // Left OR middle mouse button rotate - unlike the main viewport
-        // (left click there selects an object, middle orbits), there's
-        // nothing to select in this thumbnail, so both buttons are just
-        // "rotate" here.
+
         if (event.button !== 0 && event.button !== 1) return;
         event.preventDefault(); // stops the browser's middle-click autoscroll icon (and any drag/selection UI on left)
         pointerDown = true;
@@ -3675,8 +2476,7 @@ export class SceneViewerApp {
         lastY = event.clientY;
         yawAngle += dx * 0.01;
         // Clamped to +-90 degrees so vertical dragging can't carry the model
-        // past vertical and flip it upside down - horizontal dragging (yaw,
-        // above) has no such limit since spinning all the way around is fine.
+        // past vertical and flip it upside down
         const PITCH_LIMIT = Math.PI / 2;
         pitchAngle = THREE.MathUtils.clamp(pitchAngle + dy * 0.01, -PITCH_LIMIT, PITCH_LIMIT);
 
@@ -3745,31 +2545,6 @@ export class SceneViewerApp {
     }
   }
 
-  /** (Re)builds the "Fix & export" dialog's own live mesh preview
-   * (#export-mesh-export-preview) from whatever's currently selected
-   * (same selected-AND-visible definition as getActiveSelectedIndices(),
-   * which exportSelectedMeshesAsGlb() also uses) and the dialog's own
-   * pending export options - "works the same as resource panel" via
-   * reusing attachMultiMeshPreview() directly (draggable/zoomable,
-   * lit), just without the panel chrome (header/tabs/resize handles/
-   * multi-select thumbnail row), since this preview always shows every
-   * currently-selected mesh together (there's no separate "last
-   * selected" single-object tab to switch to here) inside a fixed-size
-   * dialog rather than free-floating in the viewport.
-   *
-   * Called once when the dialog opens (see the fixExport handler in
-   * setupMenu()) and again on every 'export-options-changed' event the
-   * dialog itself dispatches (see ExportMesh.notifyOptionsChanged()), so
-   * toggling "Export with poses"/"Export original" or the "Export
-   * textures" checkbox updates the preview immediately.
-   *
-   * Rebuilds from scratch every call (clearing the container first,
-   * which disconnects the old canvas so its render loop notices and
-   * disposes itself - see attachMultiMeshPreview()'s own interactive-
-   * branch cleanup) rather than diffing against whatever was there
-   * before - this only ever runs on dialog-open or an explicit option
-   * change, not every frame, so the cost of a full rebuild doesn't
-   * matter here the way it would in renderResourcePanel(). */
   private renderExportMeshPreview(): void {
     const host = this.el<HTMLElement>("export-mesh-export-preview");
     host.innerHTML = "";
@@ -3994,37 +2769,17 @@ export class SceneViewerApp {
     img.src = asBlob;
   }
 
-  /** (Re)builds the resource panel's content for the given object, or does
-   * nothing if it's already showing exactly that object - called from
-   * syncResourcePanelVisibility() whenever the panel should be visible, so
-   * this doubles as "make sure the panel reflects resourcePanelIndex".
-   * Deliberately does NOT touch resourcePanelPosition - the panel is
-   * free-floating (see positionResourcePanel()), so swapping which object
-   * it's showing should never move it. */
-  /** Short label shown under each thumbnail in the multi-select row -
-   * mirrors the "Draw #N" fallback the object list itself uses when a
-   * draw has no name. */
   private describeDrawLabel(index: number): string {
     const name = this.loadedDraws[index]?.draw.name;
     return name && name.trim().length > 0 ? name : `Draw #${index}`;
   }
 
-  /** Switches which of the two tabs (only relevant/shown for a
-   * multi-selection) the resource panel displays - a pure panel-UI
-   * choice, so it never touches the actual selection. */
   private setResourcePanelTab(tab: "last" | "all"): void {
     if (this.resourcePanelActiveTab === tab) return;
     this.resourcePanelActiveTab = tab;
     if (this.resourcePanelIndex !== null) this.renderResourcePanel(this.resourcePanelIndex);
   }
 
-  /** Makes the given (already-selected) object the one shown on the "Last
-   * selected object" tab, without changing the actual scene selection -
-   * this is what a click on one of the multi-select row's individual
-   * thumbnails does, letting you flip through everything you've selected
-   * without collapsing the multi-selection down to just one object. Any
-   * real new selection action (noteSelectionTarget()) still takes
-   * priority over this the next time one happens. */
   private featureResourcePanelObject(index: number): void {
     this.resourcePanelIndex = index;
     this.resourcePanelActiveTab = "last";
@@ -4089,10 +2844,6 @@ export class SceneViewerApp {
         <ul class="resource-texture-list">${textureItems}</ul>`
       : "";
 
-    // "Selected object should have 'selected' class added to it" - the
-    // one whose thumbnail matches whatever's currently featured (i.e.
-    // shown on the "Last selected" tab) gets it, so it's always visually
-    // obvious which of these the main preview above is currently showing.
     const multiRowMarkup = isMulti
       ? `
         <div class="resource-subhead">Selected objects</div>
@@ -4138,9 +2889,7 @@ export class SceneViewerApp {
       handle.addEventListener("pointerdown", (event) => this.startResourceResize(panel, handle, event as PointerEvent));
     });
 
-    // The header doubles as a drag handle for moving the whole panel - see
-    // startResourceDrag() and the "free-floating" positioning model in
-    // positionResourcePanel().
+
     const header = panel.querySelector<HTMLElement>(".resource-header");
     header?.addEventListener("pointerdown", (event) => this.startResourceDrag(panel, event as PointerEvent));
 
@@ -4195,11 +2944,6 @@ export class SceneViewerApp {
 
     this.viewport.appendChild(panel);
 
-    // Recompute the minimum size from the panel's actual rendered content
-    // and the CURRENT viewport height (25vh/12.5vh are relative to it) -
-    // done every time a panel is opened so it stays correct even if the
-    // browser window was resized since the last time one was shown. Any
-    // larger size the user had previously dragged to is preserved.
     const minSize = this.computeResourcePanelMinSize(panel);
     this.resourcePanelMinSize = minSize;
     this.resourcePanelSize = {
@@ -4253,17 +2997,6 @@ export class SceneViewerApp {
     this.renderObjectListState();
   }
 
-  /** Central dispatch for anything that affects selection: a plain click on
-   * a row, a ctrl/shift-click on a row, or a click on the "selection"
-   * button (which the caller maps onto this the same way, per spec: a
-   * plain click on that button behaves like a ctrl-click on the row, while
-   * an actually-modified click on it behaves exactly like the same
-   * modifier on the row). Hidden objects (excluded by the size filter)
-   * can't be selected at all. While the "fix distortion" (select-landmark)
-   * tool is active, shift/ctrl are ignored entirely and every click just
-   * replaces the selection with the one clicked object - that tool only
-   * ever works with a single landmark, so multi-selection is disallowed
-   * rather than silently accumulating a selection it can't use. */
   private handleObjectClick(index: number, shiftKey: boolean, ctrlKey: boolean): void {
     if (this.isObjectHidden(index)) return;
     if (Config.sessionConfig.tools.activeTool === "select-landmark") {
@@ -4294,12 +3027,6 @@ export class SceneViewerApp {
     });
     if (!hit) return null;
 
-    // A single mesh here is usually a MaterialMergeGroup batch of many
-    // draws sharing one material (see SceneMeshBuilder) - drawIndices[0]
-    // would just be "the first draw in the batch", not the one actually
-    // under the cursor. faceDrawIndices maps the raycast's own faceIndex
-    // (which triangle of the merged, non-indexed geometry was hit) back to
-    // the specific draw that triangle came from.
     const faceDrawIndices = hit.object.userData.faceDrawIndices as Uint32Array | undefined;
     if (faceDrawIndices && hit.faceIndex !== undefined && hit.faceIndex !== null) {
       const owner = faceDrawIndices[hit.faceIndex];
@@ -4404,16 +3131,6 @@ export class SceneViewerApp {
     this.selectDrawAtPointer(event, index);
   }
 
-  /** Selects (or, for a shift/ctrl click, toggles) whichever draw is under
-   * the pointer - the actual "plain click" behavior, shared by the
-   * immediate case at the tail of handleSceneObjectPointer() (some tool
-   * OTHER than none is armed, e.g. select-landmark - `index` is passed in
-   * there, already computed) and the deferred case in
-   * handleLassoPointerUp() (a left-drag with nothing else armed that never
-   * crossed LASSO_DRAG_THRESHOLD, so it's treated as a click instead of a
-   * lasso - `index` is omitted there, since no raycast has happened yet
-   * for that gesture). No-op for a miss, or a hit object that's hidden by
-   * the size filter or manually hidden. */
   private selectDrawAtPointer(event: PointerEvent, index?: number | null): void {
     const resolvedIndex = index === undefined ? this.pickDrawAtPointer(event) : index;
     if (resolvedIndex === null || this.isObjectHidden(resolvedIndex) || this.manuallyHiddenIndices.has(resolvedIndex)) return;
@@ -4652,15 +3369,6 @@ export class SceneViewerApp {
     return shaded;
   }
 
-  /** One-time setup for the selection outline's render pass (see the
-   * outlineMaskScene/outlineQuadScene field doc comment for the overall
-   * approach and why it replaced the earlier mesh-geometry-based
-   * techniques). Builds the fullscreen quad and its mask-sampling shader,
-   * and registers the actual per-frame render work with the SceneManager
-   * so it runs every frame regardless of whether anything else in the app
-   * triggers a redraw (needed because the outline's on-screen position
-   * must track the camera continuously, not just at selection-change
-   * time). Called once, from the constructor. */
   private setupSelectionOutlinePass(): void {
     this.outlineMaskScene.add(this.outlineMaskGroup);
 
@@ -4678,16 +3386,6 @@ export class SceneViewerApp {
           gl_Position = vec4( position.xy, 0.0, 1.0 );
         }
       `,
-      // For every screen pixel NOT covered by the selection mask, checks a
-      // ring of sample points at radius uThicknessPixels around it - if
-      // any of those samples IS covered, this pixel is part of the outline
-      // ring (discard otherwise). This is a direct, angle- and
-      // topology-independent read of "how close is this pixel to the
-      // selection's silhouette", which is what makes it immune to the
-      // failure modes of pushing the mesh's own geometry outward: it
-      // doesn't care what the mesh's normals look like, how it's
-      // tessellated, or which way any given triangle happens to be
-      // facing - only the already-rasterized 2D shape of the mask matters.
       fragmentShader: `
         uniform sampler2D uMask;
         uniform vec2 uTexelSize;
@@ -4725,24 +3423,6 @@ export class SceneViewerApp {
     this.sceneManager.onAfterRender(() => this.renderSelectionOutlinePass());
   }
 
-  /** Rebuilds outlineMaskGroup's children from scratch to match the
-   * currently-selected, currently-rendered draws - called once per
-   * selection change from updateSelectionVisuals(), NOT every frame (unlike
-   * the actual outline render pass, which does run every frame - see
-   * renderSelectionOutlinePass()). Each selected draw becomes a plain white,
-   * double-sided, depth-untested mesh: color and shading don't matter here
-   * since this scene only ever gets sampled for "is this pixel covered at
-   * all", and depthTest:false/no other content in this scene means the
-   * mask always covers a selected draw's FULL silhouette, regardless of
-   * what's occluding it in the real scene - which is what makes the
-   * resulting outline visible through walls.
-   *
-   * Positions are added in the SAME local (pre-scale, pre-rotation) space
-   * as draw.geometryData.positions itself - outlineMaskGroup's own
-   * scale/rotation is what maps that into the real scene's space, and is
-   * kept in sync with contentGroup's on EVERY FRAME by
-   * renderSelectionOutlinePass(), not just here - see that method's doc
-   * comment for why a one-time sync isn't enough. */
   private rebuildSelectionOutlineMask(activeSelected: number[]): void {
     for (const child of [...this.outlineMaskGroup.children]) {
       this.outlineMaskGroup.remove(child);
@@ -4770,31 +3450,6 @@ export class SceneViewerApp {
     }
   }
 
-  /** Runs every frame (registered as a SceneManager afterRender hook - see
-   * setupSelectionOutlinePass()): re-renders the selection mask from the
-   * current camera into outlineMaskTarget, then draws the fullscreen ring
-   * shader on top of the already-rendered main scene. A no-op cost-wise
-   * whenever nothing is selected (returns immediately).
-   *
-   * Runs unconditionally every frame rather than only on selection change
-   * because the mask has to be re-projected from whatever the camera is
-   * doing right now - an outline computed once and left as static mesh
-   * geometry (the old approach) can only ever be exactly correct for one
-   * camera angle at a time.
-   *
-   * Also re-syncs outlineMaskGroup's own scale/rotation from contentGroup
-   * every frame, for the same reason: contentGroup's transform can change
-   * (recalculating transform correction, switching "Up axis" - including
-   * to/from the ground-plane tool's "Manual" - or completing the
-   * ground-plane tool itself) at any time OTHER than a selection change,
-   * and none of those paths call rebuildSelectionOutlineMask(). Syncing
-   * only there (as this used to) meant the mask could silently render with
-   * a stale rotation and drift out of registration with the actual
-   * (already-rotated) mesh - syncing it here instead means the outline can
-   * never go stale regardless of which of those paths caused the change.
-   * (The ground-plane tool's own dot/cross markers don't need this fix -
-   * they're ordinary children of contentGroup itself, so they already pick
-   * up any transform change for free through the normal scene graph.) */
   private renderSelectionOutlinePass(): void {
     if (!this.outlineQuadMaterial || this.outlineMaskGroup.children.length === 0) return;
 
@@ -4834,10 +3489,6 @@ export class SceneViewerApp {
     renderer.autoClear = true;
     renderer.render(this.outlineMaskScene, this.sceneManager.activeCamera);
 
-    // autoClear:false here is essential - the main scene was already drawn
-    // to this same target (the canvas) by SceneManager just before this
-    // hook ran, and a normal render() call defaults to clearing its target
-    // first, which would erase it.
     renderer.setRenderTarget(previousTarget);
     renderer.setClearColor(previousClearColor, previousClearAlpha);
     renderer.autoClear = false;
@@ -4845,13 +3496,6 @@ export class SceneViewerApp {
     renderer.autoClear = previousAutoClear;
   }
 
-  /** Adds one dot-marker pair (a black 1px-wider outline dot underneath, a
-   * colored 3px dot on top) at each given xyz position. Both use
-   * depthTest:false so they stay visible through occluding geometry, and
-   * sizeAttenuation:false so the pixel sizes are literal screen-space
-   * pixels rather than shrinking with distance. The pair shares one
-   * BufferGeometry (see clearSelectionVisuals() for the matching
-   * dispose-once handling). */
   private addDotPair(group: THREE.Group, positions: number[], fillColor: number): void {
     if (positions.length === 0) return;
     const geometry = new THREE.BufferGeometry();
@@ -4883,9 +3527,7 @@ export class SceneViewerApp {
     this.selectionVisuals.push(outline, fill);
   }
 
-  /** Refreshes the object list's DOM to reflect current selection/hidden
-   * state - called after any selection change and after rebuildVisibleScene
-   * (since the hidden set can change independently, via the size filter). */
+
   private renderObjectListState(): void {
     for (const item of this.objectList.querySelectorAll<HTMLElement>(".draw-item")) {
       const index = Number(item.dataset.index);
@@ -4955,11 +3597,6 @@ export class SceneViewerApp {
         return;
       }
 
-      // Either the dedicated "selection" button, or a plain click anywhere
-      // else on the row - both drive selection. A plain (unmodified) click
-      // on the selection button is treated as a ctrl-click on the row; an
-      // actually-modified click on it (ctrl or shift) behaves exactly like
-      // that same modifier on the row itself.
       const isSelectionButton = action === "selection";
       const shiftKey = event.shiftKey;
       const ctrlKey = event.ctrlKey || event.metaKey || (isSelectionButton && !shiftKey);
