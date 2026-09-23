@@ -17,7 +17,7 @@ import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from
 import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
 import { TextureManager } from "./scene/texture-manager";
-import type { DrawEntry } from "./types";
+import type { DrawEntry, ParsedOBJ } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
@@ -46,6 +46,17 @@ interface LoadedDraw {
   material: THREE.Material;
   geometryData: GeometryArrays;
   previewGeometryData: GeometryArrays;
+  /** The preview/non-posed mesh exactly as parsed, BEFORE
+   * remapObjOrientation() was applied to produce previewGeometryData -
+   * null whenever there's no separate preview mesh at all (previewRel ===
+   * meshRel, so previewGeometryData just aliases geometryData - see
+   * loadDraw()), since there's nothing to remap in that case. Kept around
+   * so the axis-mapper submenu (unlike the import screen's own mapper,
+   * which only ever affects geometry not yet loaded) can re-derive
+   * previewGeometryData from scratch whenever the input-geometry
+   * orientation changes AFTER a scene is already loaded, without
+   * re-reading or re-parsing any files - see applyAxisMappingChange(). */
+  rawPreviewObj: ParsedOBJ | null;
   bounds: Bounds;
   diagonal: number;
   meshPath: string | null;
@@ -557,7 +568,8 @@ export class SceneViewerApp {
     // setup submenu: axis mapper
     {
       this.elements.toolsMenu.axisMapperSubmenu.axisMapper.addEventListener("axis-mapping-changed", () => {
-        // TODO: save axis mapping and apply changes to scene
+        this.appConfig.saveConfig();
+        this.applyAxisMappingChange();
       });
     }
   }
@@ -855,6 +867,7 @@ export class SceneViewerApp {
     const { key, material } = await this.resolveMaterial(objPath, obj.mtllib, obj.usemtl);
 
     let previewGeometryData = geometryData;
+    let rawPreviewObj: ParsedOBJ | null = null;
     if (previewRel && previewRel !== meshRel) {
       const previewPath = joinPath(passDir, previewRel);
       const previewText = await this.vfs.readText(previewPath);
@@ -872,6 +885,10 @@ export class SceneViewerApp {
           this.appConfig.config.importOptions.inputGeometryOrientation,
         );
         previewGeometryData = objToGeometryArrays(remappedPreviewObj);
+        // Kept unremapped (see rawPreviewObj's own doc comment) so the
+        // main-screen axis-mapper submenu can re-derive previewGeometryData
+        // later without re-reading this file.
+        rawPreviewObj = previewObj;
       }
     }
 
@@ -881,6 +898,7 @@ export class SceneViewerApp {
       material,
       geometryData,
       previewGeometryData,
+      rawPreviewObj,
       bounds,
       diagonal: boundsDiagonal(bounds),
       meshPath: meshRel,
@@ -2674,6 +2692,89 @@ export class SceneViewerApp {
     // btn.classList.toggle("hidden", !hasDistortion);
     // btn.classList.toggle("active", this.showingRawImport);
     btn.textContent = this.showingRawImport ? "Enable distortion correction" : "Disable distortion correction";
+  }
+
+  /** Handles the axis-mapper submenu's "axis-mapping-changed" event - the
+   * main-screen counterpart to the import screen's own input-axis-mapper
+   * (cmp.capture-importer.ts), which only ever affects geometry that
+   * hasn't been loaded/parsed yet. Here a scene may already be loaded, so
+   * the new orientation has to be back-applied to every already-parsed
+   * draw: re-derives previewGeometryData from each draw's rawPreviewObj
+   * (see its own doc comment) using the config's now-updated
+   * inputGeometryOrientation, entirely from the already-parsed data - no
+   * file is re-read. Draws with no separate preview mesh (rawPreviewObj
+   * === null - previewGeometryData just aliases geometryData, which is
+   * assumed already in the app's frame, see loadDraw()) are unaffected,
+   * same as on the import screen.
+   *
+   * previewGeometryData is never rendered in the main viewport directly
+   * (rebuildVisibleScene() always uses draw.geometryData - the POSED
+   * mesh), so two more things are needed for the change to actually be
+   * visible, not just baked into data nothing currently reads: */
+  private applyAxisMappingChange(): void {
+    if (this.loadedDraws.length === 0) return;
+
+    const orientation = this.appConfig.config.importOptions.inputGeometryOrientation;
+    let remappedAny = false;
+    for (const draw of this.loadedDraws) {
+      if (!draw.rawPreviewObj) continue;
+      draw.previewGeometryData = objToGeometryArrays(remapObjOrientation(draw.rawPreviewObj, orientation));
+      remappedAny = true;
+    }
+    if (!remappedAny) return;
+
+    // 1) The MAIN SCENE: previewGeometryData is the fit target distortion
+    // correction is calculated against, so a previously-applied fit is
+    // now stale w.r.t. the axis convention it was computed under -
+    // refitting/reapplying it is what actually moves draw.geometryData
+    // (rebuildVisibleScene()'s own source), via
+    // recalculateTransformCorrection() -> applyDistortionToScene(), which
+    // already calls rebuildVisibleScene() itself once it does.
+    // lastDistortionSourceIndex - whichever object's fit was actually
+    // broadcast last time - is used ahead of scaleReferenceIndex because
+    // the common case (autoCorrectRenderDocDistortion()'s own consensus
+    // pick, run automatically on reconstruct) never touches
+    // scaleReferenceIndex at all; that's only set by the separate,
+    // optional "is ref" marking. Skipped entirely while the raw/
+    // uncorrected import is being shown on purpose (toggleRawImport()) -
+    // recalculateTransformCorrection() would silently flip back to the
+    // corrected view as a side effect (see applyDistortionToScene()),
+    // which an axis-mapping tweak shouldn't do on its own; toggling raw
+    // import back off afterwards re-applies the (now up to date, from the
+    // loop above) fit's own already-recorded matrix, not a stale one - see
+    // toggleRawImport()'s own doc comment. No-op either way when nothing
+    // has been fit yet (both indices null) - there's no correction to go
+    // stale.
+    const referenceIndex = this.lastDistortionSourceIndex ?? this.scaleReferenceIndex;
+    if (referenceIndex !== null && !this.showingRawImport) {
+      this.recalculateTransformCorrection(referenceIndex);
+    }
+
+    // 2) The PREVIEW PANEL: renderResourcePanel() early-outs on an
+    // unchanged selection/tab "signature" - fine for its usual callers
+    // (every plain selection tweak, most of which don't touch geometry at
+    // all), but wrong here, since the geometry just changed under the
+    // SAME selection. Force it to rebuild from scratch so the currently
+    // selected object's preview (and, on the "All selected" tab, every
+    // other selected thumbnail) picks up the refreshed
+    // previewGeometryData/geometryData immediately, not only after the
+    // next selection change happens to bust the signature. No-op when
+    // nothing's selected/the panel isn't open (see refreshResourcePanel()).
+    this.refreshResourcePanel();
+  }
+
+  /** Forces the resource panel to rebuild from scratch for whatever it's
+   * currently tracking, bypassing renderResourcePanel()'s own signature
+   * early-out (keyed on selection/tab, not content) - for callers that
+   * mutate a loaded draw's geometry in place without changing the
+   * selection, e.g. applyAxisMappingChange(). No-op when nothing's
+   * selected or the panel is hidden
+   * (Config.sessionConfig.resourcesPanel.visible is off), matching
+   * syncResourcePanelVisibility()'s own behavior. */
+  private refreshResourcePanel(): void {
+    if (this.resourcePanelIndex === null) return;
+    this.removeResourcePanel();
+    this.syncResourcePanelVisibility();
   }
 
   /** Fits the matrix-based transform-correction from a reference object's
