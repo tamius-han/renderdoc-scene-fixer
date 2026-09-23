@@ -1,52 +1,75 @@
 # Renderdoc Scene Fixer
 
-A browser-based app that takes output of [renderdoc scene exporter](https://github.com/tamius-han/renderdoc-scene-exporter) addon, displays it in a browser, and gives you a few quick fix options.
+A browser-based app used to fix 3D models exported with RenderDoc (using [renderdoc scene exporter](https://github.com/tamius-han/renderdoc-scene-exporter) addon) or Intel GPA. 
+It is a successor to [Intel GPA squish calculator](https://github.com/tamius-han/intel-gpa-squish-calculator).
 
-## Setup
+**[Click here](https://tamius-han.github.io/renderdoc-scene-fixer/) to open this app.**
+
+When exporting output geometry from Intel GPA or RenderDoc, you will notice that models appear squished in the pose-preserving output geometry. This is less than ideal if
+you want to 3D print your characters, and it's also kinda annoying to fix by hand — hence this.
+
+> This tool has been developed with significant assistance of LLMs. 
+> If you're an AI vegan who prefers not to use tools authored by AI if possible, your alternatives are:
+> * export your models with Intel GPA and [fix everything by hand](https://stuff.tamius.net/sacred-texts/2024/10/25/old_how-to-print-your-guild-wars-2-character-or-any-game-really/). 
+> * fork over some money and try your luck with NinjaRipper
+> Do note that Intel dropped their Intel GPA suite. In the future, you might have to acquire Intel GPA from the Internet Archive.
+
+In addition to fixing the squish, this app can also:
+
+* splits the object by loose parts (which ends up saving two clicks in blender)
+* fixes basic (but not all) issues that meshes exported from games have (and that tend to only be issues when you try to 3D print things)
+* scale your object to approximately desired size
+
+When using RenderDoc and RenderDoc Scene Exporter, this app will also apply textures to meshes. In this case, exported models will also
+include model textures, which can then be used for reverse normal baking in order to add additional detail in Blender.
+
+## Usage
+
+The app is hosted here: https://tamius-han.github.io/renderdoc-scene-fixer/
+
+If using Renderdoc and RenderDoc Scene Exporter, export the scene with the extension. Extension exports scene into a folder.
+After export finishes, drag the folder onto the appropriate dropzone. 
+
+If using intel GPA, you need to pick a landmark. Landmark is a static object with unchanging shape. Source geometry of your landmark
+should look the way this object looks in game as you rotate it in the preview panel. You need to export both source geometry and output
+geometry of your landmark. After you've exported your landmark, select meshes that make up your character (or any other object you wish to export)
+and export output geometry.
+
+Then, open this app (see link above) and drag landmark source geometry, landmark output geometry, and your character output geometry into 
+their respective fields on the import page. If you name your files correctly (`landmakr-source.obj`, `landmark-output.obj` and `scene.obj`),
+you can drag in all three files at once.
+
+After files have been imported, render passes and import options will appear. If there's more than one render pass, select the appropriate pass. Usually, that's forward pass with most draw calls. For modern games, theory says you should also look at g-buffer passes, but in practice I haven't tested RenderDoc scene exporter with modern games (other than Styx 3, which didnt work with my RenderDoc addon).
+
+Import options menu is pretty self-explanatory. Set stuff that you want to set, then click 'reconstruct scene'. 
+
+Once scene is reconstructed, you can inspect the scene. Movement is blender-like: middle mouse to rotate, shift+middle mouse to move. See 'control options' (in app) for details.
+Select the meshes that you want to export, or hide the meshes that you don't want to export. Click 'Fix & export'. This will present you with another fairly self-explanatory 
+dialog. Tick the options you want. In the export preview panel, check that everything you expect to be in your export is actually there and looks the way you expect it to look.
+Hit fix & export.
+
+
+## Local dev
+
+Perform the usual:
 
 ```
 npm install
 npm run dev
 ```
 
-Then open the printed local URL. `npm run build` produces a static `dist/`
-folder you can host anywhere (it's a fully client-side app - nothing is
-uploaded, everything happens in the browser from the files you drop in).
-
-## Project layout
+And 
 
 ```
-index.html              Vite entry point / static DOM shell
-src/
-  main.ts               Bootstraps the app
-  app.ts                UI wiring + the reconstruction pipeline
-  types.ts              Shared types for manifest/OBJ/MTL data
-  fileSystem.ts          Drag-and-drop / folder-picker file collection, path helpers
-  manifest.ts            Parses the exporter's manifest.json files
-  parsers/
-    obj.ts               OBJ parser (matches the exporter's own writer)
-    mtl.ts               MTL parser (matches the exporter's own writer)
-  scene/
-    textureManager.ts     Texture loading, downscaling, caching
-    meshBuilder.ts         OBJ -> geometry, and merging by material
-    sceneManager.ts        Renderer/camera/orbit-controls/context-loss handling
-  style.css
+npm run build
 ```
+
+to generate a deployable package (which ends in `dist`).
+
+
 
 ## Design notes / known limitations
 
-- **Posed vs. bind-pose meshes.** Bind-pose (object-space) meshes have no
-  world transform applied at all - loading only those piles every mesh up
-  near the local origin rather than laying out a scene. "Use posed meshes"
-  is on by default for this reason. The UI shows a warning whenever it's
-  off, or the export doesn't contain posed data.
-- **Posed meshes are camera-relative, not world-space.** They're
-  reconstructed from each draw's post-vertex-shader clip-space output,
-  which is relative to whatever camera was active *for that pass*. A
-  shadow pass (light's view) and the main pass (player's view) generally
-  use different cameras, so their posed geometry won't necessarily align
-  spatially if you select both at once - the UI warns about this when more
-  than one pass is selected.
 - **Large-capture handling.** Two things specifically address scenes with
   thousands of draws (this used to crash / turn the canvas black):
   - `textureManager.ts` downscales every texture to a configurable max
@@ -59,15 +82,6 @@ src/
   - `sceneManager.ts` also listens for `webglcontextlost` and reports it
     via the status bar instead of silently going black, in case a capture
     is still too large for the available GPU after the above.
-- **Material guessing happens at export time, not here.** Which texture is
-  "the diffuse map" for a given mesh was already decided by the RenderDoc
-  extension when it wrote the `.mtl` file; this viewer just reads whatever
-  `map_Kd` it finds.
-- **Camera controls** are a small hand-rolled orbit implementation (drag to
-  rotate, scroll to zoom) rather than Three.js's `OrbitControls`, since
-  that's an examples/addon module not bundled with the core `three` npm
-  package - pull it in yourself (`three/examples/jsm/controls/OrbitControls.js`)
-  if you want to replace it.
 - **No instancing.** If a capture has genuinely identical geometry drawn
   many times (e.g. many identical trees), each draw is still its own copy
   of vertex data inside the merged-by-material mesh - there's no detection
