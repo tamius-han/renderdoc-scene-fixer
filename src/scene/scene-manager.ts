@@ -107,6 +107,15 @@ export class SceneManager {
   // offset) and orientation (camera.quaternion) fully independent, so
   // repivoting can never, by construction, touch orientation.
   private offset = new THREE.Vector3(0, 0, 10);
+  /** Snapshot of (target, offset) taken the moment placeCameraForImport()
+   * last placed the camera - null until an import has actually run. Lets
+   * resetToInitialView() ("Reset camera") restore EXACTLY that placement,
+   * as opposed to frameOnScene() ("Frame scene"), which recomputes a fresh
+   * framing from whatever's CURRENTLY visible and can therefore differ
+   * from the original import placement once visibility/filtering has
+   * changed. */
+  private initialTarget: THREE.Vector3 | null = null;
+  private initialOffset: THREE.Vector3 | null = null;
   /** Non-null while a numpad view snap (see setAxisView()/
    * viewOppositeDirection()) is animating - advanced each frame in
    * animate(). Any manual camera input (drag-rotate/pan, wheel zoom, fly
@@ -786,7 +795,10 @@ export class SceneManager {
   /** Resets to a fixed default viewing angle framing the whole scene - a
    * deliberate full view reset (unlike repivotAtMouse), so unconditionally
    * reorienting via lookAt() here is intentional and correct, not a case of
-   * the snap-to-pivot bug this class otherwise avoids. */
+   * the snap-to-pivot bug this class otherwise avoids. The "Frame scene"
+   * button's own behavior - see resetToInitialView() ("Reset camera") for
+   * the sibling operation that restores the original import placement
+   * instead of recomputing a fresh one from the current scene bounds. */
   frameOnScene(): void {
     const box = new THREE.Box3().setFromObject(this.scene);
     if (box.isEmpty()) return;
@@ -881,6 +893,11 @@ export class SceneManager {
     this.camera.up.set(0, 1, 0);
     this.updateCamera();
     this.camera.lookAt(this.target);
+
+    // Snapshot for resetToInitialView() ("Reset camera") to restore later -
+    // see initialTarget/initialOffset's own doc comment.
+    this.initialTarget = this.target.clone();
+    this.initialOffset = this.offset.clone();
   }
 
   /** Shifts BOTH `target` and the camera's position by the same `delta`,
@@ -898,6 +915,22 @@ export class SceneManager {
   translateOrbitCenter(delta: THREE.Vector3): void {
     this.target.add(delta);
     this.updateCamera();
+  }
+
+  /** Restores the camera to exactly where placeCameraForImport() last put
+   * it - "Reset camera"'s own distinct behavior, as opposed to "Frame
+   * scene" (frameOnScene()), which recomputes a fresh framing from
+   * whatever's CURRENTLY visible instead of reproducing the original
+   * placement. No-op before anything's been imported (initialTarget/
+   * initialOffset are only ever set by placeCameraForImport()). */
+  resetToInitialView(): void {
+    if (!this.initialTarget || !this.initialOffset) return;
+    this.viewTransition = null;
+    this.target.copy(this.initialTarget);
+    this.offset.copy(this.initialOffset);
+    this.camera.up.set(0, 1, 0);
+    this.updateCamera();
+    this.camera.lookAt(this.target);
   }
 
   clear(): void {
