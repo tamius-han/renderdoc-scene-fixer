@@ -296,6 +296,7 @@ export class SceneViewerApp {
 
     toolsMenu: {
       selectVolumeBtn: this.el("select-volume-btn"),
+      highlightCorrectionSourceBtn: this.el<HTMLButtonElement>("highlight-correction-source-btn"),
       fixDistortionBtn: this.el("fix-distortion-btn"),
       toggleRawImportBtn: this.el("toggle-raw-import-btn"),
       selectGroundPlaneBtn: this.el("select-ground-plane-btn"),
@@ -349,8 +350,6 @@ export class SceneViewerApp {
   };
 
 
-  private recalculateCorrectionBtn = this.el<HTMLButtonElement>("recalculate-correction-btn");
-  private highlightCorrectionSourceBtn = this.el<HTMLButtonElement>("highlight-correction-source-btn");
   private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private recenterCamBtn = this.el("recenter-camera-btn");
@@ -580,9 +579,7 @@ export class SceneViewerApp {
       this.reconstructScene(e.detail);
     });
 
-
-    this.recalculateCorrectionBtn.addEventListener("click", () => this.recalculateTransformCorrection());
-    this.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
+    this.elements.toolsMenu.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
     this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
     // Gizmo drag tracking - window-level, not canvas-level, so an
     // in-progress drag keeps updating even if the cursor leaves the canvas
@@ -2466,7 +2463,7 @@ export class SceneViewerApp {
    * applyDistortionToScene() and whenever a fresh reconstructScene()
    * clears it. */
   private updateHighlightCorrectionSourceBtn(): void {
-    this.highlightCorrectionSourceBtn.disabled = this.lastDistortionSourceIndex === null;
+    this.elements.toolsMenu.highlightCorrectionSourceBtn.disabled = this.lastDistortionSourceIndex === null;
   }
 
   /** The "Highlight correction source" button: selects (and scrolls the
@@ -2494,55 +2491,16 @@ export class SceneViewerApp {
     this.scrollDrawIntoView(index);
   }
 
-  /** Fits a distortion from every eligible loaded draw, picks the SINGLE
-   * most likely one, and broadcasts it to the whole scene via
-   * applyDistortionToScene() - run once for a plain RenderDoc import (see
-   * reconstructScene(); IntelGPA imports use their own landmark-derived
-   * distortion instead - also broadcast the same way) instead of requiring
-   * the user to mark a scale-reference object and click "Fix distortion"
-   * (recalculateTransformCorrection()).
-   *
-   * Not every posed/non-posed pair is a good CANDIDATE for computing the
-   * distortion FROM, even though every draw still receives it once it's
-   * chosen. isGoodDistortionFitCandidate() (calculator.ts) is only used
-   * for its relativeFitError half here (maxScaleAnisotropy: Infinity,
-   * i.e. that check is disabled) - a rigged/skinned mesh's posed shape can
-   * genuinely differ from its bind pose by more than any single 3x3
-   * matrix can express (different bones move independently), which is a
-   * real reason to reject it as a candidate: high relativeFitError.
-   * Such a mesh can't tell us what the distortion IS, but it's still
-   * assumed to be AFFECTED by the same capture-wide distortion as
-   * everything else, so it still gets the chosen matrix applied at the
-   * end. scaleAnisotropy, by contrast, is NOT filtered on here: for THIS
-   * capture pipeline, the distortion being corrected typically presents
-   * AS an anisotropic squish - posed meshes routinely come out stretched
-   * relative to non-posed on some axes more than others even with no
-   * deliberate aspect-ratio authoring involved - so excluding a
-   * high-anisotropy fit would throw out the very distortion this whole
-   * function exists to detect, not just an intentional design choice (see
-   * scaleAnisotropy's own doc comment in calculator.ts for the general
-   * case that filter is meant for elsewhere).
-   *
-   * Among the remaining candidates, findDistortionConsensus() (calculator.ts)
-   * groups them by approximate agreement: if several independently-fitted
-   * objects land on close to the same matrix, that's much stronger evidence
-   * of the true, systemic distortion than any one of them alone. The single
-   * distortion actually broadcast is the member of the LARGEST such group
-   * with the lowest relativeFitError - i.e. the cleanest fit among however
-   * many objects most agree with each other.
-   *
-   * Broadcasts via applyDistortionToScene() exactly like the manual/
-   * IntelGPA flows: posedToNonPosedInPlace (shape only) baked per-draw,
-   * plus distortion.distortionOrientation (the fit's rotation ALONE)
-   * applied once to the whole scene - see that method's doc comment for
-   * why rotation is handled as a separate, whole-scene step rather than
-   * baked into each draw individually. Even with the consensus-picking
-   * above, the winning object's own fit can still turn out to be a poor
-   * representative for the scene's true orientation (e.g. it's genuinely
-   * mounted/placed at an angle in the world) without that being obvious
-   * from the corrected shape alone - see highlightDistortionSource(),
-   * which is exactly for checking that by eye. */
+
+  /**
+   * Calculates distortion matrices for all draw calls and finds the most
+   * likely transform matrix for the scene. It is assumed that the most
+   * common transform matrix is the correct one.
+   */
   private autoCorrectRenderDocDistortion(): void {
+    const logLine = this.elements.loadingScreen.log('Calculating object distortions ...');
+    const updateLogLineEvery = 7;
+
     let skippedHighResidual = 0;
     let skippedNoPair = 0;
     let failed = 0;
@@ -2564,28 +2522,26 @@ export class SceneViewerApp {
       } catch (e) {
         failed++;
         console.warn(`[reconstruct] auto distortion fit failed for eid${draw.draw.eventId}`, e);
+
+        if (index % updateLogLineEvery === 0) {
+          logLine.updateLogItem(`Calculating object distortions ... (${index}/${this.loadedDraws.length})`, {current: index, total: this.loadedDraws.length });
+        }
         continue;
       }
 
-      // See this method's own doc comment for why maxScaleAnisotropy is
-      // disabled here - only a poor relativeFitError disqualifies a
-      // candidate for this capture pipeline.
       if (!isGoodDistortionFitCandidate(distortion, { maxScaleAnisotropy: Infinity })) {
         skippedHighResidual++;
+
+        if (index % updateLogLineEvery === 0) {
+          logLine.updateLogItem(`Calculating object distortions ... (${index}/${this.loadedDraws.length})`, {current: index, total: this.loadedDraws.length });
+        }
         continue;
       }
 
-      // Cluster on the SHAPE-ONLY correction (S), not posedToNonPosedOrientedInPlace
-      // (R*S) - R (distortion.distortionOrientation) is expected to differ from
-      // object to object (each object's own bind-pose forward/right convention
-      // vs. its arbitrary placement yaw - see distortionOrientation's doc
-      // comment in calculator.ts), so folding it into the consensus comparison
-      // makes genuinely-agreeing objects look like they disagree, breaking
-      // consensus down to near-singleton clusters. S is the part that's
-      // actually expected to be consistent across unrelated objects (the real,
-      // systemic capture/export distortion), so that's what agreement should
-      // be measured on.
       candidates.push({ index, draw, distortion, linear: new THREE.Matrix3().setFromMatrix4(distortion.posedToNonPosedInPlace) });
+      if (index % updateLogLineEvery === 0) {
+        logLine.updateLogItem(`Calculating object distortions ... (${index}/${this.loadedDraws.length})`, {current: index, total: this.loadedDraws.length });
+      }
     }
 
     console.log("[reconstruct] RenderDoc distortion candidates", {
@@ -2601,10 +2557,15 @@ export class SceneViewerApp {
       return;
     }
 
+    const logLine2 = this.elements.loadingScreen.log('Sorting distortion candidates [ .. ]');
+
     const { clusterOf, largestCluster, largestClusterSize } = findDistortionConsensus(
       candidates.map((candidate) => candidate.linear),
     );
 
+    logLine2.updateLogItem(`Sorting distortion candidates [ ok ]`);
+
+    const ll3 = this.elements.loadingScreen.log('Selecting the best distortion candidate [ .. ]');
     let winnerIndex = -1;
     for (let i = 0; i < candidates.length; i++) {
       if (clusterOf[i] !== largestCluster) continue;
@@ -2613,6 +2574,7 @@ export class SceneViewerApp {
       }
     }
     const winner = candidates[winnerIndex];
+    ll3.updateLogItem(`Selecting the best distortion candidate [ ok ]`);
 
     console.log("[reconstruct] selected RenderDoc distortion", {
       fromEventId: winner.draw.draw.eventId,

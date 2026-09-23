@@ -380,45 +380,15 @@ export function calculateDistortionMatrix(scaleReferenceObject: {
   return analyzeTransformMatrix(nonPosedVertices, posedVertices);
 }
 
-/** Fits the 3x3 linear map L (plus translation) that best explains
- * posed_i ~= L * nonPosed_i + t for every corresponding vertex pair, via
- * ordinary least squares - the standard multivariate linear regression
- * solution L = Cov(posed, nonPosed) * Cov(nonPosed, nonPosed)^-1, computed
- * about each side's own centroid to isolate the translation (t) from the
- * linear part (L). Unlike Kabsch, L is not constrained to be orthogonal, so
- * it can represent shear and anisotropic scale directly instead of only
- * rotation + a separate, cruder axis-scale estimate.
+/**
+ * Analyzes the affine transformation that maps non-posed vertices to posed vertices
+ * and tries to determine matrix that transformed mesh made from nonPosedVertices
+ * into mesh made out of posedVertices.
  *
- * For posedToNonPosedInPlace, L gets split further via polar decomposition
- * (L = R * S, R a rotation, S a symmetric stretch/shear) and only S is
- * used - R (the same rotation exposed on its own as distortionOrientation
- * below) applies to an object's placement, not its shape, and app.ts now
- * applies it once, to the whole scene, rather than baking a possibly-
- * different R into each individual draw (see distortionOrientation's own
- * doc comment for why: most placed objects share the scene's up direction
- * but not a single global forward/right, so a per-object R generally
- * doesn't mean "upright" for anything other than the one object it was
- * fit from).
- *
- * S (built from SVD singular values, which are always >= 0) can NEVER
- * itself represent a reflection - that's a property of polar
- * decomposition, not a design choice: given M = R*S, ANY genuine
- * chirality difference between posed and non-posed necessarily shows up
- * in R (improper, det<0), never in S. An earlier version of this function
- * tried to introduce a deliberate flip into S anyway (negating one row
- * and its matching column) to sidestep exactly this - but negating a row
- * and its own column cancels out (two sign flips), leaving the
- * determinant, and therefore the chirality, completely unchanged; that
- * "fix" was a no-op. Since S can't carry it and distortionOrientation
- * (below) is a THREE.Quaternion, which can't represent one either, a
- * genuine mismatch is instead factored out explicitly: R = Rproper * F for
- * a fixed reflection F (Z-negation - the conventional right<->left handed
- * conversion axis, e.g. the common DirectX/Unity(LH) <-> OpenGL/
- * three.js(RH) convention), giving stretch := F * S (now genuinely
- * improper - callers baking this into vertex data must flip triangle
- * winding to compensate, see app.ts's applyMatrixToDraw()) and a rotation
- * fit against THAT corrected shape, which - chirality now resolved -
- * comes out properly rotation-only. */
+ * @param nonPosedVertices
+ * @param posedVertices
+ * @returns
+ */
 function analyzeTransformMatrix(
   nonPosedVertices: THREE.Vector3[],
   posedVertices: THREE.Vector3[],
@@ -427,12 +397,8 @@ function analyzeTransformMatrix(
     throw new Error("calculateDistortionMatrix: empty geometry input");
   }
   if (nonPosedVertices.length !== posedVertices.length) {
-    // The fit assumes vertex i of one array corresponds to vertex i of the
-    // other (same mesh, same vertex order, different pose) - a mismatched
-    // count means that assumption doesn't hold and the fit would silently
-    // pair up unrelated vertices for the shorter array's length.
     throw new Error(
-      "calculateDistortionMatrix: posed and non-posed vertex counts must match (vertex correspondence is assumed)",
+      "calculateDistortionMatrix: posed and non-posed vertex counts must match",
     );
   }
 
@@ -442,18 +408,11 @@ function analyzeTransformMatrix(
   const nonPosedCentered = nonPosedVertices.map((v) => v.clone().sub(nonPosedCentroid));
   const posedCentered = posedVertices.map((v) => v.clone().sub(posedCentroid));
 
-  // computeCovariance(a, b)[r][c] = sum_i a_i[r] * b_i[c], i.e. A^T * B for
-  // A/B with rows a_i/b_i - see its doc comment above. The least-squares
-  // linear map minimizing sum_i || posed_i - L * nonPosed_i ||^2 is
-  // L = (Posed^T NonPosed) * (NonPosed^T NonPosed)^-1.
   const nonPosedNonPosedCov = computeCovariance(nonPosedCentered, nonPosedCentered);
   const posedNonPosedCov = computeCovariance(posedCentered, nonPosedCentered);
 
   const nonPosedNonPosedCovInv = nonPosedNonPosedCov.clone().invert();
   if (isZeroMatrix3(nonPosedNonPosedCovInv)) {
-    // THREE.Matrix3.invert() silently zeroes out a singular matrix rather
-    // than throwing - this happens if the non-posed vertices are coplanar,
-    // collinear, or coincident, which leaves no unique 3x3 map to solve for.
     throw new Error(
       "calculateDistortionMatrix: non-posed geometry is degenerate (coplanar/collinear/coincident vertices) - can't fit a unique 3x3 transform",
     );
@@ -470,50 +429,21 @@ function analyzeTransformMatrix(
   const nonPosedToPosed = affineFromLinearAndTranslation(nonPosedToPosedLinear, nonPosedCentroid, posedCentroid);
   const posedToNonPosed = affineFromLinearAndTranslation(posedToNonPosedLinear, posedCentroid, nonPosedCentroid);
 
-  // Polar-decompose the posed-facing linear map: u/v/singularValues come
-  // from an SVD of posedToNonPosedLinear (posedToNonPosedLinear =
-  // U * Sigma * V^T); naiveRotation = U*V^T is the fit's own rotation part
-  // (CAN be improper - this is the one place that's actually checked,
-  // unforced), S = V*Sigma*V^T the stretch part (always proper - see this
-  // function's doc comment).
   const { u, singularValues, v } = svd3x3(posedToNonPosedLinear);
   const naiveRotation = u.clone().multiply(v.clone().transpose());
   const handednessMismatchDetected = naiveRotation.determinant() < 0;
 
-  // A genuine mismatch gets factored out of naiveRotation and into stretch
-  // instead, via a fixed reflection F (mirrorZ below): stretch := F*S,
-  // which is genuinely improper now (unlike the old, cancelling
-  // row+column negation) - see this function's doc comment for the
-  // algebra. Otherwise stretch is just S, as before.
   const rawStretch = buildDiagonalConjugate(v, singularValues);
   const stretch = handednessMismatchDetected ? mirrorZ.clone().multiply(rawStretch) : rawStretch;
 
   const posedToNonPosedInPlace = affineFromLinearAndTranslation(stretch, posedCentroid, posedCentroid);
 
-  // Fit the rotation SEPARATELY from shape correction, rather than using
-  // naiveRotation directly, for two independent reasons: (1) fitting
-  // AFTER shape correction - the same order these corrections are
-  // actually applied in, see applyDistortionToScene() - asks the more
-  // relevant question ("once shape/chirality are already fixed, what's
-  // the best RIGID alignment of THAT to non-posed?") and is more reliable
-  // against real, noisy capture data than whatever rotation happens to
-  // fall out of the one joint affine fit; (2) once stretch has already
-  // resolved a genuine chirality mismatch (above), correctedPosedCentered
-  // below shares non-posed's chirality, so THIS fit is expected to be
-  // genuinely proper - solveOptimalRotation()'s built-in proper-rotation
-  // guarantee is no longer discarding real reflection info the way it
-  // would have if applied directly to naiveRotation's job.
   const correctedPosedCentered = posedCentered.map((p) => p.clone().applyMatrix3(stretch));
   const orientationRotation = solveOptimalRotation(computeCovariance(correctedPosedCentered, nonPosedCentered));
   const orientedLinear = orientationRotation.clone().multiply(stretch);
   const posedToNonPosedOrientedInPlace = affineFromLinearAndTranslation(orientedLinear, posedCentroid, posedCentroid);
   const distortionOrientation = matrix3ToQuaternion(orientationRotation);
 
-  // How well a single affine map actually explains posed from non-posed -
-  // see relativeFitError's own doc comment. Measured against
-  // nonPosedToPosed (every non-posed vertex mapped forward) rather than
-  // posedToNonPosed, purely so the comparison is in "posed space" against
-  // the untouched posedVertices array already on hand.
   let sumSquaredResidual = 0;
   for (let i = 0; i < posedVertices.length; i++) {
     const predicted = nonPosedVertices[i].clone().applyMatrix4(nonPosedToPosed);
@@ -523,30 +453,22 @@ function analyzeTransformMatrix(
   const posedDiagonal = new THREE.Box3().setFromPoints(posedVertices).getSize(new THREE.Vector3()).length();
   const relativeFitError = posedDiagonal > 0 ? rmsResidual / posedDiagonal : 0;
 
-  // How non-uniform the fit's own correction is - see scaleAnisotropy's
-  // doc comment. singularValues are posedToNonPosedLinear's 3 per-axis
-  // stretch factors (always >= 0, from svd3x3() above); only positive ones
-  // count toward the ratio, since a fit that collapses an axis entirely
-  // (0 singular value) would already have failed the isZeroMatrix3() check
-  // above if ALL of them did - a single collapsed axis alongside 2 healthy
-  // ones is nonsensical geometry-wise and better caught by the fit-error
-  // check than reported as "infinitely anisotropic" here.
   const positiveSingularValues = singularValues.filter((value) => value > 1e-9);
   const scaleAnisotropy =
     positiveSingularValues.length > 0
       ? Math.max(...positiveSingularValues) / Math.min(...positiveSingularValues)
       : 1;
 
-  console.log("mesh matrix results:", {
-    posedToNonPosed,
-    nonPosedToPosed,
-    posedToNonPosedInPlace,
-    posedToNonPosedOrientedInPlace,
-    distortionOrientation,
-    handednessMismatchDetected,
-    relativeFitError,
-    scaleAnisotropy,
-  });
+  // console.log("mesh matrix results:", {
+  //   posedToNonPosed,
+  //   nonPosedToPosed,
+  //   posedToNonPosedInPlace,
+  //   posedToNonPosedOrientedInPlace,
+  //   distortionOrientation,
+  //   handednessMismatchDetected,
+  //   relativeFitError,
+  //   scaleAnisotropy,
+  // });
 
   return {
     posedToNonPosed,
@@ -561,11 +483,7 @@ function analyzeTransformMatrix(
   };
 }
 
-/** Generic SVD of a 3x3 matrix: m = u * diag(singularValues) * v^T. Same
- * construction solveOptimalRotation() above uses for Kabsch (eigendecompose
- * m^T*m to get v and the singular values, then u = m*v*Sigma^-1 per
- * column), generalized here to an arbitrary 3x3 matrix rather than a
- * square cross-covariance. */
+
 function svd3x3(m: THREE.Matrix3): { u: THREE.Matrix3; singularValues: number[]; v: THREE.Matrix3 } {
   const mtm = m.clone().transpose().multiply(m);
   const { vectors, values } = eigenSymmetric3x3(matrix3ToRows(mtm));
@@ -582,9 +500,6 @@ function svd3x3(m: THREE.Matrix3): { u: THREE.Matrix3; singularValues: number[];
   return { u, singularValues, v };
 }
 
-/** Builds V * diag(values) * V^T - used both for the stretch tensor S in
- * polarDecompose-style splitting above (values = singular values, always
- * >= 0) and would equally work for a general symmetric reconstruction. */
 function buildDiagonalConjugate(v: THREE.Matrix3, values: number[]): THREE.Matrix3 {
   const sigma = new THREE.Matrix3().set(values[0], 0, 0, 0, values[1], 0, 0, 0, values[2]);
   return v.clone().multiply(sigma).multiply(v.clone().transpose());
@@ -600,12 +515,6 @@ function buildDiagonalConjugate(v: THREE.Matrix3, values: number[]): THREE.Matri
  * doc comment). */
 const mirrorZ = new THREE.Matrix3().set(1, 0, 0, 0, 1, 0, 0, 0, -1);
 
-/** Builds the 4x4 affine matrix implementing
- * `to = linear * (from - fromCentroid) + toCentroid`
- * - i.e. the linear map applied about fromCentroid's origin, then
- * translated so that fromCentroid lands on toCentroid. Passing the same
- * centroid for both `fromCentroid` and `toCentroid` pivots the linear map
- * about that point without any net translation. */
 function affineFromLinearAndTranslation(
   linear: THREE.Matrix3,
   fromCentroid: THREE.Vector3,
@@ -635,49 +544,13 @@ function frobeniusDistance(a: ArrayLike<number>, b: ArrayLike<number>): number {
 }
 
 export interface DistortionConsensusResult {
-  /** Which cluster each input matrix landed in, same order/length as the
-   * input array - every matrix belongs to SOME cluster, even a singleton
-   * one, so this is never -1. */
   clusterOf: number[];
-  /** Index of the largest cluster (into the same numbering as clusterOf) -
-   * ties broken by whichever cluster reached that size first. Always a
-   * valid index as long as `matrices` was non-empty. */
   largestCluster: number;
-  /** How many matrices landed in largestCluster. 1 means every matrix was
-   * mutually distinct - "largest" is really just "the first one", with no
-   * actual cross-object agreement behind it, which callers may want to
-   * treat as a weaker signal than a genuine multi-member cluster. */
   largestClusterSize: number;
 }
 
-/** Default relative tolerance for findDistortionConsensus() below - two
- * fitted matrices are considered "the same" distortion if their Frobenius
- * distance is within 10% of the cluster's own running-mean magnitude.
- * Picked by feel like this file's other thresholds (DEFAULT_FIT_ERROR_-
- * THRESHOLD, DEFAULT_MAX_SCALE_ANISOTROPY) - independently fitted matrices
- * for the SAME true distortion won't be bit-identical (different meshes,
- * different vertex noise), so this needs to be loose enough to absorb
- * that while still being tight enough not to lump genuinely different
- * distortions together. */
 export const DEFAULT_MATRIX_CLUSTER_TOLERANCE = 0.1;
 
-/** Groups a set of fitted linear distortion maps (one per candidate object
- * that already passed isGoodDistortionFitCandidate() - see app.ts's
- * autoCorrectRenderDocDistortion()) by approximate equality, on the theory
- * that if several DIFFERENT, otherwise-unrelated objects independently fit
- * to close to the SAME matrix, that's much stronger evidence of the real,
- * systemic capture/export distortion than any single object's fit alone.
- * autoCorrectRenderDocDistortion() uses this to pick ONE matrix - the
- * cleanest-fitting member of the LARGEST cluster - and broadcasts that
- * single distortion to the whole scene, rather than trusting (or
- * distrusting) each object's own individual fit.
- *
- * Greedy single-pass clustering: each matrix joins the first existing
- * cluster within tolerance of that cluster's current running mean, or
- * starts a new cluster of its own. Not a proper agglomerative clustering,
- * but candidate counts here are small (one per correctable object in a
- * scene) and approximate grouping is all a "picked by feel" tolerance can
- * really promise regardless of algorithm. */
 export function findDistortionConsensus(
   matrices: THREE.Matrix3[],
   tolerance: number = DEFAULT_MATRIX_CLUSTER_TOLERANCE,
@@ -718,11 +591,6 @@ export function findDistortionConsensus(
   return { clusterOf, largestCluster, largestClusterSize };
 }
 
-/** Embeds a 3x3 linear map as the upper-left block of a 4x4 matrix with no
- * translation, by reusing each column as-is (unlike matrix3ToQuaternion's
- * use of makeBasis elsewhere in this file, the columns here are NOT
- * assumed to be orthonormal - makeBasis itself doesn't require that, it
- * just places the three vectors as columns). */
 function matrix3ToMatrix4(m: THREE.Matrix3): THREE.Matrix4 {
   const xAxis = new THREE.Vector3().setFromMatrix3Column(m, 0);
   const yAxis = new THREE.Vector3().setFromMatrix3Column(m, 1);
@@ -734,9 +602,6 @@ function isZeroMatrix3(m: THREE.Matrix3): boolean {
   return m.elements.every((v) => v === 0);
 }
 
-// ============ Eigen decomposition for symmetric 3x3 matrices =============
-// Jacobi iteration - sufficient for small 3x3 numeric stability. Three.js
-// has no eigendecomposition/SVD utility, so this stays hand-rolled.
 function eigenSymmetric3x3(a: number[][]): { values: number[]; vectors: number[][] } {
   const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
   const d = [
