@@ -136,7 +136,11 @@ export class SelectAreaGizmo {
   private dragStartT = 0;
   private readonly dragStartLocalOffset = new THREE.Vector3();
   private readonly dragStartScreenOrigin = new THREE.Vector2();
-  private dragStartScreenDistance = 1;
+  /** World units represented by one screen pixel at the target's own
+   * distance from the camera, captured at drag start - see the center
+   * handle's own scale-mode comment in beginDrag() below. */
+  private dragWorldPerPixel = 1;
+  private dragStartScreenDistance = 0;
 
   constructor(target: THREE.Object3D, mode: GizmoMode) {
     this.target = target;
@@ -271,18 +275,32 @@ export class SelectAreaGizmo {
       this.dragPlane.setFromNormalAndCoplanarPoint(normalWorld, originWorld);
       this.dragStartLocalOffset.copy(rayPlaneLocalOffset(raycaster, this.dragPlane, originWorld, groupQuat, groupScale));
     } else {
-      // Center handle, scale mode: uniform scale via the on-screen PIXEL
-      // distance from the gizmo's projected center - simpler and just as
-      // intuitive as a 3D ray/plane approach for a "drag out to grow, in
-      // to shrink" handle, and sidesteps degenerate cases entirely.
+      // Center handle, scale mode: uniform scale, ADDITIVELY from the
+      // on-screen pixel distance moved from the gizmo's projected center
+      // - not a RATIO of that distance to its own starting value. A ratio
+      // means the sensitivity is entirely dictated by wherever exactly the
+      // click happened to land (dragStartScreenDistance as the divisor):
+      // the center handle is a small ring drawn close to the gizmo's own
+      // origin (see RING_RADIUS), so that starting distance is typically
+      // just a handful of pixels - meaning almost ANY subsequent mouse
+      // movement, however ordinary, divided by that tiny baseline,
+      // multiplies the scale by many times over in a single frame. An
+      // ADDITIVE delta - converting the pixel distance MOVED into world
+      // units via a fixed, click-position-independent conversion factor,
+      // then into local units the same way the axis/plane handles already
+      // do (see updateDrag()) - has no such division at all, so its
+      // sensitivity is stable regardless of precisely where on the ring
+      // the drag started, the same way those other handles already are.
       const originNdc = originWorld.clone().project(camera);
       this.dragStartScreenOrigin.set(
         ((originNdc.x + 1) / 2) * canvasRect.width + canvasRect.left,
         ((1 - originNdc.y) / 2) * canvasRect.height + canvasRect.top,
       );
-      this.dragStartScreenDistance = Math.max(
-        Math.hypot(mouseClientX - this.dragStartScreenOrigin.x, mouseClientY - this.dragStartScreenOrigin.y),
-        1,
+      const distance = Math.max(camera.position.distanceTo(originWorld), 1e-6);
+      this.dragWorldPerPixel = visibleHeightAt(camera, distance) / Math.max(canvasRect.height, 1);
+      this.dragStartScreenDistance = Math.hypot(
+        mouseClientX - this.dragStartScreenOrigin.x,
+        mouseClientY - this.dragStartScreenOrigin.y,
       );
     }
   }
@@ -333,14 +351,17 @@ export class SelectAreaGizmo {
       this.target.position.y = this.dragStartPosition.y + (offset.y - this.dragStartLocalOffset.y);
       this.target.position.z = this.dragStartPosition.z + (offset.z - this.dragStartLocalOffset.z);
     } else {
-      const dist = Math.max(
-        Math.hypot(mouseClientX - this.dragStartScreenOrigin.x, mouseClientY - this.dragStartScreenOrigin.y),
-        1,
-      );
-      const ratio = dist / this.dragStartScreenDistance;
-      this.target.scale.x = Math.max(this.dragStartScale.x * ratio, this.minScale);
-      this.target.scale.y = Math.max(this.dragStartScale.y * ratio, this.minScale);
-      this.target.scale.z = Math.max(this.dragStartScale.z * ratio, this.minScale);
+      // Center handle, scale mode: see beginDrag()'s own comment for why
+      // this is an ADDITIVE delta (pixels moved * a fixed world-per-pixel
+      // factor, converted to local units the same way the axis/plane
+      // handles' own deltaLocal is - see above) rather than a RATIO of
+      // screen distances. Applied identically to all 3 axes for a uniform
+      // resize.
+      const dist = Math.hypot(mouseClientX - this.dragStartScreenOrigin.x, mouseClientY - this.dragStartScreenOrigin.y);
+      const deltaLocal = ((dist - this.dragStartScreenDistance) * this.dragWorldPerPixel) / Math.max(groupScale, 1e-9);
+      this.target.scale.x = Math.max(this.dragStartScale.x + deltaLocal, this.minScale);
+      this.target.scale.y = Math.max(this.dragStartScale.y + deltaLocal, this.minScale);
+      this.target.scale.z = Math.max(this.dragStartScale.z + deltaLocal, this.minScale);
     }
   }
 
