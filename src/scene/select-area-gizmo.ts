@@ -179,7 +179,22 @@ export class SelectAreaGizmo {
   private readonly target: THREE.Object3D;
   private handles: GizmoHandle[] = [];
   private highlighted: GizmoHandle | null = null;
-  private minScale = 1e-6;
+  /** Floor on any single scale axis, purely to keep it from going literally
+   * zero or negative (which would collapse the shape's own matrix into a
+   * useless/degenerate one) - NOT a practical/visible minimum size, and
+   * deliberately tiny enough that no realistic drag ever reaches it
+   * intentionally. setMinScale() used to let a caller raise this to
+   * something bigger (app.ts's placeSelectAreaShape() tied it to the
+   * whole SCENE's own bounding diagonal), but that meant a shape placed
+   * small (it's sized off the VIEWPORT at placement, not the scene - see
+   * placeSelectAreaShape()) in a large scene could already sit BELOW that
+   * caller-supplied floor - at which point simply CLICKING a scale handle
+   * (deltaLocal starts at ~0) would instantly snap it up to that floor via
+   * updateDrag()'s Math.max(), which could be orders of magnitude bigger
+   * than the shape's own current/intended size. No caller sets this
+   * anymore for exactly that reason - it's a fixed, tiny, scene-agnostic
+   * safety net now, not a caller-tunable practical limit. */
+  private minScale = 1e-9;
 
   // Drag state - only meaningful while dragHandle is non-null.
   private dragHandle: GizmoHandle | null = null;
@@ -252,10 +267,12 @@ export class SelectAreaGizmo {
     this.buildHandles();
   }
 
-  /** Smallest value a scale axis is allowed to shrink to while dragging -
-   * the caller derives this from the loaded scene's own size (see
-   * app.ts's overallLocalBounds()) so it stays meaningful across wildly
-   * different scene scales, same as the old slider UI's scaleMin did. */
+  /** Raises the floor from minScale's own tiny numeric-safety default to
+   * `min` instead - unused by app.ts by default now (see minScale's own
+   * field comment for why tying it to the whole scene's size was the
+   * wrong call there), but kept available for a caller with a floor
+   * that's actually meaningful relative to the SHAPE itself, unlike the
+   * scene as a whole. */
   setMinScale(min: number): void {
     this.minScale = Math.max(min, 1e-9);
   }
