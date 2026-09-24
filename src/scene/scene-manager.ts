@@ -154,6 +154,11 @@ export class SceneManager {
   private flyStateHandlers: FlyStateHandler[] = [];
   private controlSchemeHandlers: ControlSchemeHandler[] = [];
   private scheme: ControlScheme = "esdf";
+
+  // Lets callers (e.g. an overlay covering the whole viewport) skip the
+  // per-frame render work without tearing the scene down - see pause()/
+  // resume()'s own doc comments.
+  private paused = false;
   private bindings: MovementBindings = ESDF_BINDINGS;
 
   private appConfig = Config.getConfig();
@@ -229,6 +234,24 @@ export class SceneManager {
 
   onContextLoss(handler: ContextLossHandler): void {
     this.contextLossHandlers.push(handler);
+  }
+
+  /** Stops per-frame rendering/updates (fly movement, view transitions, the
+   * orientation gizmo, before/after-render handlers) without touching the
+   * scene contents - contentGroup and everything in it is left exactly as
+   * it is, so nothing needs re-loading once resume() is called. Intended
+   * for whenever the viewport is fully covered by something else (e.g. the
+   * export dialog) and re-rendering it every frame would be wasted work. */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /** Reverses pause() - also resets the frame-delta clock so the fly camera
+   * (if active) doesn't see a huge elapsed time and jump. */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    this.lastFrameTime = performance.now();
   }
 
   /** Registers a callback to run every frame immediately after the main
@@ -947,6 +970,7 @@ export class SceneManager {
 
   private animate = (): void => {
     requestAnimationFrame(this.animate);
+    if (this.paused) return;
     const now = performance.now();
     // Clamp so e.g. returning to a backgrounded tab doesn't teleport the
     // fly camera using a huge accumulated delta.

@@ -61,6 +61,16 @@ interface LoadedDraw {
   appliedDistortionMatrix: THREE.Matrix4 | null;
 }
 
+/** A point-in-time snapshot of everything Ctrl+Z/Ctrl+Y travel through -
+ * selection, manual visibility, and the landmark object. See
+ * SceneViewerApp.pushUndoSnapshot()/undo()/redo(). */
+interface HistorySnapshot {
+  selectedIndices: Set<number>;
+  lastClickedIndex: number | null;
+  manuallyHiddenIndices: Set<number>;
+  scaleReferenceIndex: number | null;
+}
+
 export class SceneViewerApp {
   private vfs = new VirtualFileSystem();
   private loaded: LoadedManifests | null = null;
@@ -120,6 +130,19 @@ export class SceneViewerApp {
   private resourcePanelIndex: number | null = null;
   private resourcePanelPosition: { left: number; top: number } | null = null;
   private resourcePanelActiveTab: "last" | "all" = "last";
+
+  // Ctrl+Z/Ctrl+Y (and Ctrl+Shift+Z) undo/redo history - covers selection,
+  // manual visibility, and the landmark object, per pushUndoSnapshot()'s doc
+  // comment. undoStack holds past states, redoStack holds states undone away
+  // from - any fresh action (pushUndoSnapshot()) clears redoStack, same as
+  // any normal undo/redo stack.
+  private static readonly UNDO_STACK_LIMIT = 50;
+  private undoStack: HistorySnapshot[] = [];
+  private redoStack: HistorySnapshot[] = [];
+
+  // Disposer for the export dialog's own live preview scene (see
+  // attachMultiMeshPreview()'s return value / disposeExportMeshPreview()).
+  private activeExportPreviewDispose: (() => void) | null = null;
 
   private selectionVisuals: THREE.Object3D[] = [];
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
@@ -272,9 +295,7 @@ export class SceneViewerApp {
     });
     this.elements.menu.fixExport.addEventListener('click', () => {
       console.info('opening export overlay');
-      this.elements.overlays.export.setSelectedIndices(this.getActiveSelectedIndices());
-      this.renderExportMeshPreview();
-      this.elements.overlays.export.show();
+      this.openExportDialog();
     });
     this.elements.menu.help.addEventListener('click', () => {
       console.info('opening help overlay');
@@ -284,6 +305,17 @@ export class SceneViewerApp {
     this.elements.overlays.export.addEventListener('start-export', (e: any) =>
       this.handleStartExport(e.detail.selectedIndices, e.detail.exportOptions),
     );
+    // The main viewport is fully covered while this dialog is open, and its
+    // own preview pane has an independent renderer/scene - see pause()'s
+    // and disposeExportMeshPreview()'s doc comments for why each matters.
+    // Hooked to the overlay's own events (not just the "click Fix & export"
+    // path above) so this also fires when the dialog is closed via Escape,
+    // clicking its backdrop, or its own start-export flow.
+    this.elements.exportOverlay.addEventListener('overlay-shown', () => this.sceneManager.pause());
+    this.elements.exportOverlay.addEventListener('overlay-hidden', () => {
+      this.sceneManager.resume();
+      this.disposeExportMeshPreview();
+    });
 
     // make help screen accessible from the importer
     this.elements.overlays.captureImporter.help = this.elements.overlays.help;
@@ -436,9 +468,13 @@ export class SceneViewerApp {
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
     window.addEventListener("keydown", (e) => this.handleGizmoKeydown(e));
+    window.addEventListener("keydown", (e) => this.handleSelectionKeydown(e));
 
+    // Right click is used as a selection tool (see handleSceneObjectPointer())
+    // rather than a context-menu trigger, so the browser's own menu should
+    // never appear over the viewport.
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
-      if (this.groundPlaneToolActive || this.selectAreaToolActive || this.lassoDragActive) event.preventDefault();
+      event.preventDefault();
     });
     window.addEventListener("pointermove", (e) => this.handleLassoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleLassoPointerUp(e));
@@ -768,6 +804,9 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
+      // A new scene invalidates every index in the old undo/redo history.
+      this.undoStack = [];
+      this.redoStack = [];
 
       this.showingRawImport = false;
       this.updateToggleRawImportBtn();
@@ -977,6 +1016,7 @@ export class SceneViewerApp {
 
   private toggleDrawVisibility(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
 
     if (this.selectedIndices.has(index)) {
       const makeHidden = !this.manuallyHiddenIndices.has(index);
@@ -995,6 +1035,7 @@ export class SceneViewerApp {
 
   private toggleDrawSelection(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
     else this.selectedIndices.add(index);
     this.lastClickedIndex = index;
@@ -1005,6 +1046,7 @@ export class SceneViewerApp {
 
   private setLandmark(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     this.scaleReferenceIndex = this.scaleReferenceIndex === index ? null : index;
     this.renderObjectListState();
   }
@@ -1502,6 +1544,7 @@ export class SceneViewerApp {
 
   private applyVolumeSelection(op: "replace" | "add" | "remove"): void {
     if (!this.selectAreaShape || !this.selectAreaKind) return;
+    this.pushUndoSnapshot();
 
     const matches = this.findDrawsWithinSelectAreaShape();
 
@@ -1542,6 +1585,205 @@ export class SceneViewerApp {
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
     else if (event.code === "KeyR") this.setSelectAreaGizmoMode("rotate");
+  }
+
+  /** Global selection/export shortcuts - H (hide selected), Ctrl+I (invert
+   * selection), Ctrl+A (select all visible), Escape (closes whichever
+   * overlay is open - export dialog first, then control options - or, if
+   * neither is open, clears selection, same as right-clicking empty
+   * space/an unselected object), Ctrl+E and Ctrl+Shift+E (open the export
+   * dialog), Ctrl+Z (undo), and Ctrl+Y / Ctrl+Shift+Z (redo). */
+  private handleSelectionKeydown(event: KeyboardEvent): void {
+    if (event.repeat || this.isFlying) return;
+
+    // Escape needs to close an open overlay even while a field inside that
+    // overlay (e.g. the export dialog's height input) has focus, so it's
+    // handled before the isTypingInFormField() guard below - unlike every
+    // other shortcut here, which should stay quiet while the user's typing
+    // somewhere.
+    if (event.code === "Escape") {
+      if (this.elements.exportOverlay.isVisible()) {
+        this.elements.exportOverlay.hide();
+      } else if (this.elements.controlsOverlay.isVisible()) {
+        this.elements.controlsOverlay.hide();
+      } else if (!this.isTypingInFormField()) {
+        this.clearSelection();
+      }
+      return;
+    }
+
+    if (this.isTypingInFormField()) return;
+    const ctrlOrCmd = event.ctrlKey || event.metaKey;
+
+    if (event.code === "KeyH" && !ctrlOrCmd) {
+      this.hideSelectedItems();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyI") {
+      event.preventDefault();
+      this.invertSelection();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyA") {
+      event.preventDefault();
+      this.selectAllVisible();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyE") {
+      event.preventDefault();
+      this.openExportDialog();
+      return;
+    }
+
+    // Z/Y are swapped between physical key positions on QWERTY vs QWERTZ
+    // keyboards, so event.code (position-based: "KeyZ"/"KeyY" always mean
+    // the same physical key regardless of layout) would have Ctrl+Z and
+    // Ctrl+Y trade places on a QWERTZ layout. event.key instead reflects the
+    // character the layout actually produces, so it tracks the printed
+    // letter the user is pressing on any layout.
+    const typedKey = event.key.toLowerCase();
+
+    if (ctrlOrCmd && typedKey === "z" && !event.shiftKey) {
+      event.preventDefault();
+      this.undo();
+      return;
+    }
+
+    if ((ctrlOrCmd && typedKey === "y") || (ctrlOrCmd && event.shiftKey && typedKey === "z")) {
+      event.preventDefault();
+      this.redo();
+      return;
+    }
+  }
+
+  private captureSnapshot(): HistorySnapshot {
+    return {
+      selectedIndices: new Set(this.selectedIndices),
+      lastClickedIndex: this.lastClickedIndex,
+      manuallyHiddenIndices: new Set(this.manuallyHiddenIndices),
+      scaleReferenceIndex: this.scaleReferenceIndex,
+    };
+  }
+
+  private applySnapshot(snapshot: HistorySnapshot): void {
+    const visibilityChanged = !SceneViewerApp.indexSetsEqual(this.manuallyHiddenIndices, snapshot.manuallyHiddenIndices);
+
+    this.selectedIndices = snapshot.selectedIndices;
+    this.lastClickedIndex = snapshot.lastClickedIndex;
+    this.manuallyHiddenIndices = snapshot.manuallyHiddenIndices;
+    this.scaleReferenceIndex = snapshot.scaleReferenceIndex;
+
+    if (visibilityChanged) {
+      // rebuildVisibleScene() re-syncs selection visuals and the object
+      // list itself once the new mesh set is in place.
+      this.rebuildVisibleScene();
+    } else {
+      this.noteSelectionTarget(null);
+      this.refreshSelectionVisuals();
+      this.renderObjectListState();
+    }
+  }
+
+  /** Records the CURRENT (pre-change) selection/visibility/landmark state so
+   * it can be restored by undo(), and clears the redo stack - a fresh
+   * action invalidates whatever was available to redo, same as any normal
+   * undo/redo history. Call this right before mutating any of those, after
+   * any early-return guards, so a no-op action doesn't clutter the stack. */
+  private pushUndoSnapshot(): void {
+    this.undoStack.push(this.captureSnapshot());
+    if (this.undoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  /** Ctrl+Z - pops the most recent snapshot off the undo stack, stashes the
+   * current state on the redo stack, and restores the popped one. */
+  private undo(): void {
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) return;
+    this.redoStack.push(this.captureSnapshot());
+    if (this.redoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.redoStack.shift();
+    this.applySnapshot(snapshot);
+  }
+
+  /** Ctrl+Y / Ctrl+Shift+Z - the mirror image of undo(): pops the most
+   * recent state off the redo stack, stashes the current state back on the
+   * undo stack, and restores the popped one. */
+  private redo(): void {
+    const snapshot = this.redoStack.pop();
+    if (!snapshot) return;
+    this.undoStack.push(this.captureSnapshot());
+    if (this.undoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.undoStack.shift();
+    this.applySnapshot(snapshot);
+  }
+
+  private static indexSetsEqual(a: Set<number>, b: Set<number>): boolean {
+    if (a.size !== b.size) return false;
+    for (const value of a) if (!b.has(value)) return false;
+    return true;
+  }
+
+  /** Clears the current selection - shared by Escape and right-clicking
+   * empty space/an unselected object. */
+  private clearSelection(): void {
+    if (this.selectedIndices.size === 0) return;
+    this.pushUndoSnapshot();
+    this.selectedIndices.clear();
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Hides every currently selected item (manual hide, not a toggle) -
+   * mirrors the "hide" half of toggleDrawVisibility() but always hides
+   * rather than flipping state. Selection itself is left alone, same as
+   * toggleDrawVisibility(). */
+  private hideSelectedItems(): void {
+    if (this.selectedIndices.size === 0) return;
+    this.pushUndoSnapshot();
+    for (const index of this.selectedIndices) this.manuallyHiddenIndices.add(index);
+    this.rebuildVisibleScene();
+  }
+
+  /** Selects every visible (not filtered-out, not manually hidden) item. */
+  private selectAllVisible(): void {
+    this.pushUndoSnapshot();
+    this.selectedIndices.clear();
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (!this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i)) this.selectedIndices.add(i);
+    }
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Replaces the selection with the complement of itself among visible
+   * items - hidden items (filtered or manually hidden) are ignored
+   * entirely, neither contributing to nor being affected by the flip. */
+  private invertSelection(): void {
+    this.pushUndoSnapshot();
+    const inverted = new Set<number>();
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (this.isObjectHidden(i) || this.manuallyHiddenIndices.has(i)) continue;
+      if (!this.selectedIndices.has(i)) inverted.add(i);
+    }
+    this.selectedIndices = inverted;
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Opens the export dialog for the current selection - shared by the
+   * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
+  private openExportDialog(): void {
+    this.elements.exportOverlay.setSelectedIndices(this.getExportIndices());
+    this.renderExportMeshPreview();
+    this.elements.exportOverlay.show();
   }
 
   private handleGizmoPointerMove(event: PointerEvent): void {
@@ -1790,6 +2032,7 @@ export class SceneViewerApp {
   }
 
   private applyLassoSelection(points: { x: number; y: number }[], mode: "replace" | "add" | "remove"): void {
+    this.pushUndoSnapshot();
     const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
     const camera = this.sceneManager.activeCamera;
     const group = this.sceneManager.getContentGroup();
@@ -2221,7 +2464,7 @@ export class SceneViewerApp {
 
 
   private exportSelectedMeshesAsGlb(): void {
-    const activeSelected = this.getActiveSelectedIndices();
+    const activeSelected = this.getExportIndices();
     if (activeSelected.length === 0) {
       return;
     }
@@ -2393,7 +2636,7 @@ export class SceneViewerApp {
     container: HTMLElement,
     draws: LoadedDraw[],
     options: { interactive: boolean; poseMode?: "posed" | "non-posed"; textured?: boolean },
-  ): void {
+  ): () => void {
     const poseMode = options.poseMode ?? "non-posed";
     const textured = options.textured ?? true;
 
@@ -2491,12 +2734,25 @@ export class SceneViewerApp {
       camera.updateProjectionMatrix();
     };
 
+    // Shared, idempotent teardown - reachable both from the loops below
+    // (once the container's disconnected from the DOM, or after the single
+    // non-interactive render) and from the disposer this method returns, so
+    // a caller can force early cleanup (e.g. the export dialog closing)
+    // without waiting for either condition.
+    let disposed = false;
+    let resizeObserver: ResizeObserver;
+    const disposePreview = (): void => {
+      if (disposed) return;
+      disposed = true;
+      renderer.dispose();
+      resizeObserver?.disconnect();
+    };
+
     if (options.interactive) {
       const gizmo = new OrientationGizmo();
       gizmo.element.classList.add("orientation-gizmo--preview");
       container.appendChild(gizmo.element);
       const gizmoCameraProxy = new THREE.Object3D();
-
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
@@ -2558,13 +2814,13 @@ export class SceneViewerApp {
       });
       previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
 
-      const resizeObserver = new ResizeObserver(() => resize());
-      resizeObserver.observe(container);
+      const resizeObserverInteractive = new ResizeObserver(() => resize());
+      resizeObserverInteractive.observe(container);
+      resizeObserver = resizeObserverInteractive;
 
       const tick = () => {
-        if (!container.isConnected) {
-          renderer.dispose();
-          resizeObserver.disconnect();
+        if (disposed || !container.isConnected) {
+          disposePreview();
           return;
         }
         gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert().multiply(camera.quaternion);
@@ -2582,33 +2838,46 @@ export class SceneViewerApp {
       // layout has run) - and free the GL context right away instead of
       // holding one open per thumbnail (see this method's doc comment).
       const renderOnceReady = (): void => {
-        if (container.clientWidth === 0 || container.clientHeight === 0) return;
+        if (disposed || container.clientWidth === 0 || container.clientHeight === 0) return;
         resize();
         renderer.render(scene, camera);
-        renderer.dispose();
-        resizeObserver.disconnect();
+        disposePreview();
       };
-      const resizeObserver = new ResizeObserver(() => renderOnceReady());
-      resizeObserver.observe(container);
+      const resizeObserverOnce = new ResizeObserver(() => renderOnceReady());
+      resizeObserverOnce.observe(container);
+      resizeObserver = resizeObserverOnce;
       renderOnceReady(); // covers the common case where layout's already settled
     }
+
+    return disposePreview;
   }
 
   private renderExportMeshPreview(): void {
+    this.disposeExportMeshPreview();
     const host = this.el<HTMLElement>("export-mesh-export-preview");
-    host.innerHTML = "";
 
-    const draws = this.getActiveSelectedIndices()
+    const draws = this.getExportIndices()
       .map((i) => this.loadedDraws[i])
       .filter((d): d is LoadedDraw => !!d);
     if (draws.length === 0) return;
 
     const exportOptions = this.appConfig.config.exportOptions;
-    this.attachMultiMeshPreview(host, draws, {
+    this.activeExportPreviewDispose = this.attachMultiMeshPreview(host, draws, {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
       textured: exportOptions.exportTextures,
     });
+  }
+
+  /** Tears down the export dialog's own live preview (its independent
+   * renderer/scene, not the main viewport - see attachMultiMeshPreview()'s
+   * disposer) and empties its host, so nothing keeps rendering in the
+   * background once the dialog is closed or about to show something new.
+   * Safe to call even when there's nothing to tear down. */
+  private disposeExportMeshPreview(): void {
+    this.activeExportPreviewDispose?.();
+    this.activeExportPreviewDispose = null;
+    this.el<HTMLElement>("export-mesh-export-preview").innerHTML = "";
   }
 
   /** Sizes and positions the resource panel. Sizing always follows
@@ -3018,6 +3287,7 @@ export class SceneViewerApp {
    * (no modifiers) behavior. */
   private selectOnly(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     this.selectedIndices.clear();
     this.selectedIndices.add(index);
     this.lastClickedIndex = index;
@@ -3033,6 +3303,7 @@ export class SceneViewerApp {
    * first click on the list is a shift-click). */
   private selectRangeTo(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     const anchor = this.lastClickedIndex ?? index;
     const lo = Math.min(anchor, index);
     const hi = Math.max(anchor, index);
@@ -3154,22 +3425,12 @@ export class SceneViewerApp {
 
     if (event.button === 2) {
       if (index === null || this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) {
-        if (this.selectedIndices.size > 0) {
-          this.selectedIndices.clear();
-          this.lastClickedIndex = null;
-          this.noteSelectionTarget(null);
-          this.refreshSelectionVisuals();
-          this.renderObjectListState();
-        }
+        this.clearSelection();
         return;
       }
 
       if (!this.selectedIndices.has(index)) {
-        this.selectedIndices.clear();
-        this.lastClickedIndex = null;
-        this.noteSelectionTarget(null);
-        this.refreshSelectionVisuals();
-        this.renderObjectListState();
+        this.clearSelection();
       }
       return;
     }
@@ -3183,6 +3444,7 @@ export class SceneViewerApp {
   private selectDrawAtPointer(event: PointerEvent, index?: number | null): void {
     const resolvedIndex = index === undefined ? this.pickDrawAtPointer(event) : index;
     if (resolvedIndex === null || this.isObjectHidden(resolvedIndex) || this.manuallyHiddenIndices.has(resolvedIndex)) return;
+    this.pushUndoSnapshot();
 
     // Same single-selection-only restriction as handleObjectClick() for the
     // object list - see its doc comment.
@@ -3249,14 +3511,29 @@ export class SceneViewerApp {
    * still clears any leftover dimming/outline. */
   /** Currently selected AND actually visible objects - "selected" should
    * always mean what's actually highlighted/visible on screen, not some
-   * separate notion of selection that includes hidden objects. Shared by
-   * updateSelectionVisuals(), exportSelectedMeshesAsGlb(), and the export
-   * dialog's own knowledge of what it's exporting (see
-   * renderExportMeshPreview() and the fixExport handler in setupMenu()). */
+   * separate notion of selection that includes hidden objects. Used for the
+   * on-screen highlight (updateSelectionVisuals()) and as the base that
+   * getExportIndices() falls back from. */
   private getActiveSelectedIndices(): number[] {
     return Array.from(this.selectedIndices).filter(
       (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
     );
+  }
+
+  /** What "export" actually operates on: the active selection, or - if
+   * nothing's selected - every currently visible object. Shared by the
+   * quick export button (exportSelectedMeshesAsGlb()), the export dialog
+   * (openExportDialog()), and its live preview (renderExportMeshPreview()),
+   * so all three agree on what's being exported. */
+  private getExportIndices(): number[] {
+    const selected = this.getActiveSelectedIndices();
+    if (selected.length > 0) return selected;
+
+    const visible: number[] = [];
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (!this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i)) visible.push(i);
+    }
+    return visible;
   }
 
   private updateSelectionVisuals(): void {
