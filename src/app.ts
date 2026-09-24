@@ -60,6 +60,16 @@ interface LoadedDraw {
   appliedDistortionMatrix: THREE.Matrix4 | null;
 }
 
+/** A point-in-time snapshot of everything Ctrl+Z/Ctrl+Y travel through -
+ * selection, manual visibility, and the landmark object. See
+ * SceneViewerApp.pushUndoSnapshot()/undo()/redo(). */
+interface HistorySnapshot {
+  selectedIndices: Set<number>;
+  lastClickedIndex: number | null;
+  manuallyHiddenIndices: Set<number>;
+  scaleReferenceIndex: number | null;
+}
+
 export class SceneViewerApp {
   private vfs = new VirtualFileSystem();
   private loaded: LoadedManifests | null = null;
@@ -119,6 +129,15 @@ export class SceneViewerApp {
   private resourcePanelIndex: number | null = null;
   private resourcePanelPosition: { left: number; top: number } | null = null;
   private resourcePanelActiveTab: "last" | "all" = "last";
+
+  // Ctrl+Z/Ctrl+Y (and Ctrl+Shift+Z) undo/redo history - covers selection,
+  // manual visibility, and the landmark object, per pushUndoSnapshot()'s doc
+  // comment. undoStack holds past states, redoStack holds states undone away
+  // from - any fresh action (pushUndoSnapshot()) clears redoStack, same as
+  // any normal undo/redo stack.
+  private static readonly UNDO_STACK_LIMIT = 50;
+  private undoStack: HistorySnapshot[] = [];
+  private redoStack: HistorySnapshot[] = [];
 
   private selectionVisuals: THREE.Object3D[] = [];
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
@@ -760,6 +779,9 @@ export class SceneViewerApp {
       this.hiddenDrawIndices.clear();
       this.manuallyHiddenIndices.clear();
       this.lastClickedIndex = null;
+      // A new scene invalidates every index in the old undo/redo history.
+      this.undoStack = [];
+      this.redoStack = [];
 
       this.showingRawImport = false;
       this.updateToggleRawImportBtn();
@@ -969,6 +991,7 @@ export class SceneViewerApp {
 
   private toggleDrawVisibility(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
 
     if (this.selectedIndices.has(index)) {
       const makeHidden = !this.manuallyHiddenIndices.has(index);
@@ -987,6 +1010,7 @@ export class SceneViewerApp {
 
   private toggleDrawSelection(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
     else this.selectedIndices.add(index);
     this.lastClickedIndex = index;
@@ -997,6 +1021,7 @@ export class SceneViewerApp {
 
   private setLandmark(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     this.scaleReferenceIndex = this.scaleReferenceIndex === index ? null : index;
     this.renderObjectListState();
   }
@@ -1494,6 +1519,7 @@ export class SceneViewerApp {
 
   private applyVolumeSelection(op: "replace" | "add" | "remove"): void {
     if (!this.selectAreaShape || !this.selectAreaKind) return;
+    this.pushUndoSnapshot();
 
     const matches = this.findDrawsWithinSelectAreaShape();
 
@@ -1539,7 +1565,8 @@ export class SceneViewerApp {
   /** Global selection/export shortcuts - H (hide selected), Ctrl+I (invert
    * selection), Ctrl+A (select all visible), Escape (clear selection, same
    * as right-clicking empty space/an unselected object), Ctrl+E and
-   * Ctrl+Shift+E (open the export dialog). */
+   * Ctrl+Shift+E (open the export dialog), Ctrl+Z (undo), and Ctrl+Y /
+   * Ctrl+Shift+Z (redo). */
   private handleSelectionKeydown(event: KeyboardEvent): void {
     if (event.repeat || this.isTypingInFormField() || this.isFlying) return;
     const ctrlOrCmd = event.ctrlKey || event.metaKey;
@@ -1571,12 +1598,99 @@ export class SceneViewerApp {
       this.openExportDialog();
       return;
     }
+
+    // Z/Y are swapped between physical key positions on QWERTY vs QWERTZ
+    // keyboards, so event.code (position-based: "KeyZ"/"KeyY" always mean
+    // the same physical key regardless of layout) would have Ctrl+Z and
+    // Ctrl+Y trade places on a QWERTZ layout. event.key instead reflects the
+    // character the layout actually produces, so it tracks the printed
+    // letter the user is pressing on any layout.
+    const typedKey = event.key.toLowerCase();
+
+    if (ctrlOrCmd && typedKey === "z" && !event.shiftKey) {
+      event.preventDefault();
+      this.undo();
+      return;
+    }
+
+    if ((ctrlOrCmd && typedKey === "y") || (ctrlOrCmd && event.shiftKey && typedKey === "z")) {
+      event.preventDefault();
+      this.redo();
+      return;
+    }
+  }
+
+  private captureSnapshot(): HistorySnapshot {
+    return {
+      selectedIndices: new Set(this.selectedIndices),
+      lastClickedIndex: this.lastClickedIndex,
+      manuallyHiddenIndices: new Set(this.manuallyHiddenIndices),
+      scaleReferenceIndex: this.scaleReferenceIndex,
+    };
+  }
+
+  private applySnapshot(snapshot: HistorySnapshot): void {
+    const visibilityChanged = !SceneViewerApp.indexSetsEqual(this.manuallyHiddenIndices, snapshot.manuallyHiddenIndices);
+
+    this.selectedIndices = snapshot.selectedIndices;
+    this.lastClickedIndex = snapshot.lastClickedIndex;
+    this.manuallyHiddenIndices = snapshot.manuallyHiddenIndices;
+    this.scaleReferenceIndex = snapshot.scaleReferenceIndex;
+
+    if (visibilityChanged) {
+      // rebuildVisibleScene() re-syncs selection visuals and the object
+      // list itself once the new mesh set is in place.
+      this.rebuildVisibleScene();
+    } else {
+      this.noteSelectionTarget(null);
+      this.refreshSelectionVisuals();
+      this.renderObjectListState();
+    }
+  }
+
+  /** Records the CURRENT (pre-change) selection/visibility/landmark state so
+   * it can be restored by undo(), and clears the redo stack - a fresh
+   * action invalidates whatever was available to redo, same as any normal
+   * undo/redo history. Call this right before mutating any of those, after
+   * any early-return guards, so a no-op action doesn't clutter the stack. */
+  private pushUndoSnapshot(): void {
+    this.undoStack.push(this.captureSnapshot());
+    if (this.undoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  /** Ctrl+Z - pops the most recent snapshot off the undo stack, stashes the
+   * current state on the redo stack, and restores the popped one. */
+  private undo(): void {
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) return;
+    this.redoStack.push(this.captureSnapshot());
+    if (this.redoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.redoStack.shift();
+    this.applySnapshot(snapshot);
+  }
+
+  /** Ctrl+Y / Ctrl+Shift+Z - the mirror image of undo(): pops the most
+   * recent state off the redo stack, stashes the current state back on the
+   * undo stack, and restores the popped one. */
+  private redo(): void {
+    const snapshot = this.redoStack.pop();
+    if (!snapshot) return;
+    this.undoStack.push(this.captureSnapshot());
+    if (this.undoStack.length > SceneViewerApp.UNDO_STACK_LIMIT) this.undoStack.shift();
+    this.applySnapshot(snapshot);
+  }
+
+  private static indexSetsEqual(a: Set<number>, b: Set<number>): boolean {
+    if (a.size !== b.size) return false;
+    for (const value of a) if (!b.has(value)) return false;
+    return true;
   }
 
   /** Clears the current selection - shared by Escape and right-clicking
    * empty space/an unselected object. */
   private clearSelection(): void {
     if (this.selectedIndices.size === 0) return;
+    this.pushUndoSnapshot();
     this.selectedIndices.clear();
     this.lastClickedIndex = null;
     this.noteSelectionTarget(null);
@@ -1590,12 +1704,14 @@ export class SceneViewerApp {
    * toggleDrawVisibility(). */
   private hideSelectedItems(): void {
     if (this.selectedIndices.size === 0) return;
+    this.pushUndoSnapshot();
     for (const index of this.selectedIndices) this.manuallyHiddenIndices.add(index);
     this.rebuildVisibleScene();
   }
 
   /** Selects every visible (not filtered-out, not manually hidden) item. */
   private selectAllVisible(): void {
+    this.pushUndoSnapshot();
     this.selectedIndices.clear();
     for (let i = 0; i < this.loadedDraws.length; i++) {
       if (!this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i)) this.selectedIndices.add(i);
@@ -1610,6 +1726,7 @@ export class SceneViewerApp {
    * items - hidden items (filtered or manually hidden) are ignored
    * entirely, neither contributing to nor being affected by the flip. */
   private invertSelection(): void {
+    this.pushUndoSnapshot();
     const inverted = new Set<number>();
     for (let i = 0; i < this.loadedDraws.length; i++) {
       if (this.isObjectHidden(i) || this.manuallyHiddenIndices.has(i)) continue;
@@ -1876,6 +1993,7 @@ export class SceneViewerApp {
   }
 
   private applyLassoSelection(points: { x: number; y: number }[], mode: "replace" | "add" | "remove"): void {
+    this.pushUndoSnapshot();
     const rect = this.sceneManager.renderer.domElement.getBoundingClientRect();
     const camera = this.sceneManager.activeCamera;
     const group = this.sceneManager.getContentGroup();
@@ -3104,6 +3222,7 @@ export class SceneViewerApp {
    * (no modifiers) behavior. */
   private selectOnly(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     this.selectedIndices.clear();
     this.selectedIndices.add(index);
     this.lastClickedIndex = index;
@@ -3119,6 +3238,7 @@ export class SceneViewerApp {
    * first click on the list is a shift-click). */
   private selectRangeTo(index: number): void {
     if (this.isObjectHidden(index)) return;
+    this.pushUndoSnapshot();
     const anchor = this.lastClickedIndex ?? index;
     const lo = Math.min(anchor, index);
     const hi = Math.max(anchor, index);
@@ -3259,6 +3379,7 @@ export class SceneViewerApp {
   private selectDrawAtPointer(event: PointerEvent, index?: number | null): void {
     const resolvedIndex = index === undefined ? this.pickDrawAtPointer(event) : index;
     if (resolvedIndex === null || this.isObjectHidden(resolvedIndex) || this.manuallyHiddenIndices.has(resolvedIndex)) return;
+    this.pushUndoSnapshot();
 
     // Same single-selection-only restriction as handleObjectClick() for the
     // object list - see its doc comment.
