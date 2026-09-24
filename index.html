@@ -22,13 +22,16 @@
         &middot;
         <button id="menu-fix-export">Fix & export</button>
         &middot;
-        <a href="./help.html" target="_blank">Help</a>
+        <button id="menu-help">Help</button>
       </div>
 
       <capture-importer id="capture-importer"></capture-importer>
       <loading-screen id="loading-screen"></loading-screen>
       <control-scheme id="controls-overlay"></control-scheme>
       <export-mesh id="export-overlay"></export-mesh>
+      <help-component id="help-overlay"></help-component>
+
+
 
       <div class="flex flex-row grow shrink overflow-hidden">
         <div
@@ -51,17 +54,11 @@
                 <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="10" />
               </div>
             </div>
-            <button class="ghost" id="recenter-camera-btn" style="width: 100%; margin-top: 8px">Re-center camera</button>
           </div>
 
           <b class="mt-8 text-white">Object list:</b>
-          <div>Order by: <button>draw order</button>, <button>size</button>, <button>faces</button></div>
-          <button
-            id="export-selected-btn"
-            title="Export the selected objects as a single .glb file, with textures embedded, ready to drag into Blender"
-          >
-            Export selected (.glb)
-          </button>
+          <!-- <div>Order by: <button>draw order</button>, <button>size</button>, <button>faces</button></div> -->
+
           <div class="grow shrink flex flex-col gap-2 overflow-auto pr-3 -mr-2" id="object-list">
 
           </div>
@@ -98,6 +95,7 @@
               <button id="hide-resources-panel-button" class="hidden">Hide resource panel</button>
               &middot;
               <button id="reset-camera-btn">Reset camera</button>
+              &middot;
               <button id="frame-scene-btn">Frame scene</button>
             </div>
 

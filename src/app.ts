@@ -29,6 +29,7 @@ import { Config, type AppConfiguration } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { remapObjOrientation } from './util/axis-orientation';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
+import { Help } from './components/help/cmp.help';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -159,6 +160,7 @@ export class SceneViewerApp {
       importScene: this.el("menu-import-scene"),
       controlOptions: this.el("menu-control-options"),
       fixExport: this.el("menu-fix-export"),
+      help: this.el("menu-help")
     },
 
     toolsMenu: {
@@ -211,14 +213,16 @@ export class SceneViewerApp {
       }
     },
 
-    captureImporter: this.el<CaptureImporter>("capture-importer"),
-    loadingScreen: this.el<LoadingScreen>("loading-screen"),
-    controlsOverlay: this.el<Overlay>("controls-overlay"),
-    exportOverlay: this.el<ExportMesh>("export-overlay"),
+    overlays: {
+      captureImporter: this.el<CaptureImporter>("capture-importer"),
+      loadingScreen: this.el<LoadingScreen>("loading-screen"),
+      controls: this.el<Overlay>("controls-overlay"),
+      export: this.el<ExportMesh>("export-overlay"),
+      help: this.el<Help>("help-overlay"),
+    }
   };
 
 
-  private exportSelectedBtn = this.el<HTMLButtonElement>("export-selected-btn");
   private selectOptionsMenu = this.el<HTMLDivElement>("select-options-menu");
   private emptyHint = this.el("empty-hint");
   private hud = this.el("hud");
@@ -279,13 +283,13 @@ export class SceneViewerApp {
 
   private setupMenu() {
     this.elements.menu.importScene.addEventListener('click', () => {
-      this.elements.captureImporter.classList.remove('hidden');
+      this.elements.overlays.captureImporter.classList.remove('hidden');
     });
     this.elements.menu.controlOptions.addEventListener('click', () => {
       console.info('opening control options overlay');
-      this.elements.controlsOverlay.show();
+      this.elements.overlays.controls.show();
     });
-    this.elements.controlsOverlay.addEventListener('control-scheme-updated', (e: any) => {
+    this.elements.overlays.controls.addEventListener('control-scheme-updated', (e: any) => {
       console.log('[app] Control scheme updated:', e.detail.controlScheme);
       this.sceneManager.setControlScheme(e.detail.controlScheme);
     });
@@ -293,8 +297,12 @@ export class SceneViewerApp {
       console.info('opening export overlay');
       this.openExportDialog();
     });
-    this.elements.exportOverlay.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
-    this.elements.exportOverlay.addEventListener('start-export', (e: any) =>
+    this.elements.menu.help.addEventListener('click', () => {
+      console.info('opening help overlay');
+      this.elements.overlays.help.show();
+    });
+    this.elements.overlays.export.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
+    this.elements.overlays.export.addEventListener('start-export', (e: any) =>
       this.handleStartExport(e.detail.selectedIndices, e.detail.exportOptions),
     );
     // The main viewport is fully covered while this dialog is open, and its
@@ -303,11 +311,14 @@ export class SceneViewerApp {
     // Hooked to the overlay's own events (not just the "click Fix & export"
     // path above) so this also fires when the dialog is closed via Escape,
     // clicking its backdrop, or its own start-export flow.
-    this.elements.exportOverlay.addEventListener('overlay-shown', () => this.sceneManager.pause());
-    this.elements.exportOverlay.addEventListener('overlay-hidden', () => {
+    this.elements.overlays.export.addEventListener('overlay-shown', () => this.sceneManager.pause());
+    this.elements.overlays.export.addEventListener('overlay-hidden', () => {
       this.sceneManager.resume();
       this.disposeExportMeshPreview();
     });
+
+    // make help screen accessible from the importer
+    this.elements.overlays.captureImporter.help = this.elements.overlays.help;
   }
 
   private setupToolsMenu() {
@@ -447,13 +458,12 @@ export class SceneViewerApp {
   }
 
   private wireEvents(): void {
-    this.elements.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
+    this.elements.overlays.captureImporter.addEventListener('reconstruct-scene', (e: any) => {
       console.log('received reconstruct-scene:', e);
       this.reconstructScene(e.detail);
     });
 
     this.elements.toolsMenu.highlightCorrectionSourceBtn.addEventListener("click", () => this.highlightDistortionSource());
-    this.exportSelectedBtn.addEventListener("click", () => this.exportSelectedMeshesAsGlb());
 
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
@@ -760,9 +770,9 @@ export class SceneViewerApp {
 
     this.intelGpaDistortion = intelGpaDistortion ?? null;
     this.elements.toolsMenu.fixDistortionBtn.classList.toggle("hidden", this.intelGpaDistortion !== null);
-    this.elements.captureImporter.classList.add('hidden');
-    this.elements.loadingScreen.show();
-    this.elements.loadingScreen.log("Starting reconstruction...");
+    this.elements.overlays.captureImporter.classList.add('hidden');
+    this.elements.overlays.loadingScreen.show();
+    this.elements.overlays.loadingScreen.log("Starting reconstruction...");
 
 
     this.emptyHint.style.display = "none";
@@ -810,7 +820,7 @@ export class SceneViewerApp {
       let loggedMissingMesh = false;
 
       for (const folder of selected) {
-        const logLine = this.elements.loadingScreen.log(`Processing pass "${folder}"...`);
+        const logLine = this.elements.overlays.loadingScreen.log(`Processing pass "${folder}"...`);
 
         const manifest = this.loaded.passManifests[folder];
         if (!manifest) {
@@ -842,7 +852,7 @@ export class SceneViewerApp {
                     `A few sample paths that WERE found: ${Array.from(this.vfs.keys()).slice(0, 8).join(", ")}`,
                 );
                 loggedMissingMesh = true;
-                this.elements.loadingScreen.log(`Mesh file not found for eid${draw.eventId}`);
+                this.elements.overlays.loadingScreen.log(`Mesh file not found for eid${draw.eventId}`);
               }
             } else {
               const globalIndex = this.loadedDraws.length - 1;
@@ -857,12 +867,12 @@ export class SceneViewerApp {
           } catch (e) {
             exceptionCount++;
             console.error(`[reconstruct] Exception loading draw eid${draw.eventId}`, draw, e);
-            this.elements.loadingScreen.log(`Exception loading draw eid${draw.eventId}`);
+            this.elements.overlays.loadingScreen.log(`Exception loading draw eid${draw.eventId}`);
           }
         }
       }
 
-      this.elements.loadingScreen.log(`Finished processing all passes. Calculating scale and/or initial scale ...`);
+      this.elements.overlays.loadingScreen.log(`Finished processing all passes. Calculating scale and/or initial scale ...`);
 
       this.fixedScale = 1;
       this.worldUpAxis = "y";
@@ -915,12 +925,12 @@ export class SceneViewerApp {
       if (exceptionCount) problems.push(`${exceptionCount} threw an error`);
       if (noMeshPathCount) problems.push(`${noMeshPathCount} had no mesh path in the manifest`);
 
-      this.elements.loadingScreen.log(`Rebuilding visible scene...`);
+      this.elements.overlays.loadingScreen.log(`Rebuilding visible scene...`);
 
       this.setHidePercent(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
-      this.elements.loadingScreen.log(`Visible scene rebuilt.`);
+      this.elements.overlays.loadingScreen.log(`Visible scene rebuilt.`);
 
-      this.elements.loadingScreen.log(`Placing camera...`);
+      this.elements.overlays.loadingScreen.log(`Placing camera...`);
       this.sceneManager.placeCameraForImport(
         1.2,
         importOptions.forceInitialScaleLimit ? importOptions.initialScaleLimit : undefined,
@@ -928,10 +938,10 @@ export class SceneViewerApp {
     } catch (e) {
       console.error("[reconstruct] Reconstruction failed", e);
       // this.setStatus(`Reconstruct failed: ${e instanceof Error ? e.message : String(e)} (see console for details)`);
-      this.elements.loadingScreen.log(`Reconstruction failed.`);
+      this.elements.overlays.loadingScreen.log(`Reconstruction failed.`);
     }
 
-    this.elements.loadingScreen.hide();
+    this.elements.overlays.loadingScreen.hide();
   }
 
   private rebuildVisibleScene(): void {
@@ -1579,8 +1589,8 @@ export class SceneViewerApp {
 
   /** Global selection/export shortcuts - H (hide selected), Ctrl+I (invert
    * selection), Ctrl+A (select all visible), Escape (closes whichever
-   * overlay is open - export dialog first, then control options - or, if
-   * neither is open, clears selection, same as right-clicking empty
+   * overlay is open - export dialog, then control options, then help - or,
+   * if none are open, clears selection, same as right-clicking empty
    * space/an unselected object), Ctrl+E and Ctrl+Shift+E (open the export
    * dialog), Ctrl+Z (undo), and Ctrl+Y / Ctrl+Shift+Z (redo). */
   private handleSelectionKeydown(event: KeyboardEvent): void {
@@ -1592,10 +1602,12 @@ export class SceneViewerApp {
     // other shortcut here, which should stay quiet while the user's typing
     // somewhere.
     if (event.code === "Escape") {
-      if (this.elements.exportOverlay.isVisible()) {
-        this.elements.exportOverlay.hide();
-      } else if (this.elements.controlsOverlay.isVisible()) {
-        this.elements.controlsOverlay.hide();
+      if (this.elements.overlays.export.isVisible()) {
+        this.elements.overlays.export.hide();
+      } else if (this.elements.overlays.controls.isVisible()) {
+        this.elements.overlays.controls.hide();
+      } else if (this.elements.overlays.help.isVisible()) {
+        this.elements.overlays.help.hide();
       } else if (!this.isTypingInFormField()) {
         this.clearSelection();
       }
@@ -1771,9 +1783,9 @@ export class SceneViewerApp {
   /** Opens the export dialog for the current selection - shared by the
    * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
   private openExportDialog(): void {
-    this.elements.exportOverlay.setSelectedIndices(this.getExportIndices());
+    this.elements.overlays.export.setSelectedIndices(this.getExportIndices());
     this.renderExportMeshPreview();
-    this.elements.exportOverlay.show();
+    this.elements.overlays.export.show();
   }
 
   private handleGizmoPointerMove(event: PointerEvent): void {
@@ -2182,7 +2194,7 @@ export class SceneViewerApp {
   }
 
   private autoCorrectRenderDocDistortion(): void {
-    const logLine = this.elements.loadingScreen.log('Calculating object distortions ...');
+    const logLine = this.elements.overlays.loadingScreen.log('Calculating object distortions ...');
     const updateLogLineEvery = 7;
 
     let skippedHighResidual = 0;
@@ -2241,7 +2253,7 @@ export class SceneViewerApp {
       return;
     }
 
-    const logLine2 = this.elements.loadingScreen.log('Sorting distortion candidates [ .. ]');
+    const logLine2 = this.elements.overlays.loadingScreen.log('Sorting distortion candidates [ .. ]');
 
     const { clusterOf, largestCluster, largestClusterSize } = findDistortionConsensus(
       candidates.map((candidate) => candidate.linear),
@@ -2249,7 +2261,7 @@ export class SceneViewerApp {
 
     logLine2.updateLogItem(`Sorting distortion candidates [ ok ]`);
 
-    const ll3 = this.elements.loadingScreen.log('Selecting the best distortion candidate [ .. ]');
+    const ll3 = this.elements.overlays.loadingScreen.log('Selecting the best distortion candidate [ .. ]');
     let winnerIndex = -1;
     for (let i = 0; i < candidates.length; i++) {
       if (clusterOf[i] !== largestCluster) continue;
@@ -2453,39 +2465,9 @@ export class SceneViewerApp {
   }
 
 
-  private exportSelectedMeshesAsGlb(): void {
-    const activeSelected = this.getExportIndices();
-    if (activeSelected.length === 0) {
-      return;
-    }
-
-    const entries: ExportMeshEntry[] = activeSelected.map((index) => {
-      const draw = this.loadedDraws[index];
-      return {
-        name: `Draw #${index} (eid ${draw.draw.eventId})`,
-        positions: draw.geometryData.positions,
-        normals: draw.geometryData.normals,
-        uvs: draw.geometryData.uvs,
-        bounds: draw.bounds,
-        material: draw.material,
-      };
-    });
-
-    const group = this.sceneManager.getContentGroup();
-    const sceneTransform: ExportSceneTransform = {
-      quaternion: this.getActiveSceneRotation(),
-      scale: group?.scale.x || this.fixedScale || 1,
-    };
-
-    const blob = buildGlbBlob(entries, sceneTransform);
-    const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
-    this.downloadBlob(blob, fileName);
-  }
-
   /** Triggers a browser download of an already-built blob under the given
-   * file name - the DOM-anchor-click dance shared by
-   * exportSelectedMeshesAsGlb() and handleStartExport(), extracted so both
-   * only have to build the blob and pick a name. */
+   * file name - the DOM-anchor-click dance shared by handleStartExport()
+   * and (previously, before it was retired) the quick-export button. */
   private downloadBlob(blob: Blob, fileName: string): void {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -3511,10 +3493,9 @@ export class SceneViewerApp {
   }
 
   /** What "export" actually operates on: the active selection, or - if
-   * nothing's selected - every currently visible object. Shared by the
-   * quick export button (exportSelectedMeshesAsGlb()), the export dialog
-   * (openExportDialog()), and its live preview (renderExportMeshPreview()),
-   * so all three agree on what's being exported. */
+   * nothing's selected - every currently visible object. Shared by
+   * openExportDialog() and its live preview (renderExportMeshPreview()), so
+   * the dialog and its preview always agree on what's being exported. */
   private getExportIndices(): number[] {
     const selected = this.getActiveSelectedIndices();
     if (selected.length > 0) return selected;
