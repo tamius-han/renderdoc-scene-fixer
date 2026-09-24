@@ -19,6 +19,7 @@ export class ExportMesh extends Overlay {
     fillHolesCheckbox: HTMLInputElement;
     resizeExportedCheckbox: HTMLInputElement;
     approximateHeightInput: HTMLInputElement;
+    moveToOriginCheckbox: HTMLInputElement;
     startExportButton: HTMLButtonElement;
 
     exportPosedButton: HTMLButtonElement;
@@ -43,6 +44,7 @@ export class ExportMesh extends Overlay {
     this.elements.fillHolesCheckbox = this.element.querySelector('#export-options-fill-holes') as HTMLInputElement;
     this.elements.resizeExportedCheckbox = this.element.querySelector('#export-options-resize-exported') as HTMLInputElement;
     this.elements.approximateHeightInput = this.element.querySelector('#export-options-approximate-height') as HTMLInputElement;
+    this.elements.moveToOriginCheckbox = this.element.querySelector('#export-options-move-to-origin') as HTMLInputElement;
     this.elements.startExportButton = this.element.querySelector('#export-options-start-export-btn') as HTMLButtonElement;
     this.elements.exportPosedButton = this.element.querySelector('#export-options-export-output') as HTMLButtonElement;
     this.elements.exportOriginalButton = this.element.querySelector('#export-options-export-input') as HTMLButtonElement;
@@ -56,6 +58,7 @@ export class ExportMesh extends Overlay {
     this.elements.approximateHeightInput.value = this.appConfig.config.exportOptions.approximateHeight.toString();
     this.elements.approximateHeightInput.disabled = !this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
+    this.elements.moveToOriginCheckbox.checked = this.appConfig.config.exportOptions.moveToOrigin;
 
     this.elements.exportPosedButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'output');
     this.elements.exportOriginalButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'input');
@@ -66,6 +69,7 @@ export class ExportMesh extends Overlay {
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.resizeExportedCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.moveToOriginCheckbox.addEventListener('change', () => this.updateExportOptions());
 
     this.elements.startExportButton.addEventListener('click', () => this.startExport());
     this.elements.exportPosedButton.addEventListener('click', () => this.updateExportType('output'));
@@ -127,6 +131,7 @@ export class ExportMesh extends Overlay {
 
     this.appConfig.config.exportOptions.fillHoles = this.elements.fillHolesCheckbox.checked;
     this.appConfig.config.exportOptions.resizeExportedObject = this.elements.resizeExportedCheckbox.checked;
+    this.appConfig.config.exportOptions.moveToOrigin = this.elements.moveToOriginCheckbox.checked;
 
     const f = parseFloat(this.elements.approximateHeightInput.value);
     if (!isNaN(f)) {

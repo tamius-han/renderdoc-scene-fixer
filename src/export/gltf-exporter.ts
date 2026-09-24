@@ -25,6 +25,14 @@ export interface ExportMeshEntry {
 export interface ExportSceneTransform {
   quaternion: THREE.Quaternion;
   scale: number;
+  /** Root-node translation, applied AFTER rotation/scale (standard glTF
+   * TRS order: local = T * R * S) - so this is expressed in the ALREADY
+   * rotated-and-scaled space, not the mesh data's own raw local space.
+   * Optional; omitted (or left at (0,0,0)) exports at whatever position
+   * the scene's own geometry naturally sits at, same as before this field
+   * existed. Set by app.ts's applyExportMoveToOrigin() for the "move
+   * object to origin" export option. */
+  translation?: THREE.Vector3;
 }
 
 /** Deliberately NOT three.js's own GLTFExporter addon: that lives under
@@ -140,7 +148,7 @@ interface GltfJson {
   extensionsUsed?: string[];
   scene: number;
   scenes: { nodes: number[] }[];
-  nodes: Array<{ name?: string; mesh?: number; rotation?: number[]; scale?: number[]; children?: number[] }>;
+  nodes: Array<{ name?: string; mesh?: number; rotation?: number[]; scale?: number[]; translation?: number[]; children?: number[] }>;
   meshes: Array<{ name?: string; primitives: Array<{ attributes: Record<string, number>; material?: number }> }>;
   materials: Array<{
     name?: string;
@@ -293,6 +301,7 @@ export function buildGlbBlob(meshes: ExportMeshEntry[], sceneTransform: ExportSc
     name: "Scene",
     rotation: sceneTransform.quaternion.toArray(),
     scale: [sceneTransform.scale, sceneTransform.scale, sceneTransform.scale],
+    ...(sceneTransform.translation ? { translation: sceneTransform.translation.toArray() } : {}),
     children: meshNodeIndices,
   });
 

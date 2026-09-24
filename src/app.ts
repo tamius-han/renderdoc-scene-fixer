@@ -2275,6 +2275,9 @@ export class SceneViewerApp {
     if (exportOptions.resizeExportedObject) {
       this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
     }
+    if (exportOptions.moveToOrigin) {
+      this.applyExportMoveToOrigin(entries, sceneTransform);
+    }
 
     const blob = buildGlbBlob(entries, sceneTransform);
     const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
@@ -2324,13 +2327,32 @@ export class SceneViewerApp {
     }));
   }
 
-  private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {
+  /** Computes the union of every entry's RAW (pre-transform) bounding box,
+   * then returns the min/max corners after applying `quaternion` and a
+   * uniform `scale` (in that order - correct regardless of order for a
+   * uniform scale factor, since scaling and rotating about the origin
+   * commute) - i.e. the bounding box of the whole export AFTER that
+   * rotation/scale, without needing to actually transform every vertex:
+   * rotating/scaling the raw box's own 8 corners and re-deriving min/max
+   * from THOSE is equivalent and far cheaper, since an axis-aligned box's
+   * extent along any axis is always achieved at one of its corners, and
+   * rotation/uniform scale doesn't change which points achieve it. Shared
+   * by applyExportResize() (which only reads the Y extent, at scale 1,
+   * since it's SOLVING for scale) and applyExportMoveToOrigin() (which
+   * needs the full box at the FINAL scale, so it must run after resize
+   * has already updated sceneTransform.scale if both are on). Returns
+   * null for an empty entry list. */
+  private computeTransformedExportBounds(
+    entries: ExportMeshEntry[],
+    quaternion: THREE.Quaternion,
+    scale: number,
+  ): { min: THREE.Vector3; max: THREE.Vector3 } | null {
     let combined: Bounds | null = null;
     for (const entry of entries) {
       const bounds = computeBounds(entry.positions);
       combined = combined ? unionBounds(combined, bounds) : bounds;
     }
-    if (!combined) return;
+    if (!combined) return null;
 
     const corners = [
       new THREE.Vector3(combined.min.x, combined.min.y, combined.min.z),
@@ -2342,18 +2364,44 @@ export class SceneViewerApp {
       new THREE.Vector3(combined.max.x, combined.max.y, combined.min.z),
       new THREE.Vector3(combined.max.x, combined.max.y, combined.max.z),
     ];
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const corner of corners) {
-      corner.applyQuaternion(sceneTransform.quaternion);
-      if (corner.y < minY) minY = corner.y;
-      if (corner.y > maxY) maxY = corner.y;
-    }
 
-    const rotatedHeight = maxY - minY;
+    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    for (const corner of corners) {
+      corner.applyQuaternion(quaternion).multiplyScalar(scale);
+      min.min(corner);
+      max.max(corner);
+    }
+    return { min, max };
+  }
+
+  private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {
+    const bounds = this.computeTransformedExportBounds(entries, sceneTransform.quaternion, 1);
+    if (!bounds) return;
+
+    const rotatedHeight = bounds.max.y - bounds.min.y;
     if (rotatedHeight < 1e-9) return;
 
     sceneTransform.scale = targetHeight / rotatedHeight;
+  }
+
+  /** Sets sceneTransform.translation (see that field's own doc comment in
+   * gltf-exporter.ts) so the exported result's FINAL bounding box - i.e.
+   * after its rotation and (possibly resized) scale, which is why this
+   * must run after applyExportResize() when both options are on - has its
+   * bottom sitting at Y=0 and its X/Z center at the origin: "move object
+   * to origin" means the object's footprint ends up centered under the
+   * world origin and resting on the ground plane, not that its own
+   * (arbitrary) local origin lands at world (0,0,0). */
+  private applyExportMoveToOrigin(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform): void {
+    const bounds = this.computeTransformedExportBounds(entries, sceneTransform.quaternion, sceneTransform.scale);
+    if (!bounds) return;
+
+    sceneTransform.translation = new THREE.Vector3(
+      -(bounds.min.x + bounds.max.x) / 2,
+      -bounds.min.y,
+      -(bounds.min.z + bounds.max.z) / 2,
+    );
   }
 
   private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {

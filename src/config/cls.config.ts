@@ -21,6 +21,7 @@ export interface AppConfiguration {
     fillHoles: boolean;
     resizeExportedObject: boolean;
     approximateHeight: number;
+    moveToOrigin: boolean;
 
     exportType: 'output' | 'input';
   };
@@ -72,11 +73,12 @@ export class Config {
       fillHoles: true,
       resizeExportedObject: true,
       approximateHeight: 100,
+      moveToOrigin: true,
       exportType: 'output',
     },
 
     objectFiltering: {
-      hideLargestObjectsPercent: 10,
+      hideLargestObjectsPercent: 5,
     },
     controls: {
       controlScheme: 'esdf',
