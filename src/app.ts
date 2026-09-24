@@ -139,6 +139,10 @@ export class SceneViewerApp {
   private undoStack: HistorySnapshot[] = [];
   private redoStack: HistorySnapshot[] = [];
 
+  // Disposer for the export dialog's own live preview scene (see
+  // attachMultiMeshPreview()'s return value / disposeExportMeshPreview()).
+  private activeExportPreviewDispose: (() => void) | null = null;
+
   private selectionVisuals: THREE.Object3D[] = [];
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
 
@@ -293,6 +297,17 @@ export class SceneViewerApp {
     this.elements.exportOverlay.addEventListener('start-export', (e: any) =>
       this.handleStartExport(e.detail.selectedIndices, e.detail.exportOptions),
     );
+    // The main viewport is fully covered while this dialog is open, and its
+    // own preview pane has an independent renderer/scene - see pause()'s
+    // and disposeExportMeshPreview()'s doc comments for why each matters.
+    // Hooked to the overlay's own events (not just the "click Fix & export"
+    // path above) so this also fires when the dialog is closed via Escape,
+    // clicking its backdrop, or its own start-export flow.
+    this.elements.exportOverlay.addEventListener('overlay-shown', () => this.sceneManager.pause());
+    this.elements.exportOverlay.addEventListener('overlay-hidden', () => {
+      this.sceneManager.resume();
+      this.disposeExportMeshPreview();
+    });
   }
 
   private setupToolsMenu() {
@@ -1563,18 +1578,32 @@ export class SceneViewerApp {
   }
 
   /** Global selection/export shortcuts - H (hide selected), Ctrl+I (invert
-   * selection), Ctrl+A (select all visible), Escape (clear selection, same
-   * as right-clicking empty space/an unselected object), Ctrl+E and
-   * Ctrl+Shift+E (open the export dialog), Ctrl+Z (undo), and Ctrl+Y /
-   * Ctrl+Shift+Z (redo). */
+   * selection), Ctrl+A (select all visible), Escape (closes whichever
+   * overlay is open - export dialog first, then control options - or, if
+   * neither is open, clears selection, same as right-clicking empty
+   * space/an unselected object), Ctrl+E and Ctrl+Shift+E (open the export
+   * dialog), Ctrl+Z (undo), and Ctrl+Y / Ctrl+Shift+Z (redo). */
   private handleSelectionKeydown(event: KeyboardEvent): void {
-    if (event.repeat || this.isTypingInFormField() || this.isFlying) return;
-    const ctrlOrCmd = event.ctrlKey || event.metaKey;
+    if (event.repeat || this.isFlying) return;
 
+    // Escape needs to close an open overlay even while a field inside that
+    // overlay (e.g. the export dialog's height input) has focus, so it's
+    // handled before the isTypingInFormField() guard below - unlike every
+    // other shortcut here, which should stay quiet while the user's typing
+    // somewhere.
     if (event.code === "Escape") {
-      this.clearSelection();
+      if (this.elements.exportOverlay.isVisible()) {
+        this.elements.exportOverlay.hide();
+      } else if (this.elements.controlsOverlay.isVisible()) {
+        this.elements.controlsOverlay.hide();
+      } else if (!this.isTypingInFormField()) {
+        this.clearSelection();
+      }
       return;
     }
+
+    if (this.isTypingInFormField()) return;
+    const ctrlOrCmd = event.ctrlKey || event.metaKey;
 
     if (event.code === "KeyH" && !ctrlOrCmd) {
       this.hideSelectedItems();
@@ -2597,7 +2626,7 @@ export class SceneViewerApp {
     container: HTMLElement,
     draws: LoadedDraw[],
     options: { interactive: boolean; poseMode?: "posed" | "non-posed"; textured?: boolean },
-  ): void {
+  ): () => void {
     const poseMode = options.poseMode ?? "non-posed";
     const textured = options.textured ?? true;
 
@@ -2695,12 +2724,25 @@ export class SceneViewerApp {
       camera.updateProjectionMatrix();
     };
 
+    // Shared, idempotent teardown - reachable both from the loops below
+    // (once the container's disconnected from the DOM, or after the single
+    // non-interactive render) and from the disposer this method returns, so
+    // a caller can force early cleanup (e.g. the export dialog closing)
+    // without waiting for either condition.
+    let disposed = false;
+    let resizeObserver: ResizeObserver;
+    const disposePreview = (): void => {
+      if (disposed) return;
+      disposed = true;
+      renderer.dispose();
+      resizeObserver?.disconnect();
+    };
+
     if (options.interactive) {
       const gizmo = new OrientationGizmo();
       gizmo.element.classList.add("orientation-gizmo--preview");
       container.appendChild(gizmo.element);
       const gizmoCameraProxy = new THREE.Object3D();
-
       let pointerDown = false;
       let lastX = 0;
       let lastY = 0;
@@ -2762,13 +2804,13 @@ export class SceneViewerApp {
       });
       previewCanvas.addEventListener("wheel", handleWheel, { passive: false });
 
-      const resizeObserver = new ResizeObserver(() => resize());
-      resizeObserver.observe(container);
+      const resizeObserverInteractive = new ResizeObserver(() => resize());
+      resizeObserverInteractive.observe(container);
+      resizeObserver = resizeObserverInteractive;
 
       const tick = () => {
-        if (!container.isConnected) {
-          renderer.dispose();
-          resizeObserver.disconnect();
+        if (disposed || !container.isConnected) {
+          disposePreview();
           return;
         }
         gizmoCameraProxy.quaternion.copy(modelRoot.quaternion).invert().multiply(camera.quaternion);
@@ -2786,21 +2828,23 @@ export class SceneViewerApp {
       // layout has run) - and free the GL context right away instead of
       // holding one open per thumbnail (see this method's doc comment).
       const renderOnceReady = (): void => {
-        if (container.clientWidth === 0 || container.clientHeight === 0) return;
+        if (disposed || container.clientWidth === 0 || container.clientHeight === 0) return;
         resize();
         renderer.render(scene, camera);
-        renderer.dispose();
-        resizeObserver.disconnect();
+        disposePreview();
       };
-      const resizeObserver = new ResizeObserver(() => renderOnceReady());
-      resizeObserver.observe(container);
+      const resizeObserverOnce = new ResizeObserver(() => renderOnceReady());
+      resizeObserverOnce.observe(container);
+      resizeObserver = resizeObserverOnce;
       renderOnceReady(); // covers the common case where layout's already settled
     }
+
+    return disposePreview;
   }
 
   private renderExportMeshPreview(): void {
+    this.disposeExportMeshPreview();
     const host = this.el<HTMLElement>("export-mesh-export-preview");
-    host.innerHTML = "";
 
     const draws = this.getExportIndices()
       .map((i) => this.loadedDraws[i])
@@ -2808,11 +2852,22 @@ export class SceneViewerApp {
     if (draws.length === 0) return;
 
     const exportOptions = this.appConfig.config.exportOptions;
-    this.attachMultiMeshPreview(host, draws, {
+    this.activeExportPreviewDispose = this.attachMultiMeshPreview(host, draws, {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
       textured: exportOptions.exportTextures,
     });
+  }
+
+  /** Tears down the export dialog's own live preview (its independent
+   * renderer/scene, not the main viewport - see attachMultiMeshPreview()'s
+   * disposer) and empties its host, so nothing keeps rendering in the
+   * background once the dialog is closed or about to show something new.
+   * Safe to call even when there's nothing to tear down. */
+  private disposeExportMeshPreview(): void {
+    this.activeExportPreviewDispose?.();
+    this.activeExportPreviewDispose = null;
+    this.el<HTMLElement>("export-mesh-export-preview").innerHTML = "";
   }
 
   /** Sizes and positions the resource panel. Sizing always follows
