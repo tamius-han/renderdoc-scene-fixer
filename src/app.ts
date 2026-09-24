@@ -1742,7 +1742,7 @@ export class SceneViewerApp {
   /** Opens the export dialog for the current selection - shared by the
    * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
   private openExportDialog(): void {
-    this.elements.exportOverlay.setSelectedIndices(this.getActiveSelectedIndices());
+    this.elements.exportOverlay.setSelectedIndices(this.getExportIndices());
     this.renderExportMeshPreview();
     this.elements.exportOverlay.show();
   }
@@ -2425,7 +2425,7 @@ export class SceneViewerApp {
 
 
   private exportSelectedMeshesAsGlb(): void {
-    const activeSelected = this.getActiveSelectedIndices();
+    const activeSelected = this.getExportIndices();
     if (activeSelected.length === 0) {
       return;
     }
@@ -2802,7 +2802,7 @@ export class SceneViewerApp {
     const host = this.el<HTMLElement>("export-mesh-export-preview");
     host.innerHTML = "";
 
-    const draws = this.getActiveSelectedIndices()
+    const draws = this.getExportIndices()
       .map((i) => this.loadedDraws[i])
       .filter((d): d is LoadedDraw => !!d);
     if (draws.length === 0) return;
@@ -3446,14 +3446,29 @@ export class SceneViewerApp {
    * still clears any leftover dimming/outline. */
   /** Currently selected AND actually visible objects - "selected" should
    * always mean what's actually highlighted/visible on screen, not some
-   * separate notion of selection that includes hidden objects. Shared by
-   * updateSelectionVisuals(), exportSelectedMeshesAsGlb(), and the export
-   * dialog's own knowledge of what it's exporting (see
-   * renderExportMeshPreview() and the fixExport handler in setupMenu()). */
+   * separate notion of selection that includes hidden objects. Used for the
+   * on-screen highlight (updateSelectionVisuals()) and as the base that
+   * getExportIndices() falls back from. */
   private getActiveSelectedIndices(): number[] {
     return Array.from(this.selectedIndices).filter(
       (i) => !this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i),
     );
+  }
+
+  /** What "export" actually operates on: the active selection, or - if
+   * nothing's selected - every currently visible object. Shared by the
+   * quick export button (exportSelectedMeshesAsGlb()), the export dialog
+   * (openExportDialog()), and its live preview (renderExportMeshPreview()),
+   * so all three agree on what's being exported. */
+  private getExportIndices(): number[] {
+    const selected = this.getActiveSelectedIndices();
+    if (selected.length > 0) return selected;
+
+    const visible: number[] = [];
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (!this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i)) visible.push(i);
+    }
+    return visible;
   }
 
   private updateSelectionVisuals(): void {
