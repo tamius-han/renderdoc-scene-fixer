@@ -268,9 +268,7 @@ export class SceneViewerApp {
     });
     this.elements.menu.fixExport.addEventListener('click', () => {
       console.info('opening export overlay');
-      this.elements.exportOverlay.setSelectedIndices(this.getActiveSelectedIndices());
-      this.renderExportMeshPreview();
-      this.elements.exportOverlay.show();
+      this.openExportDialog();
     });
     this.elements.exportOverlay.addEventListener('export-options-changed', () => this.renderExportMeshPreview());
     this.elements.exportOverlay.addEventListener('start-export', (e: any) =>
@@ -426,9 +424,13 @@ export class SceneViewerApp {
     window.addEventListener("pointermove", (e) => this.handleGizmoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleGizmoPointerUp(e));
     window.addEventListener("keydown", (e) => this.handleGizmoKeydown(e));
+    window.addEventListener("keydown", (e) => this.handleSelectionKeydown(e));
 
+    // Right click is used as a selection tool (see handleSceneObjectPointer())
+    // rather than a context-menu trigger, so the browser's own menu should
+    // never appear over the viewport.
     this.sceneManager.renderer.domElement.addEventListener("contextmenu", (event) => {
-      if (this.groundPlaneToolActive || this.selectAreaToolActive || this.lassoDragActive) event.preventDefault();
+      event.preventDefault();
     });
     window.addEventListener("pointermove", (e) => this.handleLassoPointerMove(e));
     window.addEventListener("pointerup", (e) => this.handleLassoPointerUp(e));
@@ -1532,6 +1534,100 @@ export class SceneViewerApp {
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
     else if (event.code === "KeyR") this.setSelectAreaGizmoMode("rotate");
+  }
+
+  /** Global selection/export shortcuts - H (hide selected), Ctrl+I (invert
+   * selection), Ctrl+A (select all visible), Escape (clear selection, same
+   * as right-clicking empty space/an unselected object), Ctrl+E and
+   * Ctrl+Shift+E (open the export dialog). */
+  private handleSelectionKeydown(event: KeyboardEvent): void {
+    if (event.repeat || this.isTypingInFormField() || this.isFlying) return;
+    const ctrlOrCmd = event.ctrlKey || event.metaKey;
+
+    if (event.code === "Escape") {
+      this.clearSelection();
+      return;
+    }
+
+    if (event.code === "KeyH" && !ctrlOrCmd) {
+      this.hideSelectedItems();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyI") {
+      event.preventDefault();
+      this.invertSelection();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyA") {
+      event.preventDefault();
+      this.selectAllVisible();
+      return;
+    }
+
+    if (ctrlOrCmd && event.code === "KeyE") {
+      event.preventDefault();
+      this.openExportDialog();
+      return;
+    }
+  }
+
+  /** Clears the current selection - shared by Escape and right-clicking
+   * empty space/an unselected object. */
+  private clearSelection(): void {
+    if (this.selectedIndices.size === 0) return;
+    this.selectedIndices.clear();
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Hides every currently selected item (manual hide, not a toggle) -
+   * mirrors the "hide" half of toggleDrawVisibility() but always hides
+   * rather than flipping state. Selection itself is left alone, same as
+   * toggleDrawVisibility(). */
+  private hideSelectedItems(): void {
+    if (this.selectedIndices.size === 0) return;
+    for (const index of this.selectedIndices) this.manuallyHiddenIndices.add(index);
+    this.rebuildVisibleScene();
+  }
+
+  /** Selects every visible (not filtered-out, not manually hidden) item. */
+  private selectAllVisible(): void {
+    this.selectedIndices.clear();
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (!this.isObjectHidden(i) && !this.manuallyHiddenIndices.has(i)) this.selectedIndices.add(i);
+    }
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Replaces the selection with the complement of itself among visible
+   * items - hidden items (filtered or manually hidden) are ignored
+   * entirely, neither contributing to nor being affected by the flip. */
+  private invertSelection(): void {
+    const inverted = new Set<number>();
+    for (let i = 0; i < this.loadedDraws.length; i++) {
+      if (this.isObjectHidden(i) || this.manuallyHiddenIndices.has(i)) continue;
+      if (!this.selectedIndices.has(i)) inverted.add(i);
+    }
+    this.selectedIndices = inverted;
+    this.lastClickedIndex = null;
+    this.noteSelectionTarget(null);
+    this.refreshSelectionVisuals();
+    this.renderObjectListState();
+  }
+
+  /** Opens the export dialog for the current selection - shared by the
+   * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
+  private openExportDialog(): void {
+    this.elements.exportOverlay.setSelectedIndices(this.getActiveSelectedIndices());
+    this.renderExportMeshPreview();
+    this.elements.exportOverlay.show();
   }
 
   private handleGizmoPointerMove(event: PointerEvent): void {
@@ -3144,22 +3240,12 @@ export class SceneViewerApp {
 
     if (event.button === 2) {
       if (index === null || this.isObjectHidden(index) || this.manuallyHiddenIndices.has(index)) {
-        if (this.selectedIndices.size > 0) {
-          this.selectedIndices.clear();
-          this.lastClickedIndex = null;
-          this.noteSelectionTarget(null);
-          this.refreshSelectionVisuals();
-          this.renderObjectListState();
-        }
+        this.clearSelection();
         return;
       }
 
       if (!this.selectedIndices.has(index)) {
-        this.selectedIndices.clear();
-        this.lastClickedIndex = null;
-        this.noteSelectionTarget(null);
-        this.refreshSelectionVisuals();
-        this.renderObjectListState();
+        this.clearSelection();
       }
       return;
     }
