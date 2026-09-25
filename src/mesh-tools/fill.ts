@@ -43,10 +43,107 @@ interface IndexedMesh {
   faces: [number, number, number][];
 }
 
-/** Merges coincident-position vertices (exact match, like
- * parsers/obj.ts's dedupeVerts()) to build an IndexedMesh from this app's
- * standard flat/non-indexed GeometryArrays. */
+/** Heuristic for "does this geometry actually have a UV map": true unless
+ * every single UV coordinate is exactly (0,0), which is what
+ * objToGeometryArrays() produces for a corner with no `vt` data at all (see
+ * that function). A real UV map could in principle put every vertex at the
+ * texture origin, but that's vanishingly unlikely for real capture data, so
+ * "all zero" is treated as "no UV map" throughout this file. */
+function hasUVMap(uvs: number[]): boolean {
+  for (let i = 0; i < uvs.length; i++) {
+    if (uvs[i] !== 0) return true;
+  }
+  return false;
+}
+
+function positionKeyOf(p: THREE.Vector3): string {
+  return `${p.x},${p.y},${p.z}`;
+}
+
+/** When a UV map is present, toIndexedMesh() below deliberately keeps
+ * vertices that share a 3D position but disagree on UV (e.g. the two sides
+ * of a texture seam) as separate indexed vertices, rather than merging them
+ * and silently discarding one side's UV. Left alone, that means every UV
+ * seam looks like a genuine mesh boundary to the topology-aware operations
+ * in this file (findBoundaryEdges()/splitByLooseParts()): each seam-side
+ * triangle no longer shares a vertex index with the triangle across the
+ * seam at all, so splitByLooseParts() would cut one continuous surface into
+ * separate "loose parts" at every seam, and findBoundaryEdges() would treat
+ * every seam as a hole to fill.
+ *
+ * This bridges that gap without merging anything: for every pair of
+ * boundary edges that sit at the exact same two 3D positions (the seam's
+ * two mirrored edges, one per side), it adds two zero-width triangles -
+ * degenerate triangles with two corners coincident in 3D and differing only
+ * in UV - stitching the two sides back together. That turns both original
+ * edges from boundary (used by one face) into interior (used by two), and
+ * links the two sides' vertices into one connected component, purely to
+ * give the adjacency/edge-sharing checks something to walk across. The two
+ * new "cross-seam" edges these triangles also introduce are themselves
+ * zero-length and only ever touched once each, so buildEdgeLoops() below
+ * naturally discards them (they can only ever form a 2-vertex loop, and it
+ * requires at least 3 to count as a hole). Groups that don't pair up
+ * exactly one-to-one (a T-junction, or a genuine hole that happens to share
+ * a position with something else) are left untouched as real boundary
+ * edges rather than guessed at. */
+function bridgeUVSeams(positions: THREE.Vector3[], faces: [number, number, number][]): void {
+  const edgeCount = new Map<string, number>();
+  for (const face of faces) {
+    for (let i = 0; i < 3; i++) {
+      const a = face[i];
+      const b = face[(i + 1) % 3];
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      edgeCount.set(key, (edgeCount.get(key) ?? 0) + 1);
+    }
+  }
+
+  const boundaryEdges: [number, number][] = [];
+  for (const [key, count] of edgeCount) {
+    if (count === 1) {
+      const [a, b] = key.split(",").map(Number);
+      boundaryEdges.push([a, b]);
+    }
+  }
+  if (boundaryEdges.length === 0) return;
+
+  const groups = new Map<string, [number, number][]>();
+  for (const edge of boundaryEdges) {
+    const pa = positionKeyOf(positions[edge[0]]);
+    const pb = positionKeyOf(positions[edge[1]]);
+    const key = pa < pb ? `${pa}|${pb}` : `${pb}|${pa}`;
+    let list = groups.get(key);
+    if (!list) {
+      list = [];
+      groups.set(key, list);
+    }
+    list.push(edge);
+  }
+
+  for (const edges of groups.values()) {
+    if (edges.length !== 2) continue; // Not a simple two-sided seam - leave as a real boundary.
+    const [[a1, b1], edge2] = edges;
+    // Orient edge2 so its first vertex sits at a1's position (edges in a
+    // matched pair share the same two 3D positions, in one order or the
+    // other).
+    const [a2, b2] =
+      positions[a1].distanceToSquared(positions[edge2[0]]) <= positions[a1].distanceToSquared(positions[edge2[1]])
+        ? edge2
+        : [edge2[1], edge2[0]];
+    faces.push([a1, a2, b2]); // a1 and a2 coincide in 3D -> zero-width.
+    faces.push([a1, b2, b1]); // b1 and b2 coincide in 3D -> zero-width.
+  }
+}
+
+/** Merges vertices to build an IndexedMesh from this app's standard flat/
+ * non-indexed GeometryArrays. Without a UV map, this merges purely by
+ * coincident position (exact match, like parsers/obj.ts's dedupeVerts()).
+ * With one, positions are only merged when their UV also matches - a
+ * position-only merge would collapse a texture seam's two different UVs
+ * into one, corrupting the UV map - and bridgeUVSeams() (above) separately
+ * patches the topology-analysis side effects of keeping those seam
+ * vertices apart. */
 function toIndexedMesh(data: GeometryArrays): IndexedMesh {
+  const uvMapPresent = hasUVMap(data.uvs);
   const positions: THREE.Vector3[] = [];
   const uvs: [number, number][] = [];
   const faces: [number, number, number][] = [];
@@ -58,13 +155,15 @@ function toIndexedMesh(data: GeometryArrays): IndexedMesh {
     const x = data.positions[i * 3];
     const y = data.positions[i * 3 + 1];
     const z = data.positions[i * 3 + 2];
-    const key = `${x},${y},${z}`;
+    const u = data.uvs[i * 2] ?? 0;
+    const v = data.uvs[i * 2 + 1] ?? 0;
+    const key = uvMapPresent ? `${x},${y},${z}|${u},${v}` : `${x},${y},${z}`;
     let idx = indexByKey.get(key);
     if (idx === undefined) {
       idx = positions.length;
       indexByKey.set(key, idx);
       positions.push(new THREE.Vector3(x, y, z));
-      uvs.push([data.uvs[i * 2] ?? 0, data.uvs[i * 2 + 1] ?? 0]);
+      uvs.push([u, v]);
     }
     localIndex[i] = idx;
   }
@@ -72,6 +171,8 @@ function toIndexedMesh(data: GeometryArrays): IndexedMesh {
   for (let i = 0; i + 2 < vertexCount; i += 3) {
     faces.push([localIndex[i], localIndex[i + 1], localIndex[i + 2]]);
   }
+
+  if (uvMapPresent) bridgeUVSeams(positions, faces);
 
   return { positions, uvs, faces };
 }

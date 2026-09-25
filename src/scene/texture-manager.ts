@@ -2,8 +2,9 @@ import * as THREE from "three";
 import type { VirtualFileSystem } from "../filesystem";
 
 /**
- * Loads and caches textures from the virtual file system, downscaling
- * anything above maxDimension before it ever reaches the GPU.
+ * Loads and caches textures from the virtual file system at their full,
+ * native resolution - textures are never downscaled before reaching the
+ * GPU.
  *
  * This exists specifically to fix a crash on large captures: the previous
  * (plain HTML/JS) version of this viewer used THREE.TextureLoader().load(),
@@ -16,16 +17,15 @@ import type { VirtualFileSystem } from "../filesystem";
  *
  * Using createImageBitmap() here instead, and awaiting it per texture inside
  * the caller's sequential per-draw loop, means decodes are naturally
- * throttled to one at a time, and downscaling caps how much GPU memory each
- * texture can possibly use regardless of the source image's resolution.
+ * throttled to one at a time - each texture still reaches the GPU at full
+ * size, but never more than one decode is in flight simultaneously.
  */
 export class TextureManager {
-  private cache = new Map<string, THREE.Texture>();
-  maxDimension = 1024;
+  private cache = new Map<string, { texture: THREE.Texture; bitmap: ImageBitmap }>();
 
   async load(vfs: VirtualFileSystem, path: string): Promise<THREE.Texture | null> {
     const cached = this.cache.get(path);
-    if (cached) return cached;
+    if (cached) return cached.texture;
 
     const file = vfs.get(path);
     if (!file) return null;
@@ -38,33 +38,23 @@ export class TextureManager {
       return null;
     }
 
-    const scale = Math.min(1, this.maxDimension / Math.max(bitmap.width, bitmap.height));
-    const width = Math.max(1, Math.round(bitmap.width * scale));
-    const height = Math.max(1, Math.round(bitmap.height * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      bitmap.close();
-      return null;
-    }
-    ctx.drawImage(bitmap, 0, 0, width, height);
-    bitmap.close();
-
-    const texture = new THREE.CanvasTexture(canvas);
+    // The bitmap becomes the texture's image directly, at whatever
+    // resolution it was decoded at - no intermediate canvas resize.
+    const texture = new THREE.Texture(bitmap);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
     texture.needsUpdate = true;
 
-    this.cache.set(path, texture);
+    this.cache.set(path, { texture, bitmap });
     return texture;
   }
 
   disposeAll(): void {
-    for (const texture of this.cache.values()) texture.dispose();
+    for (const { texture, bitmap } of this.cache.values()) {
+      texture.dispose();
+      bitmap.close();
+    }
     this.cache.clear();
   }
 }
