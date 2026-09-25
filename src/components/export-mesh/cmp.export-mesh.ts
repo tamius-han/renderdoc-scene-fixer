@@ -15,6 +15,7 @@ export class ExportMesh extends Overlay {
 
   private elements: {
     exportTexturesCheckbox: HTMLInputElement;
+    litShadingCheckbox: HTMLInputElement;
     splitLoosePartsCheckbox: HTMLInputElement;
     fillHolesCheckbox: HTMLInputElement;
     resizeExportedCheckbox: HTMLInputElement;
@@ -40,6 +41,7 @@ export class ExportMesh extends Overlay {
 
   setupInteraction() {
     this.elements.exportTexturesCheckbox = this.element.querySelector('#export-options-export-textures') as HTMLInputElement;
+    this.elements.litShadingCheckbox = this.element.querySelector('#export-options-lit-shading') as HTMLInputElement;
     this.elements.splitLoosePartsCheckbox = this.element.querySelector('#export-options-split-loose-parts') as HTMLInputElement;
     this.elements.fillHolesCheckbox = this.element.querySelector('#export-options-fill-holes') as HTMLInputElement;
     this.elements.resizeExportedCheckbox = this.element.querySelector('#export-options-resize-exported') as HTMLInputElement;
@@ -51,6 +53,7 @@ export class ExportMesh extends Overlay {
 
     // load initial values from appConfig
     this.elements.exportTexturesCheckbox.checked = this.appConfig.config.exportOptions.exportTextures;
+    this.elements.litShadingCheckbox.checked = this.appConfig.config.exportOptions.litShading;
     this.elements.splitLoosePartsCheckbox.checked = this.appConfig.config.exportOptions.splitLooseParts;
     this.elements.fillHolesCheckbox.checked = this.appConfig.config.exportOptions.fillHoles;
     this.elements.resizeExportedCheckbox.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
@@ -66,6 +69,7 @@ export class ExportMesh extends Overlay {
     this.syncDependentDisabledStates();
 
     this.elements.exportTexturesCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.litShadingCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.resizeExportedCheckbox.addEventListener('change', () => this.updateExportOptions());
@@ -82,7 +86,10 @@ export class ExportMesh extends Overlay {
    * on - hole detection/filling runs per split-out part (see fill.ts),
    * and there's no such thing as "the hole in this whole, unsplit
    * object". "Approximate height" only matters when "Resize exported
-   * object" is on. Both dependent controls get genuinely disabled (not
+   * object" is on. "Lit shading" only matters when "Export textures" is
+   * on - with textures off, there's no normal/roughness map to shade
+   * with regardless (see SceneViewerApp.buildExportEntriesForDraw()),
+   * lit or not. Both dependent controls get genuinely disabled (not
    * just styled - see the `.disabled` class alongside), and are forced
    * unchecked/cleared-looking whenever their prerequisite turns off, so
    * the UI can't be left showing a checked-but-inert checkbox. Called
@@ -98,6 +105,11 @@ export class ExportMesh extends Overlay {
     const resizeEnabled = this.elements.resizeExportedCheckbox.checked;
     this.elements.approximateHeightInput.disabled = !resizeEnabled;
     this.elements.approximateHeightInput.classList.toggle('disabled', !resizeEnabled);
+
+    const texturesEnabled = this.elements.exportTexturesCheckbox.checked;
+    this.elements.litShadingCheckbox.disabled = !texturesEnabled;
+    this.elements.litShadingCheckbox.classList.toggle('disabled', !texturesEnabled);
+    if (!texturesEnabled) this.elements.litShadingCheckbox.checked = false;
   }
 
   /** Called by SceneViewerApp right before show(), so this dialog knows
@@ -132,6 +144,7 @@ export class ExportMesh extends Overlay {
     this.appConfig.config.exportOptions.fillHoles = this.elements.fillHolesCheckbox.checked;
     this.appConfig.config.exportOptions.resizeExportedObject = this.elements.resizeExportedCheckbox.checked;
     this.appConfig.config.exportOptions.moveToOrigin = this.elements.moveToOriginCheckbox.checked;
+    this.appConfig.config.exportOptions.litShading = this.elements.litShadingCheckbox.checked;
 
     const f = parseFloat(this.elements.approximateHeightInput.value);
     if (!isNaN(f)) {
