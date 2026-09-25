@@ -16,8 +16,9 @@ import {
 import { computeNormalizationScale, SceneManager, getDefaultViewDirection } from "./scene/scene-manager";
 import { OrientationGizmo } from "./scene/orientation-gizmo";
 import { SelectAreaGizmo, type GizmoMode } from "./scene/select-area-gizmo";
+import { BoundingBoxGizmo } from "./scene/bounding-box-gizmo";
 import { TextureManager } from "./scene/texture-manager";
-import type { DrawEntry, ParsedOBJ } from "./types";
+import type { DrawEntry, ParsedOBJ, TextureBinding } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
 import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
@@ -147,6 +148,13 @@ export class SceneViewerApp {
   private selectionVisuals: THREE.Object3D[] = [];
   private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
 
+  // "Show bounding box" toggle - see toggleBoundingBoxVisible()/
+  // updateBoundingBoxVisual(). Not part of selectionVisuals: unlike the
+  // dot markers, this gizmo owns reusable geometry that must survive a
+  // content-group rebuild (see BoundingBoxGizmo's own doc comment), so it
+  // isn't disposed/recreated by clearSelectionVisuals().
+  private boundingBoxGizmo = new BoundingBoxGizmo();
+
   // stuff for outline rendering
   private outlineMaskScene = new THREE.Scene();
   private outlineMaskGroup = new THREE.Group();
@@ -174,6 +182,7 @@ export class SceneViewerApp {
       frameSceneBtn: this.el("frame-scene-btn"),
       showResourcesPanelBtn: this.el("show-resources-panel-button"),
       hideResourcesPanelBtn: this.el("hide-resources-panel-button"),
+      showBoundingBoxBtn: this.el<HTMLButtonElement>("show-bounding-box-btn"),
       setAxisMappingBtn: this.el("set-axis-mapping-btn"),
 
       selectVolumeSubmenu: {
@@ -246,6 +255,19 @@ export class SceneViewerApp {
     } catch (e) {
       console.warn('setupSelectionOutlinePass failed', e);
     }
+
+    // Lives directly in the scene, not under the content group - see
+    // BoundingBoxGizmo's own doc comment for why - so it's added exactly
+    // once here, then kept in sync every frame (transform + fat-line
+    // pixel-width resolution) regardless of how many times the content
+    // group itself gets torn down and rebuilt.
+    this.sceneManager.scene.add(this.boundingBoxGizmo.group);
+    this.sceneManager.onBeforeRender(() => {
+      this.boundingBoxGizmo.syncTransform(this.sceneManager.getContentGroup());
+      const size = new THREE.Vector2();
+      this.sceneManager.renderer.getDrawingBufferSize(size);
+      this.boundingBoxGizmo.setResolution(Math.max(1, size.x), Math.max(1, size.y));
+    });
     this.sceneManager.onContextLoss((lost) => {
       if (lost) {
         // this.setStatus(
@@ -397,6 +419,11 @@ export class SceneViewerApp {
         this.toggleResourcePanel(false);
       });
 
+      this.elements.toolsMenu.showBoundingBoxBtn.addEventListener('click', () => {
+        this.toggleBoundingBoxVisible();
+      });
+      this.syncBoundingBoxButtonState();
+
       this.restoreResourcePanel();
       // Ensures the submenu's hint/apply-button visibility matches reality
       // (no tool active, nothing selected yet) from the very first render,
@@ -516,6 +543,36 @@ export class SceneViewerApp {
 
   private restoreResourcePanel() {
     this.toggleResourcePanel(Config.sessionConfig.resourcesPanel.visible);
+  }
+
+  /** Toggles the "Show bounding box" button - see updateBoundingBoxVisual()
+   * for where the gizmo's own visibility/bounds actually get applied
+   * (driven off the CURRENT selection, which may have changed since this
+   * was last toggled). */
+  private toggleBoundingBoxVisible(): void {
+    Config.sessionConfig.boundingBox.visible = !Config.sessionConfig.boundingBox.visible;
+    this.syncBoundingBoxButtonState();
+    this.updateBoundingBoxVisual(this.computeActiveSelectionUnionBounds());
+  }
+
+  private syncBoundingBoxButtonState(): void {
+    this.elements.toolsMenu.showBoundingBoxBtn.classList.toggle("active", Config.sessionConfig.boundingBox.visible);
+  }
+
+  /** The union bounding box of every currently ACTIVE-selected (selected
+   * and actually visible - see getActiveSelectedIndices()) object, or null
+   * if there's nothing selected. Shared by updateSelectionVisuals() (which
+   * already walks this same list to place the per-object/union center dot
+   * markers) and toggleBoundingBoxVisible() (which needs it once, right
+   * when the toggle is switched on, without waiting for the next
+   * selection change to call updateSelectionVisuals() again). */
+  private computeActiveSelectionUnionBounds(): Bounds | null {
+    let acc: Bounds | null = null;
+    for (const index of this.getActiveSelectedIndices()) {
+      const bounds = this.loadedDraws[index].bounds;
+      acc = acc ? unionBounds(acc, bounds) : bounds;
+    }
+    return acc;
   }
 
   private noteSelectionTarget(candidate: number | null): void {
@@ -2488,36 +2545,94 @@ export class SceneViewerApp {
     }
 
     const posed = exportOptions.exportType === "output";
-    const entries: ExportMeshEntry[] = draws.flatMap(({ index, draw }) =>
-      this.buildExportEntriesForDraw(index, draw, posed, exportOptions),
-    );
 
-    const group = this.sceneManager.getContentGroup();
-    const sceneTransform: ExportSceneTransform = posed
-      ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
-      : { quaternion: new THREE.Quaternion(), scale: 1 };
+    this.elements.overlays.loadingScreen.show();
+    this.elements.overlays.loadingScreen.log("Preparing export...");
 
-    if (exportOptions.resizeExportedObject) {
-      this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
-    }
-    if (exportOptions.moveToOrigin) {
-      this.applyExportMoveToOrigin(entries, sceneTransform);
-    }
+    Promise.all(draws.map(({ index, draw }) => this.buildExportEntriesForDraw(index, draw, posed, exportOptions)))
+      .then((entryLists) => {
+        const entries: ExportMeshEntry[] = entryLists.flat();
 
-    const blob = buildGlbBlob(entries, sceneTransform);
-    const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
-    this.downloadBlob(blob, fileName);
+        const group = this.sceneManager.getContentGroup();
+        const sceneTransform: ExportSceneTransform = posed
+          ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
+          : { quaternion: new THREE.Quaternion(), scale: 1 };
+
+        if (exportOptions.resizeExportedObject) {
+          this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
+        }
+        if (exportOptions.moveToOrigin) {
+          this.applyExportMoveToOrigin(entries, sceneTransform);
+        }
+
+        const blob = buildGlbBlob(entries, sceneTransform, exportOptions.litShading);
+        const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
+        this.downloadBlob(blob, fileName);
+      })
+      .catch((e) => {
+        console.warn("Export failed", e);
+        this.elements.overlays.loadingScreen.log("Export failed - see console for details.");
+      })
+      .finally(() => {
+        this.elements.overlays.loadingScreen.hide();
+      });
   }
 
-  private buildExportEntriesForDraw(
+  /** Finds the FIRST texture binding captured for `draw` whose
+   * describeTextureType() classification is `kind` and that actually
+   * resolves to a file present in the loaded capture - i.e. the same
+   * bind-point/name/filename heuristics already driving the resource
+   * panel's texture thumbnails, reused here so "what the panel labels as
+   * a normal map" and "what gets embedded as one on export" can't drift
+   * apart. Returns null if the draw has no such binding, or its file
+   * can't be resolved. */
+  private findDrawTextureBinding(draw: LoadedDraw, kind: string): TextureBinding | null {
+    for (const binding of draw.draw.textures) {
+      if (binding.textureFile && this.describeTextureType(binding) === kind) return binding;
+    }
+    return null;
+  }
+
+  /** Loads (via the same cached TextureManager the diffuse map uses) the
+   * normal map and combined metalness/roughness map captured for `draw`,
+   * if any - these are never wired into the on-screen material (this app
+   * renders everything unlit, so they'd have no visible effect - see
+   * resolveMaterial()) but do get embedded into the exported .glb, since
+   * the whole point of exporting is often to bring the capture into a
+   * different, lit renderer (Blender, etc.) - see ExportMeshEntry's own
+   * doc comment for the caveat on how KHR_materials_unlit affects that. */
+  private async loadAuxiliaryDrawTextures(
+    draw: LoadedDraw,
+  ): Promise<{ normal: THREE.Texture | null; metallicRoughness: THREE.Texture | null }> {
+    const normalBinding = this.findDrawTextureBinding(draw, "normal map");
+    const roughnessBinding = this.findDrawTextureBinding(draw, "metalness / roughness");
+
+    const loadBinding = async (binding: TextureBinding | null): Promise<THREE.Texture | null> => {
+      const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
+      return path ? this.textures.load(this.vfs, path) : null;
+    };
+
+    const [normal, metallicRoughness] = await Promise.all([loadBinding(normalBinding), loadBinding(roughnessBinding)]);
+    return { normal, metallicRoughness };
+  }
+
+  private async buildExportEntriesForDraw(
     index: number,
     draw: LoadedDraw,
     posed: boolean,
     exportOptions: AppConfiguration["exportOptions"],
-  ): ExportMeshEntry[] {
+  ): Promise<ExportMeshEntry[]> {
     const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
     const material = exportOptions.exportTextures ? draw.material : this.getUntexturedMaterial();
     const baseName = `Draw #${index} (eid ${draw.draw.eventId})`;
+
+    const { normal: normalTexture, metallicRoughness: metallicRoughnessTexture } = exportOptions.exportTextures
+      ? await this.loadAuxiliaryDrawTextures(draw)
+      : { normal: null, metallicRoughness: null };
+    const auxTextures = {
+      ...(normalTexture ? { normalTexture } : {}),
+      ...(metallicRoughnessTexture ? { metallicRoughnessTexture } : {}),
+    };
 
     if (!exportOptions.splitLooseParts) {
       return [
@@ -2528,6 +2643,7 @@ export class SceneViewerApp {
           uvs: sourceData.uvs,
           bounds: posed ? draw.bounds : computeBounds(sourceData.positions),
           material,
+          ...auxTextures,
         },
       ];
     }
@@ -2549,55 +2665,62 @@ export class SceneViewerApp {
       uvs: part.geometry.uvs,
       bounds: computeBounds(part.geometry.positions),
       material,
+      ...auxTextures,
     }));
   }
 
-  /** Computes the union of every entry's RAW (pre-transform) bounding box,
-   * then returns the min/max corners after applying `quaternion` and a
-   * uniform `scale` (in that order - correct regardless of order for a
-   * uniform scale factor, since scaling and rotating about the origin
-   * commute) - i.e. the bounding box of the whole export AFTER that
-   * rotation/scale, without needing to actually transform every vertex:
-   * rotating/scaling the raw box's own 8 corners and re-deriving min/max
-   * from THOSE is equivalent and far cheaper, since an axis-aligned box's
-   * extent along any axis is always achieved at one of its corners, and
-   * rotation/uniform scale doesn't change which points achieve it. Shared
-   * by applyExportResize() (which only reads the Y extent, at scale 1,
-   * since it's SOLVING for scale) and applyExportMoveToOrigin() (which
-   * needs the full box at the FINAL scale, so it must run after resize
-   * has already updated sceneTransform.scale if both are on). Returns
-   * null for an empty entry list. */
+  /** Computes the bounding box of every entry's RAW (pre-transform) vertex
+   * positions AFTER applying `quaternion` and a uniform `scale` (in that
+   * order - correct regardless of order for a uniform scale factor, since
+   * scaling and rotating about the origin commute) - i.e. the bounding box
+   * of the whole export as it will actually sit once exported. Shared by
+   * applyExportResize() (which only reads the Y extent, at scale 1, since
+   * it's SOLVING for scale) and applyExportMoveToOrigin() (which needs the
+   * full box at the FINAL scale, so it must run after resize has already
+   * updated sceneTransform.scale if both are on). Returns null for an
+   * empty entry list.
+   *
+   * This deliberately transforms every vertex rather than the cheaper-
+   * looking shortcut of rotating the RAW (pre-rotation) bounding box's own
+   * 8 corners and re-deriving min/max from those: that shortcut is only
+   * exact when `quaternion` is an identity or axis-aligned (90-degree)
+   * rotation. For any other angle - e.g. whatever leveling correction
+   * "Select ground plane" produces, which is the normal case for a scene
+   * that's just been fixed up - a box's raw AABB corners are generally
+   * NOT still the extreme points of the model once rotated (that's only
+   * true for a shape that actually touches all 8 corners of its own
+   * bounding box, like a literal cube). Rotating those corners still
+   * produces A valid bounding box (it must fully contain the rotated
+   * model, since the raw AABB itself fully contains the raw model), but
+   * usually a strictly BIGGER one than the model's true rotated extent -
+   * which silently breaks both callers above: applyExportResize() solves
+   * for too small a scale (since it divides the target height by an
+   * inflated measured height), undershooting the requested export height,
+   * and applyExportMoveToOrigin() reads too low a minimum Y, translating
+   * the model further up than needed and leaving it hovering above the
+   * ground plane instead of resting on it. */
   private computeTransformedExportBounds(
     entries: ExportMeshEntry[],
     quaternion: THREE.Quaternion,
     scale: number,
   ): { min: THREE.Vector3; max: THREE.Vector3 } | null {
-    let combined: Bounds | null = null;
-    for (const entry of entries) {
-      const bounds = computeBounds(entry.positions);
-      combined = combined ? unionBounds(combined, bounds) : bounds;
-    }
-    if (!combined) return null;
-
-    const corners = [
-      new THREE.Vector3(combined.min.x, combined.min.y, combined.min.z),
-      new THREE.Vector3(combined.min.x, combined.min.y, combined.max.z),
-      new THREE.Vector3(combined.min.x, combined.max.y, combined.min.z),
-      new THREE.Vector3(combined.min.x, combined.max.y, combined.max.z),
-      new THREE.Vector3(combined.max.x, combined.min.y, combined.min.z),
-      new THREE.Vector3(combined.max.x, combined.min.y, combined.max.z),
-      new THREE.Vector3(combined.max.x, combined.max.y, combined.min.z),
-      new THREE.Vector3(combined.max.x, combined.max.y, combined.max.z),
-    ];
-
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    for (const corner of corners) {
-      corner.applyQuaternion(quaternion).multiplyScalar(scale);
-      min.min(corner);
-      max.max(corner);
+    const v = new THREE.Vector3();
+    let found = false;
+
+    for (const entry of entries) {
+      const positions = entry.positions;
+      for (let i = 0; i < positions.length; i += 3) {
+        v.set(positions[i], positions[i + 1], positions[i + 2]);
+        v.applyQuaternion(quaternion).multiplyScalar(scale);
+        min.min(v);
+        max.max(v);
+        found = true;
+      }
     }
-    return { min, max };
+
+    return found ? { min, max } : null;
   }
 
   private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {
@@ -3573,7 +3696,10 @@ export class SceneViewerApp {
     // a non-empty one needs to populate it.
     this.rebuildSelectionOutlineMask(activeSelected);
 
-    if (activeSelected.length === 0) return;
+    if (activeSelected.length === 0) {
+      this.updateBoundingBoxVisual(null);
+      return;
+    }
 
     const perObjectCenters: number[] = [];
     let unionBoundsAcc: Bounds | null = null;
@@ -3585,6 +3711,9 @@ export class SceneViewerApp {
     }
     // #f82 - one dot per selected object, at its own bounding-box center.
     this.addDotPair(group, perObjectCenters, 0xff8822);
+    // "Show bounding box" - one cube around the whole selection (the same
+    // union bounds the second/lighter dot below marks the center of).
+    this.updateBoundingBoxVisual(unionBoundsAcc);
 
     if (unionBoundsAcc) {
       const center = boundsCenter(unionBoundsAcc);
@@ -3870,6 +3999,22 @@ export class SceneViewerApp {
 
     group.add(outline, fill);
     this.selectionVisuals.push(outline, fill);
+  }
+
+  /** Applies the current selection's union bounds (or null, if nothing's
+   * selected) to the "Show bounding box" gizmo - called from
+   * updateSelectionVisuals() every time the selection changes, regardless
+   * of whether the toggle is currently on, so the gizmo is always ready
+   * with up-to-date bounds the instant it IS toggled on. Visibility is
+   * gated on both the toggle itself and there actually being a selection
+   * to box. */
+  private updateBoundingBoxVisual(selectionBounds: Bounds | null): void {
+    if (selectionBounds && Config.sessionConfig.boundingBox.visible) {
+      this.boundingBoxGizmo.setBounds(selectionBounds);
+      this.boundingBoxGizmo.setVisible(true);
+    } else {
+      this.boundingBoxGizmo.setVisible(false);
+    }
   }
 
 

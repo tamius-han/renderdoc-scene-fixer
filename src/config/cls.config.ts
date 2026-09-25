@@ -24,6 +24,14 @@ export interface AppConfiguration {
     moveToOrigin: boolean;
 
     exportType: 'output' | 'input';
+
+    /** When on, exported materials skip the KHR_materials_unlit extension,
+     * so any embedded normal/metallic-roughness maps (see
+     * SceneViewerApp.loadAuxiliaryDrawTextures()) actually drive lit PBR
+     * shading in Blender (or any other conformant glTF viewer) instead of
+     * being ignored in favor of this app's own flat, unshaded look. Off by
+     * default - see cmp.export-mesh.ts. */
+    litShading: boolean;
   };
 
   objectFiltering: {
@@ -46,6 +54,10 @@ export interface AppSessionConfiguration {
   };
 
   resourcesPanel: {
+    visible: boolean;
+  };
+
+  boundingBox: {
     visible: boolean;
   };
 }
@@ -75,6 +87,7 @@ export class Config {
       approximateHeight: 100,
       moveToOrigin: true,
       exportType: 'output',
+      litShading: false,
     },
 
     objectFiltering: {
@@ -99,6 +112,10 @@ export class Config {
     },
 
     resourcesPanel: {
+      visible: false
+    },
+
+    boundingBox: {
       visible: false
     }
   }
