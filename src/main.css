@@ -566,6 +566,169 @@ code {
   color: var(--text-dim); font-style: italic; border-style: dashed;
 }
 
+/* "Textures" section of the export dialog - see ExportMesh in
+   cmp.export-mesh.ts. Each category (base color / normal / metalness-
+   roughness) gets a small clickable thumbnail-strip field; clicking it
+   opens .texture-picker-popup with a per-texture checkbox list. */
+.texture-picker-field {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; min-height: 32px; box-sizing: border-box;
+  padding: 4px 8px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: rgba(255,255,255,0.02);
+  text-align: left;
+}
+.texture-picker-field:hover {
+  background: rgba(255,255,255,0.05);
+}
+.texture-picker-field-empty {
+  color: var(--text-dim); font-size: 11px; font-style: italic;
+}
+.texture-picker-thumbs {
+  display: flex; flex-direction: row; gap: 4px;
+}
+.texture-picker-thumb {
+  width: 22px; height: 22px; object-fit: cover; border-radius: 3px;
+  border: 1px solid var(--line);
+}
+.texture-picker-thumb--excluded {
+  opacity: 0.3;
+}
+.texture-picker-field-count {
+  color: var(--text-dim); font-size: 11px;
+}
+.texture-factor-value {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  min-width: 2.5em; text-align: right;
+}
+
+.texture-picker-popup {
+  position: fixed; inset: 0; z-index: 110;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55);
+}
+/* `main.css` starts with `@import "tailwindcss"`, so Tailwind's own
+   `.hidden { display: none }` utility is emitted BEFORE this file's own
+   rules in the final stylesheet - at equal specificity (both are a single
+   class selector), the LATER rule in source order wins, which was this
+   file's own `display: flex` above, not `.hidden`. That silently made the
+   popup permanently visible (and, being a fixed full-viewport layer,
+   unclickable-through: it sat on top of the whole export dialog
+   intercepting every click) regardless of whether `.hidden` was toggled
+   on it. This compound selector's higher specificity (0,0,2,0 vs both
+   rules' 0,0,1,0) wins unconditionally, independent of source order, so
+   toggling `.hidden` on/off actually works. */
+.texture-picker-popup.hidden {
+  display: none;
+}
+.texture-picker-popup-window {
+  width: min(900px, 92vw); max-height: 85vh; display: flex; flex-direction: column;
+  border: 1px solid var(--line); background: var(--bg-panel, #1c1712);
+  border-radius: 6px; overflow: hidden;
+}
+.texture-picker-popup-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 12px; background: rgba(255,255,255,0.04);
+  font-size: 12.5px; color: var(--text);
+}
+.texture-picker-popup-header span {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#export-texture-picker-popup-close {
+  background: none; border: none; color: var(--text-dim); font-size: 16px; line-height: 1;
+  padding: 0 4px;
+}
+#export-texture-picker-popup-close:hover {
+  color: var(--text);
+}
+/* List/Thumbnails toggle in the popup header - see
+   ExportMesh.setTexturePickerViewMode(). */
+.texture-picker-view-toggle {
+  display: flex; flex: none; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+}
+.texture-picker-view-toggle button {
+  background: none; border: none; color: var(--text-dim); font-size: 11px;
+  padding: 3px 8px; cursor: pointer;
+}
+.texture-picker-view-toggle button + button {
+  border-left: 1px solid var(--line);
+}
+.texture-picker-view-toggle button:hover {
+  color: var(--text); background: rgba(255,255,255,0.05);
+}
+.texture-picker-view-toggle button.active {
+  color: var(--brown-900, #1c1712); background: var(--accent, #ff8c1a);
+}
+.texture-picker-popup-list {
+  overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;
+}
+.texture-picker-popup-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px; border-radius: 4px; cursor: pointer;
+}
+.texture-picker-popup-row:hover {
+  background: rgba(255,255,255,0.05);
+}
+.texture-picker-popup-thumb {
+  width: 48px; height: 48px; object-fit: cover; border-radius: 4px;
+  border: 1px solid var(--line); flex: none;
+}
+.texture-picker-popup-filename {
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.texture-picker-popup-empty {
+  color: var(--text-dim); font-style: italic; font-size: 12px; padding: 8px 0;
+}
+
+/* "Thumbnails" (256x256) and "Large" (512x512) view modes - a grid of
+   larger previews instead of the one-row-per-texture list, toggled via
+   .texture-picker-view-toggle above (see
+   ExportMesh.setTexturePickerViewMode()/renderTexturePickerList()).
+   Both share the same item markup (buildTextureGridItemMarkup()); "Large"
+   just adds .large-view on top of .grid-view and these rules bump every
+   size-dependent value via that compound selector, so there's exactly one
+   place each size lives rather than a second, near-duplicate rule set. */
+.texture-picker-popup-list.grid-view {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(256px, 1fr)); gap: 14px;
+}
+.texture-picker-grid-item {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 8px; border-radius: 6px; cursor: pointer;
+}
+.texture-picker-grid-item:hover {
+  background: rgba(255,255,255,0.05);
+}
+.texture-picker-grid-thumb-wrap {
+  position: relative; width: 256px; height: 256px;
+}
+.texture-picker-grid-thumb {
+  width: 256px; height: 256px; object-fit: cover; border-radius: 6px;
+  border: 1px solid var(--line);
+}
+.texture-picker-grid-checkbox {
+  position: absolute; top: 6px; left: 6px;
+  width: 20px; height: 20px;
+}
+.texture-picker-grid-filename {
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  max-width: 256px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.texture-picker-popup-list.grid-view.large-view {
+  grid-template-columns: repeat(auto-fill, minmax(512px, 1fr)); gap: 18px;
+}
+.texture-picker-popup-list.grid-view.large-view .texture-picker-grid-thumb-wrap,
+.texture-picker-popup-list.grid-view.large-view .texture-picker-grid-thumb {
+  width: 512px; height: 512px;
+}
+.texture-picker-popup-list.grid-view.large-view .texture-picker-grid-filename {
+  max-width: 512px; font-size: 12px;
+}
+.texture-picker-popup-list.grid-view.large-view .texture-picker-grid-checkbox {
+  width: 24px; height: 24px;
+}
+
 .check-like {
   /* font-family: var(--mono);  border-radius: 4px; */
   /* border: 1px solid var(--line); background: var(--bg-panel); color: var(--text-dim); */

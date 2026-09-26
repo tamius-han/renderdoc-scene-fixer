@@ -25,8 +25,8 @@ import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from ".
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
-import { ExportMesh } from './components/export-mesh/cmp.export-mesh';
-import { Config, type AppConfiguration } from './config/cls.config';
+import { ExportMesh, type ExportTextureCategories, type ExportTextureCategoryEntry } from './components/export-mesh/cmp.export-mesh';
+import { Config, type AppConfiguration, type ExportTextureCategoryOptions } from './config/cls.config';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { remapObjOrientation } from './util/axis-orientation';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
@@ -1840,9 +1840,79 @@ export class SceneViewerApp {
   /** Opens the export dialog for the current selection - shared by the
    * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
   private openExportDialog(): void {
-    this.elements.overlays.export.setSelectedIndices(this.getExportIndices());
+    const indices = this.getExportIndices();
+    this.elements.overlays.export.setSelectedIndices(indices);
+    this.elements.overlays.export.setTextureCategories(this.buildExportTextureCategories(indices));
     this.renderExportMeshPreview();
     this.elements.overlays.export.show();
+  }
+
+  /** Blob URLs handed to the export dialog's texture-picker thumbnails
+   * (see buildExportTextureCategories()) - tracked so the PREVIOUS batch
+   * can be revoked before building a new one, rather than leaking one
+   * per dialog open. */
+  private exportTextureThumbUrls: string[] = [];
+
+  /** Gathers, per category, every DISTINCT texture actually available to
+   * export across `selectedIndices` - the data the export dialog's
+   * "Base color"/"Normal map"/"Metalness-roughness" thumbnail
+   * fields/picker popups are built from (see ExportMesh.
+   * setTextureCategories()). Two different sourcing paths, matching how
+   * each category is actually embedded on export:
+   *  - Base color comes from draw.key, the resolved .mtl `map_Kd` path
+   *    resolveMaterial() already loaded draw.material's own .map from
+   *    (or the literal "untextured") - NOT draw.draw.textures' own
+   *    bind-point-0 binding, which this app has never used to source the
+   *    base color map (see resolveMaterial()'s own doc comment).
+   *  - Normal/metalness-roughness come from draw.draw.textures, via the
+   *    same findDrawTextureBinding()/resolveTexturePath() heuristics
+   *    loadAuxiliaryDrawTextures() uses at actual export time - kept in
+   *    sync with that on purpose, so what the picker shows is exactly
+   *    what would otherwise get embedded.
+   * Thumbnails are built the same cheap way the resource panel's texture
+   * thumbnails are (loadTextureThumb()'s own approach: a blob URL
+   * straight off the vfs File, no canvas/TextureManager decode needed
+   * just to show a preview). */
+  private buildExportTextureCategories(selectedIndices: number[]): ExportTextureCategories {
+    for (const url of this.exportTextureThumbUrls) URL.revokeObjectURL(url);
+    this.exportTextureThumbUrls = [];
+
+    const draws = selectedIndices.map((i) => this.loadedDraws[i]).filter((d): d is LoadedDraw => !!d);
+
+    const makeEntry = (path: string): ExportTextureCategoryEntry | null => {
+      const file = this.vfs.get(path);
+      if (!file) return null;
+      const objectUrl = URL.createObjectURL(file);
+      this.exportTextureThumbUrls.push(objectUrl);
+      const fileName = path.split("/").pop() || path;
+      return { path, fileName, objectUrl };
+    };
+    const toEntries = (paths: Set<string>): ExportTextureCategoryEntry[] =>
+      Array.from(paths)
+        .map(makeEntry)
+        .filter((entry): entry is ExportTextureCategoryEntry => !!entry);
+
+    const baseColorPaths = new Set<string>();
+    const normalPaths = new Set<string>();
+    const metallicRoughnessPaths = new Set<string>();
+
+    for (const draw of draws) {
+      if (draw.key !== "untextured") baseColorPaths.add(draw.key);
+
+      const normalBinding = this.findDrawTextureBinding(draw, "normal map");
+      const normalPath = normalBinding ? this.resolveTexturePath(draw, normalBinding.textureFile) : null;
+      if (normalPath) normalPaths.add(normalPath);
+
+      const roughnessBinding = this.findDrawTextureBinding(draw, "metalness / roughness");
+      const roughnessPath = roughnessBinding ? this.resolveTexturePath(draw, roughnessBinding.textureFile) : null;
+      if (roughnessPath) metallicRoughnessPaths.add(roughnessPath);
+    }
+
+    return {
+      baseColor: toEntries(baseColorPaths),
+      normal: toEntries(normalPaths),
+      metallicRoughness: toEntries(metallicRoughnessPaths),
+    };
   }
 
   private handleGizmoPointerMove(event: PointerEvent): void {
@@ -2565,7 +2635,11 @@ export class SceneViewerApp {
           this.applyExportMoveToOrigin(entries, sceneTransform);
         }
 
-        const blob = buildGlbBlob(entries, sceneTransform, exportOptions.litShading);
+        const blob = buildGlbBlob(entries, sceneTransform, {
+          litShading: exportOptions.litShading,
+          metallicFactor: exportOptions.metallicFactor,
+          roughnessFactor: exportOptions.roughnessFactor,
+        });
         const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
         this.downloadBlob(blob, fileName);
       })
@@ -2593,6 +2667,19 @@ export class SceneViewerApp {
     return null;
   }
 
+  /** Whether a texture at `path` should actually be embedded into the
+   * export, given one category's export options: the category's own
+   * checkbox has to be on, AND the specific texture must not be one the
+   * user individually unchecked in that category's picker popup (see
+   * ExportTextureCategoryOptions' own doc comment on excludedPaths, and
+   * cmp.export-mesh.ts's texture-picker UI) - the bind-point classifi-
+   * cation this app guesses "normal map"/"metalness-roughness" from can
+   * be wrong for a given capture, and this per-texture override is how
+   * the user corrects that without losing every texture of that kind. */
+  private shouldExportTexture(path: string | null, category: ExportTextureCategoryOptions): boolean {
+    return !!path && category.enabled && !category.excludedPaths.includes(path);
+  }
+
   /** Loads (via the same cached TextureManager the diffuse map uses) the
    * normal map and combined metalness/roughness map captured for `draw`,
    * if any - these are never wired into the on-screen material (this app
@@ -2600,19 +2687,29 @@ export class SceneViewerApp {
    * resolveMaterial()) but do get embedded into the exported .glb, since
    * the whole point of exporting is often to bring the capture into a
    * different, lit renderer (Blender, etc.) - see ExportMeshEntry's own
-   * doc comment for the caveat on how KHR_materials_unlit affects that. */
+   * doc comment for the caveat on how KHR_materials_unlit affects that.
+   * Each map is skipped (without ever touching TextureManager) when its
+   * own category is unchecked, or this specific texture was individually
+   * excluded - see shouldExportTexture(). */
   private async loadAuxiliaryDrawTextures(
     draw: LoadedDraw,
+    exportOptions: AppConfiguration["exportOptions"],
   ): Promise<{ normal: THREE.Texture | null; metallicRoughness: THREE.Texture | null }> {
     const normalBinding = this.findDrawTextureBinding(draw, "normal map");
     const roughnessBinding = this.findDrawTextureBinding(draw, "metalness / roughness");
 
-    const loadBinding = async (binding: TextureBinding | null): Promise<THREE.Texture | null> => {
+    const loadBinding = async (
+      binding: TextureBinding | null,
+      category: ExportTextureCategoryOptions,
+    ): Promise<THREE.Texture | null> => {
       const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
-      return path ? this.textures.load(this.vfs, path) : null;
+      return this.shouldExportTexture(path, category) ? this.textures.load(this.vfs, path!) : null;
     };
 
-    const [normal, metallicRoughness] = await Promise.all([loadBinding(normalBinding), loadBinding(roughnessBinding)]);
+    const [normal, metallicRoughness] = await Promise.all([
+      loadBinding(normalBinding, exportOptions.normalTextures),
+      loadBinding(roughnessBinding, exportOptions.metallicRoughnessTextures),
+    ]);
     return { normal, metallicRoughness };
   }
 
@@ -2623,12 +2720,24 @@ export class SceneViewerApp {
     exportOptions: AppConfiguration["exportOptions"],
   ): Promise<ExportMeshEntry[]> {
     const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
-    const material = exportOptions.exportTextures ? draw.material : this.getUntexturedMaterial();
+    // draw.key is the resolved base-color texture path resolveMaterial()
+    // loaded draw.material's own .map from (or the literal string
+    // "untextured" when there wasn't one) - see LoadedDraw's own doc
+    // comment. That's the thing the "Base color textures" category's
+    // checkbox/picker actually governs, so it's what gets checked here -
+    // NOT draw.draw.textures' own bind-point-0 ("albedo / diffuse")
+    // binding, which is a separate, RenderDoc-capture-derived piece of
+    // data this app has never actually used to source the base color map
+    // (see resolveMaterial()'s own doc comment: that comes from the OBJ's
+    // .mtl file instead).
+    const includeBaseColor = this.shouldExportTexture(draw.key === "untextured" ? null : draw.key, exportOptions.baseColorTextures);
+    const material = includeBaseColor ? draw.material : this.getUntexturedMaterial();
     const baseName = `Draw #${index} (eid ${draw.draw.eventId})`;
 
-    const { normal: normalTexture, metallicRoughness: metallicRoughnessTexture } = exportOptions.exportTextures
-      ? await this.loadAuxiliaryDrawTextures(draw)
-      : { normal: null, metallicRoughness: null };
+    const { normal: normalTexture, metallicRoughness: metallicRoughnessTexture } = await this.loadAuxiliaryDrawTextures(
+      draw,
+      exportOptions,
+    );
     const auxTextures = {
       ...(normalTexture ? { normalTexture } : {}),
       ...(metallicRoughnessTexture ? { metallicRoughnessTexture } : {}),
@@ -3008,7 +3117,7 @@ export class SceneViewerApp {
     this.activeExportPreviewDispose = this.attachMultiMeshPreview(host, draws, {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
-      textured: exportOptions.exportTextures,
+      textured: exportOptions.baseColorTextures.enabled,
     });
   }
 

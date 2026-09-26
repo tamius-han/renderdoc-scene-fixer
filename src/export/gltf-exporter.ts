@@ -240,12 +240,13 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
 }
 
 /** Re-encodes whatever image data a texture is currently holding as PNG
- * bytes. TextureManager's own textures wrap an ImageBitmap at its native,
- * undownscaled resolution (see texture-manager.ts), not a <canvas>, so this
- * always goes through the draw-to-a-fresh-canvas path below - which is why
- * the exported PNG always ends up at the source texture's full resolution.
- * THREE.Texture#image is loosely typed (effectively `any` in @types/three,
- * to accommodate every possible image source), so this accepts the same. */
+ * bytes. TextureManager's own textures already wrap a plain <canvas> (see
+ * texture-manager.ts), so the common case is just reading it straight
+ * back off that canvas - the defensive draw-to-a-fresh-canvas fallback
+ * only matters for some other, unexpected image source ever ending up on
+ * a material's .map. THREE.Texture#image is loosely typed (effectively
+ * `any` in @types/three, to accommodate every possible image source), so
+ * this accepts the same. */
 function canvasToPngBytes(image: unknown): Uint8Array {
   const canvas =
     image instanceof HTMLCanvasElement
@@ -304,13 +305,22 @@ interface GltfJson {
  * are no external file references, so the one .glb is everything Blender
  * needs.
  *
- * `litShading` controls whether exported materials carry the
+ * `options.litShading` controls whether exported materials carry the
  * KHR_materials_unlit extension - see getOrCreateMaterial() and
  * ExportMeshEntry's own doc comment for what turning it on/off means for
- * any embedded normal/metallic-roughness maps. Driven by the "Lit
- * shading" checkbox in the export dialog (cmp.export-mesh.ts) via
- * AppConfiguration.exportOptions.litShading. */
-export function buildGlbBlob(meshes: ExportMeshEntry[], sceneTransform: ExportSceneTransform, litShading: boolean): Blob {
+ * any embedded normal/metallic-roughness maps. `options.metallicFactor`/
+ * `roughnessFactor` are the pbrMetallicRoughness factors to fall back to
+ * for a mesh whose entry has no metallicRoughnessTexture (see
+ * getOrCreateMaterial()) - a texture-driven mesh always keeps its factors
+ * at 1 (fully texture-driven) regardless of these. All three are driven by
+ * the export dialog (cmp.export-mesh.ts) via
+ * AppConfiguration.exportOptions. */
+export function buildGlbBlob(
+  meshes: ExportMeshEntry[],
+  sceneTransform: ExportSceneTransform,
+  options: { litShading: boolean; metallicFactor: number; roughnessFactor: number },
+): Blob {
+  const { litShading, metallicFactor, roughnessFactor } = options;
   const buffer = new BinaryBufferBuilder();
   const bufferViews: GltfJson["bufferViews"] = [];
   const accessors: GltfJson["accessors"] = [];
@@ -385,11 +395,15 @@ export function buildGlbBlob(meshes: ExportMeshEntry[], sceneTransform: ExportSc
         ...(entry.metallicRoughnessTexture
           ? { metallicRoughnessTexture: { index: getOrCreateTexture(entry.metallicRoughnessTexture) } }
           : {}),
-        // Only claim the map actually drives metalness once one is
-        // present - otherwise leave the material at its previous
-        // (fully-dielectric, unmetallic) defaults.
-        metallicFactor: entry.metallicRoughnessTexture ? 1 : 0,
-        roughnessFactor: 1,
+        // Only claim the map actually drives metalness/roughness once one
+        // is present, keeping the factor at 1 so the texture's own G/B
+        // channels alone determine the result (the standard "texture
+        // fully drives this channel" convention) - otherwise fall back to
+        // the export dialog's Metallic/Roughness factor sliders, which
+        // exist specifically for this case (see AppConfiguration.
+        // exportOptions.metallicFactor/roughnessFactor's own doc comment).
+        metallicFactor: entry.metallicRoughnessTexture ? 1 : metallicFactor,
+        roughnessFactor: entry.metallicRoughnessTexture ? 1 : roughnessFactor,
       },
       ...(entry.normalTexture ? { normalTexture: { index: getOrCreateTexture(entry.normalTexture) } } : {}),
       doubleSided: material.side === THREE.DoubleSide,

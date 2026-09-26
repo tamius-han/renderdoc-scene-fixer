@@ -27,9 +27,6 @@
           </div>
 
           <div class="field row">
-            <input type="checkbox" id="export-options-export-textures"> Export textures
-          </div>
-          <div class="field row">
             <input type="checkbox" id="export-options-lit-shading"> Lit shading (use normal/roughness maps)
           </div>
           <div class="field row">
@@ -49,11 +46,66 @@
             <input type="checkbox" id="export-options-move-to-origin"> Move object to origin
           </div>
 
+          <h4>Textures</h4>
+
+          <div class="field">
+            <div class="field row">
+              <input type="checkbox" id="export-options-export-basecolor"> Base color textures
+            </div>
+            <button type="button" class="texture-picker-field" id="export-options-basecolor-field"></button>
+          </div>
+
+          <div class="field">
+            <div class="field row">
+              <input type="checkbox" id="export-options-export-normal"> Normal map textures
+            </div>
+            <button type="button" class="texture-picker-field" id="export-options-normal-field"></button>
+          </div>
+
+          <div class="field">
+            <div class="field row">
+              <input type="checkbox" id="export-options-export-metalrough"> Metalness/roughness textures
+            </div>
+            <button type="button" class="texture-picker-field" id="export-options-metalrough-field"></button>
+          </div>
+
+          <div class="field row">
+            <div>Metallic factor (used where no texture applies):</div>
+            <input type="range" id="export-options-metallic-factor" min="0" max="1" step="0.01">
+            <span id="export-options-metallic-factor-value" class="texture-factor-value"></span>
+          </div>
+          <div class="field row">
+            <div>Roughness factor (used where no texture applies):</div>
+            <input type="range" id="export-options-roughness-factor" min="0" max="1" step="0.01">
+            <span id="export-options-roughness-factor-value" class="texture-factor-value"></span>
+          </div>
+
           <div class="w-full flex flex-row justify-center">
             <button id="export-options-start-export-btn" class="primary">Fix and export ...</button>
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Texture picker popup - a texture category's own thumbnail field
+       (above) opens this, showing every texture of that kind found in the
+       current selection with a checkbox to individually exclude it from
+       export (see ExportMesh.openTexturePicker()). Nested inside this same
+       backdrop rather than a second top-level Overlay, since it's only
+       ever meaningful while the export dialog itself is open. -->
+  <div class="texture-picker-popup hidden" id="export-texture-picker-popup">
+    <div class="texture-picker-popup-window">
+      <div class="texture-picker-popup-header">
+        <span id="export-texture-picker-popup-title">Textures</span>
+        <div class="texture-picker-view-toggle" role="group">
+          <button type="button" id="export-texture-picker-view-list">List</button>
+          <button type="button" id="export-texture-picker-view-grid" class="active">Thumbnails</button>
+          <button type="button" id="export-texture-picker-view-large">Large</button>
+        </div>
+        <button type="button" id="export-texture-picker-popup-close">&times;</button>
+      </div>
+      <div class="texture-picker-popup-list" id="export-texture-picker-popup-list"></div>
     </div>
   </div>
 </div>
