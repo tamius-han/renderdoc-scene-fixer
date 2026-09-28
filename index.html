@@ -66,7 +66,7 @@
 
         <div id="viewport" class="h-full w-full relative">
           <div class="tool-menu-overlay">
-            <div class="tools">
+            <div class="tools panel">
               <button id="select-volume-btn">Select by volume</button>
               &middot;
               <div class="dropdown">
@@ -101,7 +101,7 @@
               <button id="frame-scene-btn">Frame scene</button>
             </div>
 
-            <div id="select-by-volume-submenu" class="submenu hidden">
+            <div id="select-by-volume-submenu" class="submenu panel hidden">
               <div class="flex flex-row gap-2">
                 <div class="text-warm-300">Selection type:</div>
                 <button id="select-by-volume-sphere-btn" class="option" title="Sphere select: click the mesh to place a sphere">O</button>
@@ -125,7 +125,7 @@
 
             </div>
 
-            <div id="select-landmark-submenu" class="submenu hidden flex flex-row items-center">
+            <div id="select-landmark-submenu" class="submenu panel hidden flex flex-row items-center">
               <div class="flex flex-row">
                 <div id="select-landmark-submenu_no-selection" class="mr-4">
                   Select a landmark to calculate distortion.
@@ -147,7 +147,7 @@
               </div>
             </div>
 
-            <div id="select-ground-plane-submenu" class="submenu hidden flex flex-row items-center">
+            <div id="select-ground-plane-submenu" class="submenu panel hidden flex flex-row items-center">
               <div id="select-ground-plane_incomplete-selection" class="mr-4">
                 Select three points to define the ground (horizontal) plane
               </div>
@@ -175,10 +175,12 @@
               </div>
             </div>
 
-            <div id="axis-mapper-submenu" class="submenu hidden flex flex-col">
+            <div id="axis-mapper-submenu" class="submenu panel hidden flex flex-col">
               <div>Input geometry axis mapping:</div>
               <input-axis-mapper id="axis-mapper-submenu-input-axis-mapper"></input-axis-mapper>
             </div>
+
+            <div id="select-options-menu" class="panel mt-4 hidden"></div>
 
             <div id="fly-speed-indicator" class="mt-4 text-outlined hidden"></div>
           </div>
@@ -190,10 +192,9 @@
                 <div id="fly-mode-label"></div>
               </div>
             </div>
-            <div id="select-options-menu"></div>
           </div>
           <div id="empty-hint"><div><span class="arrow">&#8630;</span>Drop an exported capture folder to begin</div></div>
-          <div id="hud" style="display: none"></div>
+          <div id="hud" class="panel" style="display: none"></div>
         </div>
       </div>
     </div>
