@@ -9,6 +9,7 @@ import template from './cmp.help.html?raw';
 // for the same "let Vite resolve it" approach applied to a different asset
 // type.
 import renderdocSuccessImg from '../../../res/img/help/renderdoc_success.avif';
+import igpaSuccessImg from '../../../res/img/help/igpa_success.avif';
 
 export class Help extends Overlay {
 
@@ -20,7 +21,9 @@ export class Help extends Overlay {
 
   constructor() {
     super();
-    this.innerHTML = template.replaceAll('/res/img/help/renderdoc_success.avif', renderdocSuccessImg);
+    this.innerHTML = template
+      .replaceAll('/res/img/help/renderdoc_success.avif', renderdocSuccessImg)
+      .replaceAll('/res/img/help/igpa_success.avif', igpaSuccessImg);
   }
 
   connectedCallback() {

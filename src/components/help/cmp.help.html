@@ -88,7 +88,7 @@
           <li>
             If you see this in the upper left corner of your screen, everything is set up for capturing game scene:<br/>
             <div class="flex flex-row justify-center p-2">
-              <img src="/res/img/help/renderdoc_success.avif" class="text-center" />
+              <img src="/res/img/help/igpa_success.avif" class="text-center" />
             </div>
           </li>
           <li>
@@ -349,7 +349,7 @@
       </p>
       <p>
         Input options are set to reasonable defaults. This app uses 1 unit = 1 meter scale internally. If you know what scale your game is using, you can define capture unit size
-        in order to correct for that. You <b>do not</b> have to do this, as nothing will break (at least, not too much) if you keep this option as it is.
+        in order to correct for that. You <b>do not</b> have to do this, as nothing will break (at least, not too much ... but textures can start to behave funny) if you keep this option as it is.
       </p>
       <p>
         Input geometry axis mapping can different from game engine to game engine. You'll only see if it's set wrong once the scene is loaded and you see your scene mirrored, rotated sideways, or both.
@@ -422,6 +422,22 @@
       </p>
 
       <h3>Exporting the scene</h3>
+      <p>
+        Click "fix & export". You will have several options.
+      </p>
+      <ul>
+        <li><b>Export with poses</b> — Exports the scene with the poses from the capture preserved</li>
+        <li><b>Export original</b> — Exports the original geometry without preserving poses (i.e. export in T-pose)</li>
+        <!-- <li><b>Lit shading</b> — </li> -->
+        <li><b>Split by loose parts</b> — Splits selected geometry into loose parts. If you want to 3D print your character, you'll probably have to do this sooner or later. If capture contains textures, splitting is UV-mapping aware.</li>
+        <li><b>Fill holes</b> — fills some holes in the geometry to make it watertight. Recommended for 3D printing. Note that this option doesn't fix more complex issues, so you'll still have to head over to Blender and fix them.</li>
+        <li><b>Resize exported object</b> — resizes exported geometry so that the distance from top to bottom measures a specified value (in units — in 3D printing, 1 unit = 1mm)</li>
+        <li><b>Move object to origin</b> — moves exported geometry such that its center is at 0,0 coordinates. Bottom of the object is placed at 0 height.</li>
+        <li><b>Textures</b> — select which textures to export. Base color textures should look like they contain parts of your character and/or other objects you're exporting. Normal map and metalness/roughness textures should look like like base color textures, but in funny colors. If textures don't look like any part of your character, <b>UNSELECT THEM</b>.</li>
+        <li><b>Metallic factor/Roughness factor</b> — allows you to adjust the metallic and roughness factors of the exported materials. You'll see when you get to blender.</li>
+      </ul>
+      <p>Strictly speaking, you <i>don't</i> have to export textures, especially if you'll be sculpting extra details onto your character yourself. However, if you export normal maps, you can try to use them in order to restore detail.</p>
+      <p>Exports from Intel GPA do not come with textures, so no textures will be exported from there.</p>
     </div>
   </div>
 </div>
