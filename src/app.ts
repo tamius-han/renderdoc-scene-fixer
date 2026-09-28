@@ -3332,7 +3332,7 @@ export class SceneViewerApp {
     img.onerror = () => {
       console.warn('failed to load texture image')
       img.replaceWith(Object.assign(document.createElement("div"), {
-        className: "resource-texture-thumb resource-texture-thumb--missing",
+        className: "resource-texture-thumb missing",
         textContent: "No image",
       }));
     };
@@ -3398,7 +3398,7 @@ export class SceneViewerApp {
             const resolvedPath = this.resolveTexturePath(draw, binding.textureFile);
             const imageMarkup = resolvedPath
               ? `<img class="resource-texture-thumb" data-texture-path="${resolvedPath}" alt="${fileName}" />`
-              : "<div class=\"resource-texture-thumb resource-texture-thumb--missing\">No image</div>";
+              : "<div class=\"resource-texture-thumb missing\">No image</div>";
             return `
               <li data-texture-path="${resolvedPath ?? ""}">
                 ${imageMarkup}
@@ -3441,8 +3441,8 @@ export class SceneViewerApp {
       <div class="resource-preview"></div>
       ${texturesMarkup}
       ${multiRowMarkup}
-      <div class="resource-corner resource-corner--upper-right" data-corner="upper-right" aria-label="Resize preview"></div>
-      <div class="resource-corner resource-corner--lower-right" data-corner="lower-right" aria-label="Resize preview"></div>
+      <div class="resource-corner ne" data-corner="upper-right" aria-label="Resize preview"></div>
+      <div class="resource-corner se" data-corner="lower-right" aria-label="Resize preview"></div>
     `;
 
     const previewHost = panel.querySelector<HTMLElement>(".resource-preview");
@@ -3505,7 +3505,7 @@ export class SceneViewerApp {
           this.loadTextureThumb(img, file);
         } else {
           img.replaceWith(Object.assign(document.createElement("div"), {
-            className: "resource-texture-thumb resource-texture-thumb--missing",
+            className: "resource-texture-thumb missing",
             textContent: "No image",
           }));
         }
