@@ -2068,23 +2068,26 @@ export class SceneViewerApp {
     const kind = this.selectAreaKind;
     if (!kind) {
       this.selectOptionsMenu.classList.remove("menu");
+      this.selectOptionsMenu.classList.add("hidden");
       this.selectOptionsMenu.innerHTML = "";
       return;
     }
 
     const mode = this.selectAreaGizmoMode;
     this.selectOptionsMenu.classList.add("menu");
+    this.selectOptionsMenu.classList.remove("hidden");
+
     this.selectOptionsMenu.innerHTML = `
-      <div class="flex flex-row items-center justify-between gap-2">
+      <div class="flex flex-col items-center justify-between gap-2">
         <b class="text-white">${kind === "sphere" ? "Sphere" : "Box"} select area</b>
         <div class="flex flex-row gap-2">
-          <button class="${mode === "translate" ? "active" : ""}" data-select-area="mode-translate" title="Translate (G)">Move</button>
-          <button class="${mode === "scale" ? "active" : ""}" data-select-area="mode-scale" title="Scale (S)">Scale</button>
-          <button class="${mode === "rotate" ? "active" : ""}" data-select-area="mode-rotate" title="Rotate (R)">Rotate</button>
+          <button class="tab ${mode === "translate" ? "active" : ""}" data-select-area="mode-translate" title="Translate (G)">Move</button>
+          <button class="tab ${mode === "scale" ? "active" : ""}" data-select-area="mode-scale" title="Scale (S)">Scale</button>
+          <button class="tab ${mode === "rotate" ? "active" : ""}" data-select-area="mode-rotate" title="Rotate (R)">Rotate</button>
           <button class="ghost" data-select-area="remove">Remove</button>
         </div>
       </div>
-      <p class="subtitle" style="margin:8px 0 0">Drag the gizmo in the viewport to move, scale, or rotate it. Press G/S/R to switch modes.</p>
+      <div class="text-warm-500 mt-2 text-[0.75rem]">Drag the gizmo in the viewport to move, scale, or rotate it. Press G/S/R to switch modes.</div>
     `;
 
     this.selectOptionsMenu
@@ -3377,7 +3380,7 @@ export class SceneViewerApp {
     if (!draw) return;
 
     const panel = document.createElement("aside");
-    panel.className = "resource-panel";
+    panel.className = "resource-panel panel";
     panel.dataset.index = String(index);
     panel.dataset.signature = signature;
 

@@ -232,7 +232,7 @@ code {
 
 #sidebar {
   /* width: 340px; min-width: 340px; max-width: 440px; */
-  @apply w-[340px] flex flex-col
+  @apply w-[340px] !min-w-[320px] flex flex-col
     bg-brown-900
     border-r border-r-1 border-r-warm-500
     overflow-hidden;
@@ -371,6 +371,13 @@ code {
   }
 }
 
+.panel {
+  @apply p-4 bg-brown-900/90 text-warm-300 border border-warm-800;
+
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(0.5rem);
+}
+
 .resource-panel {
   @apply absolute z-[20]
     p-4 pb-8
@@ -378,10 +385,6 @@ code {
     bg-brown-900/90 text-warm-300
     border border-warm-500
     overflow-hidden pointer-events-auto;
-
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
-  backdrop-filter: blur(0.5rem);
-
 
   .resource-corner {
     @apply absolute w-0 h-0 pointer-events-auto opacity-90 pointer-events-auto
@@ -814,10 +817,7 @@ button {
     }
   }
 }
-
-#mark-ground-plane-btn.active, #select-sphere-btn.active, #select-box-btn.active, #select-options-menu button.active, #show-bounding-box-btn.active {
-  border-color: var(--accent); color: var(--accent); background: rgba(110, 231, 200, 0.12);
-}
+a
 
 .warning {
   margin-top: 12px; padding: 9px 10px; border-radius: 8px; font-size: 11.5px; line-height: 1.5;
@@ -838,9 +838,16 @@ button {
 #empty-hint .arrow { font-size: 22px; display: block; margin-bottom: 8px; color: var(--accent-dim); }
 
 #hud {
-  position: absolute; bottom: 14px; right: 14px; font-family: var(--mono); font-size: 11px;
-  color: var(--text-dim); background: rgba(11, 14, 19, 0.6); padding: 7px 10px; border-radius: 7px;
-  border: 1px solid var(--line); pointer-events: none;
+  @apply absolute bottom-4 right-4 py-1 px-2
+    text-[0.75rem] text-warm-500 bg-brown-900/80
+    border border-warm-800
+    pointer-events-none;
+
+  backdrop-filter: blur(0.5rem);
+}
+
+#fly-speed-indicator {
+  text-shadow: 2px 2px 2px black, 2px 2px 2px black, 2px 2px 2px black, 2px 2px 2px black;
 }
 
 /* Viewport orientation compass (see OrientationGizmo) - upper-right
@@ -902,7 +909,7 @@ input[type="file"] { display: none; }
   @apply absolute top-0 left-0 z-10 p-4;
 
   .tools {
-    @apply flex flex-row gap-2 bg-brown-900/90 px-4 py-2;
+    @apply flex flex-row gap-2 px-4 py-2;
 
     button {
       @apply text-amber-200 hover:text-amber-100;
@@ -910,7 +917,7 @@ input[type="file"] { display: none; }
   }
 
   .submenu {
-    @apply mt-2 py-2 px-4 bg-brown-900/90 text-warm-300;
+    @apply mt-2 py-2 px-4 text-warm-300;
   }
 }
 
