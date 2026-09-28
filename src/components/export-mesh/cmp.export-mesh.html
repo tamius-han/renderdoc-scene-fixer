@@ -14,7 +14,35 @@
       <div class="flex flex-row gap-8 xl:gap-16 mb-4">
         <div class="flex-1">
           <h3>Export preview</h3>
-          <div id="export-mesh-export-preview" class="resource-preview">
+          <!-- resource-preview relies on flex:1-auto plus its canvas being
+               w-full/h-full to fill a DEFINITE-height ancestor (that's how
+               the floating resource panel uses it - see main.css - where
+               the panel's own height is set explicitly in JS pixels). This
+               dialog has no such definite height anywhere above this div
+               (its containing column only auto-sizes to content, and
+               nothing in that chain ever pins down an actual height) -
+               without one, the canvas's height:100% can't resolve, so the
+               canvas falls back to using its own height ATTRIBUTE (in CSS
+               pixels) as its rendered size - and that attribute is exactly
+               what resize() (attachMultiMeshPreview() in app.ts) writes on
+               every call. That's a real feedback loop: canvas's
+               attribute-driven size grows -> this auto-height container
+               grows to fit it -> the ResizeObserver watching it fires
+               again -> resize() reads the now-bigger size and writes an
+               even bigger attribute -> repeat, every frame, unbounded.
+               A percentage height (h-full, h-[45vh], ...) can't break this
+               on its own, because it's just as dependent on this same
+               ancestor chain ever resolving to something definite - it
+               doesn't. aspect-[4/3] below sidesteps the whole problem: it
+               derives this element's height from its OWN width instead,
+               and width already resolves correctly here (the flex-row
+               above genuinely divides horizontal space between this column
+               and "Export options" - see the WebGL console warnings this
+               bug produced, where only height was ever seen to run away,
+               never width). resize() in app.ts also clamps to the
+               viewport's own size as a hard backstop, so even a future,
+               unrelated layout regression can't spiral like this again. -->
+          <div id="export-mesh-export-preview" class="resource-preview aspect-[4/3]">
 
           </div>
         </div>

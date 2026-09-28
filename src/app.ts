@@ -2976,8 +2976,18 @@ export class SceneViewerApp {
     let currentDistance = fitDistance;
 
     const resize = () => {
-      const width = Math.max(1, container.clientWidth);
-      const height = Math.max(1, container.clientHeight);
+      // Hard backstop against a container/canvas feedback loop (see the
+      // doc comment on #export-mesh-export-preview in cmp.export-mesh.html
+      // for how one arises): this preview is never legitimately bigger
+      // than the viewport it's embedded in, so clamping to
+      // window.inner{Width,Height} makes it IMPOSSIBLE for a runaway
+      // container measurement to compound - even if some future layout
+      // change reintroduces an indefinite-height ancestor, the clamp
+      // caps growth at a single, fixed, bounded value instead of letting
+      // it spiral every animation frame until the GPU refuses the canvas
+      // size outright.
+      const width = Math.max(1, Math.min(container.clientWidth, window.innerWidth));
+      const height = Math.max(1, Math.min(container.clientHeight, window.innerHeight));
       renderer.setSize(width, height, false);
       const aspect = width / height;
       camera.aspect = aspect;
