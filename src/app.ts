@@ -2896,7 +2896,7 @@ export class SceneViewerApp {
     const textured = options.textured ?? true;
 
     const previewCanvas = document.createElement("canvas");
-    previewCanvas.className = "resource-preview-canvas";
+    previewCanvas.className = "resource-preview-canvas h-full w-full";
     container.appendChild(previewCanvas);
 
     const renderer = new THREE.WebGLRenderer({ canvas: previewCanvas, antialias: true, alpha: true });
