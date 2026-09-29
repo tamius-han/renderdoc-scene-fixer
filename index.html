@@ -54,6 +54,34 @@
                 <input type="text" id="object-filter-size-value" class="input-percent" min="0" max="100" value="10" />
               </div>
             </div>
+
+            <div class="field row !my-2">
+              <input type="checkbox" id="object-filter-flat-enabled"> Hide flat
+            </div>
+
+            <div id="object-filter-flat-options" class="hidden">
+              <div class="field">
+                <div class="label">Hide larger than (diameter, capture units):</div>
+                <div class="combined-slider-value" data-suffix="">
+                  <input type="range" id="object-filter-larger-slider" min="0" max="1000" value="0" />
+                  <input type="text" id="object-filter-larger-value" class="input-number" inputmode="decimal" />
+                </div>
+              </div>
+              <div class="field">
+                <div class="label">Hide smaller than (diameter, capture units):</div>
+                <div class="combined-slider-value" data-suffix="">
+                  <input type="range" id="object-filter-smaller-slider" min="0" max="1000" value="0" />
+                  <input type="text" id="object-filter-smaller-value" class="input-number" inputmode="decimal" />
+                </div>
+              </div>
+              <div class="field">
+                <div class="label">Hide with fewer than (faces):</div>
+                <div class="combined-slider-value" data-suffix="">
+                  <input type="range" id="object-filter-faces-slider" min="0" max="1000" value="0" />
+                  <input type="text" id="object-filter-faces-value" class="input-number" inputmode="decimal" />
+                </div>
+              </div>
+            </div>
           </div>
 
           <b class="mt-8 text-white">Object list:</b>

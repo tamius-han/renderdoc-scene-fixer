@@ -161,6 +161,13 @@ p {
       @apply text-warm-300 border-b border-b-1 border-b-amber-300 -ml-4 px-2;
 
     }
+    /* data-suffix overrides the default "%" ; an empty one drops the suffix box entirely */
+    &[data-suffix]::after {
+      content: attr(data-suffix);
+    }
+    &[data-suffix=""]::after {
+      display: none;
+    }
   }
 
   select {
