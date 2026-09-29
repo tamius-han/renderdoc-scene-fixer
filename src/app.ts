@@ -60,6 +60,11 @@ interface LoadedDraw {
   originalPosedUvs: number[] | null;
 
   appliedDistortionMatrix: THREE.Matrix4 | null;
+
+  /** Normal map for the viewport's smooth shading (a colorspace-correct
+   * clone of the captured normal texture). undefined = not looked up yet
+   * (done lazily - see ensureViewNormalMaps()), null = draw has none. */
+  viewNormalMap?: THREE.Texture | null;
 }
 
 /** A point-in-time snapshot of everything Ctrl+Z/Ctrl+Y travel through -
@@ -160,9 +165,16 @@ export class SceneViewerApp {
   private activeExportPreviewDispose: (() => void) | null = null;
 
   private selectionVisuals: THREE.Object3D[] = [];
-  private selectionShaderCache = new WeakMap<THREE.Material, THREE.Material>();
+  // Viewport look ("View options" panel) - see view-material.ts. The
+  // uniforms are shared by every scene material, so option changes are plain
+  // uniform writes.
+  private viewUniforms = createViewUniforms(SELECTION_COLOR);
+  private viewLights = new ViewLights();
+  private viewMaterialCache = new Map<string, THREE.Material>();
+  private viewNormalTextures = new Map<string, THREE.Texture>();
+  private viewNormalMapsLoading = false;
 
-  // "Show bounding box" toggle - see toggleBoundingBoxVisible()/
+  // "Show bounding box" checkbox (View options panel) - see setBoundingBoxVisible()/
   // updateBoundingBoxVisual(). Not part of selectionVisuals: unlike the
   // dot markers, this gizmo owns reusable geometry that must survive a
   // content-group rebuild (see BoundingBoxGizmo's own doc comment), so it
@@ -196,7 +208,21 @@ export class SceneViewerApp {
       frameSceneBtn: this.el("frame-scene-btn"),
       showResourcesPanelBtn: this.el("show-resources-panel-button"),
       hideResourcesPanelBtn: this.el("hide-resources-panel-button"),
-      showBoundingBoxBtn: this.el<HTMLButtonElement>("show-bounding-box-btn"),
+      viewOptionsBtn: this.el<HTMLButtonElement>("view-options-btn"),
+      viewOptionsSubmenu: {
+        menu: this.el("view-options-submenu"),
+        showTexturesRow: this.el("view-opt-textures-row"),
+        showTextures: this.el<HTMLInputElement>("view-opt-show-textures"),
+        shading: this.el<HTMLSelectElement>("view-opt-shading"),
+        defaultColor: this.el<HTMLInputElement>("view-opt-default-color"),
+        defaultHighlightColor: this.el<HTMLInputElement>("view-opt-default-highlight"),
+        selectionColor: this.el<HTMLInputElement>("view-opt-selection-color"),
+        selectionHighlightColor: this.el<HTMLInputElement>("view-opt-selection-highlight"),
+        flippedNormalsColor: this.el<HTMLInputElement>("view-opt-flipped-color"),
+        flippedNormalsHighlightColor: this.el<HTMLInputElement>("view-opt-flipped-highlight"),
+        showBoundingBox: this.el<HTMLInputElement>("view-opt-bounding-box"),
+        reset: this.el<HTMLButtonElement>("view-opt-reset"),
+      },
       setAxisMappingBtn: this.el("set-axis-mapping-btn"),
 
       selectVolumeSubmenu: {
@@ -293,6 +319,10 @@ export class SceneViewerApp {
     // pixel-width resolution) regardless of how many times the content
     // group itself gets torn down and rebuilt.
     this.sceneManager.scene.add(this.boundingBoxGizmo.group);
+    // Lights for the "smooth" shading mode (persistent - see
+    // SceneManager.clear()); unlit modes ignore them.
+    this.sceneManager.scene.add(this.viewLights.group);
+    this.sceneManager.onBeforeRender(() => this.viewLights.syncToCamera(this.sceneManager.activeCamera));
     this.sceneManager.onBeforeRender(() => {
       this.boundingBoxGizmo.syncTransform(this.sceneManager.getContentGroup());
       const size = new THREE.Vector2();
@@ -450,10 +480,7 @@ export class SceneViewerApp {
         this.toggleResourcePanel(false);
       });
 
-      this.elements.toolsMenu.showBoundingBoxBtn.addEventListener('click', () => {
-        this.toggleBoundingBoxVisible();
-      });
-      this.syncBoundingBoxButtonState();
+      this.setupViewOptionsMenu();
 
       this.restoreResourcePanel();
       // Ensures the submenu's hint/apply-button visibility matches reality
@@ -577,25 +604,189 @@ export class SceneViewerApp {
     this.toggleResourcePanel(Config.sessionConfig.resourcesPanel.visible);
   }
 
-  /** Toggles the "Show bounding box" button - see updateBoundingBoxVisual()
-   * for where the gizmo's own visibility/bounds actually get applied
-   * (driven off the CURRENT selection, which may have changed since this
-   * was last toggled). */
-  private toggleBoundingBoxVisible(): void {
-    Config.sessionConfig.boundingBox.visible = !Config.sessionConfig.boundingBox.visible;
-    this.syncBoundingBoxButtonState();
+  private setBoundingBoxVisible(visible: boolean): void {
+    Config.sessionConfig.boundingBox.visible = visible;
     this.updateBoundingBoxVisual(this.computeActiveSelectionUnionBounds());
   }
 
-  private syncBoundingBoxButtonState(): void {
-    this.elements.toolsMenu.showBoundingBoxBtn.classList.toggle("active", Config.sessionConfig.boundingBox.visible);
+  // ===================== View options panel ================================
+
+  private get viewOptions() {
+    return this.appConfig.config.viewOptions;
+  }
+
+  /** True if any loaded draw has a base color texture - decides whether the
+   * "Show textures" checkbox and the 'none' shading option are offered. */
+  private sceneHasTextures(): boolean {
+    return this.loadedDraws.some((d) => d.key !== "untextured");
+  }
+
+  /** The shading actually in effect: the saved choice, unless it's 'none'
+   * on a scene without textures (unavailable), and 'none'-if-possible,
+   * else 'flat', when the user never picked one. */
+  private getEffectiveShading(): ViewShading {
+    const hasTextures = this.sceneHasTextures();
+    const chosen = this.viewOptions.shading;
+    if (chosen === null) return hasTextures ? "none" : "flat";
+    if (chosen === "none" && !hasTextures) return "flat";
+    return chosen;
+  }
+
+  private setupViewOptionsMenu(): void {
+    const t = this.elements.toolsMenu;
+    const ui = t.viewOptionsSubmenu;
+
+    t.viewOptionsBtn.addEventListener("click", () => {
+      const nowHidden = ui.menu.classList.toggle("hidden");
+      t.viewOptionsBtn.classList.toggle("active", !nowHidden);
+    });
+
+    ui.showTextures.addEventListener("change", () => {
+      this.viewOptions.showTextures = ui.showTextures.checked;
+      this.commitViewOptions();
+    });
+    ui.shading.addEventListener("change", () => {
+      this.viewOptions.shading = ui.shading.value as ViewShading;
+      this.commitViewOptions();
+    });
+
+    // Colors update live while dragging in the picker ('input') and are
+    // persisted once the picker closes ('change').
+    const colorInputs: Array<[HTMLInputElement, keyof AppConfiguration["viewOptions"]]> = [
+      [ui.defaultColor, "defaultColor"],
+      [ui.defaultHighlightColor, "defaultHighlightColor"],
+      [ui.selectionColor, "selectionColor"],
+      [ui.selectionHighlightColor, "selectionHighlightColor"],
+      [ui.flippedNormalsColor, "flippedNormalsColor"],
+      [ui.flippedNormalsHighlightColor, "flippedNormalsHighlightColor"],
+    ];
+    for (const [input, key] of colorInputs) {
+      input.addEventListener("input", () => {
+        (this.viewOptions as unknown as Record<string, unknown>)[key] = input.value;
+        this.applyViewOptions();
+      });
+      input.addEventListener("change", () => Config.saveConfig());
+    }
+
+    ui.showBoundingBox.addEventListener("change", () => this.setBoundingBoxVisible(ui.showBoundingBox.checked));
+
+    ui.reset.addEventListener("click", () => {
+      this.appConfig.config.viewOptions = { ...DEFAULT_VIEW_OPTIONS };
+      this.commitViewOptions();
+    });
+
+    this.applyViewOptions();
+  }
+
+  private commitViewOptions(): void {
+    Config.saveConfig();
+    this.applyViewOptions();
+  }
+
+  /** Pushes the current view options into the shared shader uniforms, the
+   * selection color/outline, and the panel's own controls. Cheap - no scene
+   * rebuild - except the first time smooth shading is used with textures,
+   * when normal maps get loaded (see ensureViewNormalMaps()). */
+  private applyViewOptions(): void {
+    const v = this.viewOptions;
+    const u = this.viewUniforms;
+    const shading = this.getEffectiveShading();
+
+    u.uViewMode.value = shading === "none" ? 0 : shading === "flat" ? 1 : 2;
+    u.uUseTextures.value = v.showTextures ? 1 : 0;
+    u.uDefaultColor.value.set(v.defaultColor);
+    u.uDefaultHighlight.value.set(v.defaultHighlightColor);
+    // SELECTION_COLOR is the same object uSelColor points at, and the one
+    // the outline pass reads - so this recolors shading and outline alike.
+    SELECTION_COLOR.set(v.selectionColor);
+    u.uSelHighlight.value.set(v.selectionHighlightColor);
+    u.uFlipColor.value.set(v.flippedNormalsColor);
+    u.uFlipHighlight.value.set(v.flippedNormalsHighlightColor);
+
+    // Panel controls
+    const ui = this.elements.toolsMenu.viewOptionsSubmenu;
+    const hasTextures = this.sceneHasTextures();
+    ui.showTexturesRow.classList.toggle("hidden", !hasTextures);
+    ui.showTextures.checked = v.showTextures;
+    const noneOption = Array.from(ui.shading.options).find((o) => o.value === "none");
+    if (noneOption) {
+      noneOption.disabled = !hasTextures;
+      noneOption.hidden = !hasTextures;
+    }
+    ui.shading.value = shading;
+    ui.defaultColor.value = v.defaultColor;
+    ui.defaultHighlightColor.value = v.defaultHighlightColor;
+    ui.selectionColor.value = v.selectionColor;
+    ui.selectionHighlightColor.value = v.selectionHighlightColor;
+    ui.flippedNormalsColor.value = v.flippedNormalsColor;
+    ui.flippedNormalsHighlightColor.value = v.flippedNormalsHighlightColor;
+    ui.showBoundingBox.checked = Config.sessionConfig.boundingBox.visible;
+
+    if (shading === "smooth" && v.showTextures) void this.ensureViewNormalMaps();
+  }
+
+  /** Loads (once per draw, sequentially - same decode-throttling reasoning
+   * as TextureManager) the normal maps smooth shading can use, then rebuilds
+   * the scene so the affected batches get materials that include them. */
+  private async ensureViewNormalMaps(): Promise<void> {
+    if (this.viewNormalMapsLoading) return;
+    const draws = this.loadedDraws;
+    const pending = draws.filter((d) => d.viewNormalMap === undefined);
+    if (pending.length === 0) return;
+
+    this.viewNormalMapsLoading = true;
+    let foundAny = false;
+    try {
+      for (const draw of pending) {
+        const binding = this.findDrawTextureBinding(draw, "normal map");
+        const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
+        let texture: THREE.Texture | null = null;
+        if (path) {
+          texture = this.viewNormalTextures.get(path) ?? null;
+          if (!texture) {
+            const base = await this.textures.load(this.vfs, path);
+            if (base) {
+              // The shared texture is tagged sRGB (right for base colors,
+              // wrong for normal maps) - use a linear clone of it, which
+              // shares the decoded image.
+              texture = base.clone();
+              texture.colorSpace = THREE.NoColorSpace;
+              texture.needsUpdate = true;
+              this.viewNormalTextures.set(path, texture);
+            }
+          }
+        }
+        draw.viewNormalMap = texture;
+        if (texture) foundAny = true;
+      }
+    } finally {
+      this.viewNormalMapsLoading = false;
+    }
+    // A new capture may have been loaded while we were busy.
+    if (draws !== this.loadedDraws) return;
+    if (foundAny) this.rebuildVisibleScene();
+  }
+
+  /** The viewport material for a draw: one shared material per distinct
+   * (base color texture, normal map) pair - draws are merged into batches
+   * per material (see SceneMeshBuilder), so this is also the batching key. */
+  private getViewMaterial(draw: LoadedDraw): { key: string; material: THREE.Material } {
+    const map = draw.material instanceof THREE.MeshBasicMaterial ? draw.material.map : null;
+    const normalMap = draw.viewNormalMap ?? null;
+    const key = `${draw.key}|${normalMap?.uuid ?? ""}`;
+    let material = this.viewMaterialCache.get(key);
+    if (!material) {
+      material = createViewMaterial(this.viewUniforms, { map, normalMap });
+      this.viewMaterialCache.set(key, material);
+    }
+    return { key, material };
   }
 
   /** The union bounding box of every currently ACTIVE-selected (selected
    * and actually visible - see getActiveSelectedIndices()) object, or null
    * if there's nothing selected. Shared by updateSelectionVisuals() (which
    * already walks this same list to place the per-object/union center dot
-   * markers) and toggleBoundingBoxVisible() (which needs it once, right
+   * markers) and setBoundingBoxVisible() (which needs it once, right
    * when the toggle is switched on, without waiting for the next
    * selection change to call updateSelectionVisuals() again). */
   private computeActiveSelectionUnionBounds(): Bounds | null {
@@ -861,7 +1052,7 @@ export class SceneViewerApp {
    * There are no real lights in the viewport, and THREE.Material.clone()
    * does NOT copy onBeforeCompile - so anything that clones a material
    * flagged here must call this again on the clone (see the export preview
-   * and buildSelectionShaderMaterial()), or the clone renders as a flat
+   * and the export preview), or the clone renders as a flat
    * blob. The userData flag is what those call sites key off of (clone()
    * does copy userData). */
   private applyFlatFaceShading(material: THREE.Material): void {
@@ -1061,6 +1252,10 @@ export class SceneViewerApp {
         this.untexturedMaterial.dispose();
         this.untexturedMaterial = null;
       }
+      for (const material of this.viewMaterialCache.values()) material.dispose();
+      this.viewMaterialCache.clear();
+      for (const texture of this.viewNormalTextures.values()) texture.dispose();
+      this.viewNormalTextures.clear();
       this.textures.disposeAll();
       this.loadedDraws = [];
       this.objectList.innerHTML = "";
@@ -1191,6 +1386,9 @@ export class SceneViewerApp {
 
       this.elements.overlays.loadingScreen.log(`Rebuilding visible scene...`);
 
+      // Scene texture availability decides which view options exist (and
+      // the default shading), so refresh them before the first build.
+      this.applyViewOptions();
       this.setHidePercent(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
       this.elements.overlays.loadingScreen.log(`Visible scene rebuilt.`);
 
@@ -1237,7 +1435,8 @@ export class SceneViewerApp {
         excludedCount++;
         return;
       }
-      builder.addDraw(draw.key, draw.material, draw.geometryData, index);
+      const view = this.getViewMaterial(draw);
+      builder.addDraw(view.key, view.material, draw.geometryData, index);
     });
     const meshes = builder.buildAll();
 
@@ -4064,132 +4263,40 @@ export class SceneViewerApp {
     }
   }
 
-  /** Applies the "selected mesh(es) turn solid flat-shaded orange, every
-   * other mesh darkens by 50%" look (or, with nothing selected, restores
-   * everything to normal). Runs per merged BATCH mesh (what's actually in
-   * the scene graph - see SceneMeshBuilder), but recolors per TRIANGLE
-   * within each one using that mesh's precomputed faceDrawIndices (see
-   * mesh-builder.ts) rather than treating a whole batch as one unit - a
-   * batch is a group of draws sharing one material, so it very often mixes
-   * selected and non-selected draws together, and the old draw-index-based
-   * dimming here couldn't tell those apart.
-   *
-   * A mesh's material is only ever swapped for a cached shader variant (see
-   * buildSelectionShaderMaterial()) or restored to its original - never
-   * mutated in place - so repeated selection changes can't accumulate
-   * clones-of-clones, and a mesh with nothing selected always ends up back
-   * at pixel-identical output to before any selection existed. */
+  /** Feeds selection state to the viewport shader (see view-material.ts):
+   * a per-vertex "belongs to a selected draw" flag per merged batch mesh
+   * (per TRIANGLE, via the mesh's precomputed faceDrawIndices - a batch is a
+   * group of draws sharing one material, so it very often mixes selected and
+   * non-selected draws), plus the global "something is selected" switch that
+   * makes the shader dim everything unselected. Materials are never swapped
+   * or cloned, so a mesh with nothing selected is always exactly the
+   * unselected look. */
   private applySelectionShading(): void {
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
 
     const hasSelection = this.selectedIndices.size > 0;
+    this.viewUniforms.uHasSelection.value = hasSelection ? 1 : 0;
+    if (!hasSelection) return;
 
     group.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh) || obj.userData.isSelectionVisual) return;
       const faceDrawIndices = obj.userData.faceDrawIndices as Uint32Array | undefined;
       if (!faceDrawIndices) return;
 
-      // Stash the pristine material the first time this (freshly built -
-      // see addContent()) mesh is seen, so there's always something exact
-      // to restore to, regardless of how many times its material gets
-      // swapped afterward.
-      const baseMaterial = (obj.userData.baseMaterial as THREE.Material | undefined) ?? obj.material;
-      obj.userData.baseMaterial = baseMaterial;
-
-      if (!hasSelection) {
-        obj.material = baseMaterial;
-        return;
-      }
-
-      // One flag per triangle, expanded to 3 (one per vertex, since the
-      // geometry is non-indexed - see mesh-builder.ts) - lets the shader
-      // below shade each triangle according to whether ITS OWN draw is
-      // selected, not the batch as a whole.
-      const vertexCount = faceDrawIndices.length * 3;
-      const selectedFlags = new Float32Array(vertexCount);
+      const attribute = obj.geometry.getAttribute("aSelected") as THREE.BufferAttribute | undefined;
+      if (!attribute) return;
+      const flags = attribute.array as Float32Array;
+      // Geometry is non-indexed: 3 vertices per triangle.
       for (let face = 0; face < faceDrawIndices.length; face++) {
         const flag = this.selectedIndices.has(faceDrawIndices[face]) ? 1 : 0;
         const base = face * 3;
-        selectedFlags[base] = flag;
-        selectedFlags[base + 1] = flag;
-        selectedFlags[base + 2] = flag;
+        flags[base] = flag;
+        flags[base + 1] = flag;
+        flags[base + 2] = flag;
       }
-      obj.geometry.setAttribute("aSelected", new THREE.Float32BufferAttribute(selectedFlags, 1));
-
-      let shaded = this.selectionShaderCache.get(baseMaterial);
-      if (!shaded) {
-        shaded = this.buildSelectionShaderMaterial(baseMaterial);
-        this.selectionShaderCache.set(baseMaterial, shaded);
-      }
-      obj.material = shaded;
+      attribute.needsUpdate = true;
     });
-  }
-
-  /** Clones a batch mesh's own (always MeshBasicMaterial - see
-   * mesh-builder.ts) material into one that branches per-vertex on the
-   * "aSelected" attribute applySelectionShading() maintains: triangles
-   * belonging to a selected draw render as flat, per-face-shaded
-   * SELECTION_COLOR (texture/vertex-color ignored entirely); everything
-   * else renders as normal, just at 50% brightness. The "flat per-face"
-   * look comes from computing a face normal in the fragment shader via
-   * screen-space derivatives (dFdx/dFdy) of a view-space position varying,
-   * rather than trusting the mesh's own (likely smoothed) normal attribute
-   * - that's what makes each triangle read as a distinct facet instead of
-   * a uniform flat blob. There's no actual light in this scene (everything
-   * else here is unlit MeshBasicMaterial - see scene-manager.ts), so the
-   * "light direction" is just a fixed vector chosen to give a pleasant
-   * range of shading across a typical model's orientation.
-   *
-   * Returns the material unchanged (no clone) if `base` isn't a
-   * MeshBasicMaterial - would only happen if a new material type is
-   * introduced elsewhere and this wasn't updated to match, and rendering
-   * that mesh unmodified is a safer failure mode than a broken shader. */
-  private buildSelectionShaderMaterial(base: THREE.Material): THREE.Material {
-    if (!(base instanceof THREE.MeshBasicMaterial)) return base;
-
-    const c = SELECTION_COLOR;
-    const shaded = base.clone();
-    // The clone lost the base material's own per-face shading (see
-    // applyFlatFaceShading()), so unselected untextured geometry has to
-    // re-apply it here or it goes flat the moment anything is selected.
-    const unselectedShading = base.userData.flatShaded
-      ? `vec3 unselFaceNormal = normalize( cross( dFdx( vSelectionViewPos ), dFdy( vSelectionViewPos ) ) );
-            float unselNdotl = abs( dot( unselFaceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
-            diffuseColor.rgb *= ( 0.45 + 0.55 * unselNdotl ) * 0.5;`
-      : `diffuseColor.rgb *= 0.5;`;
-    shaded.onBeforeCompile = (shader) => {
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          "#include <common>",
-          "attribute float aSelected;\nvarying float vSelected;\nvarying vec3 vSelectionViewPos;\n#include <common>",
-        )
-        .replace(
-          "#include <project_vertex>",
-          "#include <project_vertex>\nvSelected = aSelected;\nvSelectionViewPos = mvPosition.xyz;",
-        );
-
-      shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", "varying float vSelected;\nvarying vec3 vSelectionViewPos;\n#include <common>")
-        .replace(
-          "#include <specularmap_fragment>",
-          `#include <specularmap_fragment>
-          if ( vSelected > 0.5 ) {
-            vec3 faceNormal = normalize( cross( dFdx( vSelectionViewPos ), dFdy( vSelectionViewPos ) ) );
-            // abs() rather than clamp(): OBJ meshes don't reliably have
-            // consistent winding, and we don't have or want a real light
-            // to orient against - this just avoids any facet going
-            // completely black if its normal happens to point "away".
-            float ndotl = abs( dot( faceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
-            float shade = 0.45 + 0.55 * ndotl;
-            diffuseColor.rgb = vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)}) * shade;
-          } else {
-            ${unselectedShading}
-          }`,
-        );
-    };
-    shaded.needsUpdate = true;
-    return shaded;
   }
 
   private setupSelectionOutlinePass(): void {

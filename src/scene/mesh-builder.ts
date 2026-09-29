@@ -58,6 +58,22 @@ export function objToGeometryArrays(obj: ParsedOBJ): GeometryArrays {
   const normals: number[] = [];
 
   for (const tri of obj.faces) {
+    // Fallback for corners without a normal: the triangle's own face normal
+    // (rather than a bogus constant +Z), so smooth shading of OBJs that
+    // ship no normals at all still reads as sensible geometry.
+    let faceNormal: [number, number, number] | null = null;
+    const getFaceNormal = (): [number, number, number] => {
+      if (faceNormal) return faceNormal;
+      const a = obj.positions[tri[0]?.v - 1];
+      const b = obj.positions[tri[1]?.v - 1];
+      const c = obj.positions[tri[2]?.v - 1];
+      if (!a || !b || !c) return (faceNormal = [0, 0, 1]);
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+      const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const len = Math.hypot(nx, ny, nz);
+      return (faceNormal = len > 1e-12 ? [nx / len, ny / len, nz / len] : [0, 0, 1]);
+    };
     for (const { v, t, n } of tri) {
       const p = obj.positions[v - 1] ?? [0, 0, 0];
       positions.push(p[0], p[1], p[2]);
@@ -66,7 +82,11 @@ export function objToGeometryArrays(obj: ParsedOBJ): GeometryArrays {
       uvs.push(uv ? uv[0] : 0, uv ? uv[1] : 0);
 
       const normal = n !== undefined ? obj.normals[n - 1] : undefined;
-      normals.push(normal ? normal[0] : 0, normal ? normal[1] : 0, normal ? normal[2] : 1);
+      if (normal) normals.push(normal[0], normal[1], normal[2]);
+      else {
+        const fn = getFaceNormal();
+        normals.push(fn[0], fn[1], fn[2]);
+      }
     }
   }
 
@@ -125,6 +145,12 @@ export class MaterialMergeGroup {
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(this.positions, 3));
     geometry.setAttribute("uv", new THREE.Float32BufferAttribute(this.uvs, 2));
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(this.normals, 3));
+    // Per-vertex "belongs to a selected draw" flag read by the viewport
+    // material (see view-material.ts). Always present (all zeros until
+    // something is selected - see applySelectionShading() in app.ts): a
+    // shader reading an attribute the geometry doesn't have gets whatever
+    // stale constant is left on that attribute slot, not a reliable 0.
+    geometry.setAttribute("aSelected", new THREE.Float32BufferAttribute(new Float32Array(this.positions.length / 3), 1));
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.userData.drawIndices = [...this.drawIndices];
     // Per-triangle owner (see faceDrawIndices doc comment above) - lets a

@@ -959,6 +959,9 @@ export class SceneManager {
   clear(): void {
     for (let i = this.scene.children.length - 1; i >= 0; i--) {
       const obj = this.scene.children[i];
+      // Long-lived, app-owned objects (bounding box gizmo, view lights) are
+      // added once and must survive content rebuilds.
+      if (obj.userData.persistent) continue;
       this.scene.remove(obj);
 
       obj.traverse((child) => {

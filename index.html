@@ -122,7 +122,7 @@
               <button id="show-resources-panel-button">Show resource panel</button>
               <button id="hide-resources-panel-button" class="hidden">Hide resource panel</button>
               &middot;
-              <button id="show-bounding-box-btn" title="Toggle a bounding box around the current selection">Show bounding box</button>
+              <button id="view-options-btn" title="Textures, shading and colors">View options</button>
               &middot;
               <button id="reset-camera-btn">Reset camera</button>
               &middot;
@@ -206,6 +206,54 @@
             <div id="axis-mapper-submenu" class="submenu panel hidden flex flex-col">
               <div>Input geometry axis mapping:</div>
               <input-axis-mapper id="axis-mapper-submenu-input-axis-mapper"></input-axis-mapper>
+            </div>
+
+            <div id="view-options-submenu" class="submenu panel hidden">
+              <div class="flex flex-col gap-2 w-[340px]">
+                <div id="view-opt-textures-row" class="view-options-row">
+                  <label for="view-opt-show-textures">Show textures</label>
+                  <input type="checkbox" id="view-opt-show-textures" checked />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-shading">Shading</label>
+                  <select id="view-opt-shading">
+                    <option value="none">none</option>
+                    <option value="flat">flat</option>
+                    <option value="smooth">smooth</option>
+                  </select>
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-default-color" title="Used when a mesh has no texture, or textures are hidden">Default color</label>
+                  <input type="color" id="view-opt-default-color" value="#606a7a" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-default-highlight">Default highlight color</label>
+                  <input type="color" id="view-opt-default-highlight" value="#000000" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-selection-color">Selection color</label>
+                  <input type="color" id="view-opt-selection-color" value="#ff8c1a" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-selection-highlight">Selection highlight</label>
+                  <input type="color" id="view-opt-selection-highlight" value="#000000" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-flipped-color">Flipped normals</label>
+                  <input type="color" id="view-opt-flipped-color" value="#ff0000" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-flipped-highlight">Flipped normals highlight</label>
+                  <input type="color" id="view-opt-flipped-highlight" value="#000000" />
+                </div>
+                <div class="view-options-row">
+                  <label for="view-opt-bounding-box" title="Bounding box around the current selection">Show bounding box</label>
+                  <input type="checkbox" id="view-opt-bounding-box" />
+                </div>
+                <div class="flex flex-row justify-end">
+                  <button id="view-opt-reset" class="ghost">Reset to defaults</button>
+                </div>
+              </div>
             </div>
 
             <div id="select-options-menu" class="panel mt-4 hidden"></div>

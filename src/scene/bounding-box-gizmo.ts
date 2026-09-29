@@ -164,6 +164,7 @@ export class BoundingBoxGizmo {
 
   constructor() {
     this.group = new THREE.Group();
+    this.group.userData.persistent = true; // survives SceneManager.clear()
     this.group.userData.isSelectionVisual = true;
     this.group.visible = false;
     this.group.matrixAutoUpdate = true;

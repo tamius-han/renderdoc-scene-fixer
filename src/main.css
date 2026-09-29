@@ -959,3 +959,23 @@ input[type="file"] { display: none; }
 
 
 }
+
+
+/* "View options" panel rows */
+.view-options-row {
+  @apply flex flex-row items-center justify-between gap-4;
+
+  label { @apply text-warm-300; }
+
+  select {
+    @apply bg-brown-950 text-amber-200 border border-brown-700 px-2 py-1;
+  }
+
+  input[type="color"] {
+    @apply w-12 h-6 p-0 bg-transparent border border-brown-700 cursor-pointer;
+  }
+
+  input[type="checkbox"] { @apply cursor-pointer; }
+}
+
+button#view-options-btn.active { @apply text-amber-100 underline; }
