@@ -26,9 +26,12 @@ import { CaptureImporter } from './components/capture-importer/cmp.capture-impor
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
 import { ExportMesh, type ExportTextureCategories, type ExportTextureCategoryEntry } from './components/export-mesh/cmp.export-mesh';
-import { Config, type AppConfiguration, type ExportTextureCategoryOptions } from './config/cls.config';
+import { Config, DEFAULT_VIEW_OPTIONS, type AppConfiguration, type ExportTextureCategoryOptions, type ViewShading } from './config/cls.config';
+import { createViewMaterial, createViewUniforms, ViewLights } from './scene/view-material';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { remapObjOrientation } from './util/axis-orientation';
+import { isTextEntryFocused } from './util/fn.text-entry-focus';
+import { logSliderToValue, valueToLogSlider, parseDecimal, HIDE_PERCENT_SLIDER } from './util/fn.log-slider';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 import { Help } from './components/help/cmp.help';
 

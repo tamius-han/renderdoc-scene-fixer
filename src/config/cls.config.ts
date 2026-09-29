@@ -20,6 +20,40 @@ export interface ExportTextureCategoryOptions {
   excludedPaths: string[];
 }
 
+/** How the viewport lights geometry. 'none' leaves textures unlit (only
+ * available when the loaded scene actually has textures); 'flat' shades per
+ * triangle (the look untextured Intel GPA scenes have always had); 'smooth'
+ * shades using interpolated vertex normals. */
+export type ViewShading = 'none' | 'flat' | 'smooth';
+
+/** Viewport appearance settings - see the "View options" panel. Colors are
+ * '#rrggbb' strings (what <input type="color"> speaks). "Highlight" colors
+ * are the specular highlight added on top of the lit surface: black adds
+ * nothing, so the defaults reproduce the pre-existing look. */
+export interface ViewOptions {
+  showTextures: boolean;
+  /** null = automatic: 'none' when the scene has textures, otherwise
+   * 'flat'. Set as soon as the user picks a value. */
+  shading: ViewShading | null;
+  defaultColor: string;
+  defaultHighlightColor: string;
+  selectionColor: string;
+  selectionHighlightColor: string;
+  flippedNormalsColor: string;
+  flippedNormalsHighlightColor: string;
+}
+
+export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
+  showTextures: true,
+  shading: null,
+  defaultColor: '#606a7a',
+  defaultHighlightColor: '#000000',
+  selectionColor: '#ff8c1a',
+  selectionHighlightColor: '#000000',
+  flippedNormalsColor: '#ff0000',
+  flippedNormalsHighlightColor: '#000000',
+};
+
 export interface AppConfiguration {
   importOptions: {
     captureUnitSize: number;
@@ -71,11 +105,22 @@ export interface AppConfiguration {
 
   objectFiltering: {
     hideLargestObjectsPercent: number;
+    /** "Hide flat" filter in the object sidebar. Thresholds are diameters in
+     * capture units (larger/smaller) and a face count; null = untouched
+     * (the slider sits at the bottom of its range). */
+    flatFilter: {
+      enabled: boolean;
+      larger: number | null;
+      smaller: number | null;
+      minFaces: number;
+    };
   };
 
   controls: {
     controlScheme: 'asdf' | 'esdf';
   };
+
+  viewOptions: ViewOptions;
 
   canRecalculateDistortion: boolean;
 }
@@ -133,10 +178,13 @@ export class Config {
 
     objectFiltering: {
       hideLargestObjectsPercent: 5,
+      flatFilter: { enabled: false, larger: null, smaller: null, minFaces: 0 },
     },
     controls: {
       controlScheme: 'esdf',
     },
+
+    viewOptions: { ...DEFAULT_VIEW_OPTIONS },
 
     canRecalculateDistortion: true,
   };
@@ -270,8 +318,13 @@ export class Config {
           ...saved.exportOptions?.metallicRoughnessTextures,
         },
       },
-      objectFiltering: { ...defaults.objectFiltering, ...saved.objectFiltering },
+      objectFiltering: {
+        ...defaults.objectFiltering,
+        ...saved.objectFiltering,
+        flatFilter: { ...defaults.objectFiltering.flatFilter, ...saved.objectFiltering?.flatFilter },
+      },
       controls: { ...defaults.controls, ...saved.controls },
+      viewOptions: { ...defaults.viewOptions, ...saved.viewOptions },
     };
   }
   /**
