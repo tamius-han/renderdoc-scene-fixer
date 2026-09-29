@@ -77,6 +77,15 @@ interface HistorySnapshot {
   scaleReferenceIndex: number | null;
 }
 
+/** Value limits of the "hide flat" sliders (all logarithmic; the text boxes
+ * are linear and clamped to the same limits). `shift` - see
+ * fn.log-slider.ts. */
+const FLAT_FILTER_SLIDERS = {
+  larger: { max: 1000, shift: 0.01 }, // diameter, capture units
+  smaller: { max: 1000, shift: 0.01 }, // diameter, capture units
+  faces: { max: 1000, shift: 1 },
+} as const;
+
 export class SceneViewerApp {
   private vfs = new VirtualFileSystem();
   private loaded: LoadedManifests | null = null;
@@ -93,15 +102,13 @@ export class SceneViewerApp {
 
   private hidePercent = 0;
 
-  /** "Hide flat" filter state. The three thresholds are null until the user
-   * touches them (the UI then shows the bottom of the slider). They only
-   * apply to perfectly flat objects, and only while `enabled` is on. */
-  private flatFilter: { enabled: boolean; larger: number | null; smaller: number | null; minFaces: number } = {
-    enabled: false,
-    larger: null,
-    smaller: null,
-    minFaces: 0,
-  };
+  /** "Hide flat" filter state - lives in the saved config so it persists.
+   * The three thresholds are null until the user touches them (the UI then
+   * shows the bottom of the slider). They only apply to perfectly flat
+   * objects, and only while `enabled` is on. */
+  private get flatFilter() {
+    return this.appConfig.config.objectFiltering.flatFilter;
+  }
   /** Per-positions-array cache of the "perfectly flat" test (positions arrays
    * are replaced, not mutated, when geometry changes - and affine
    * corrections preserve planarity anyway). */
@@ -566,10 +573,15 @@ export class SceneViewerApp {
     this.elements.toolsMenu.frameSceneBtn.addEventListener("click", () => this.sceneManager.frameOnScene());
 
     for (const slider of [this.viewportFilterSlider]) {
-      slider.addEventListener("input", () => this.setHidePercent(Number(slider.value)));
+      slider.addEventListener("input", () =>
+        this.setHidePercent(
+          logSliderToValue(Number(slider.value), HIDE_PERCENT_SLIDER.max, HIDE_PERCENT_SLIDER.shift),
+          slider,
+        ),
+      );
     }
     for (const text of [this.viewportFilterValue]) {
-      text.addEventListener("change", () => this.setHidePercent(Number(text.value)));
+      text.addEventListener("change", () => this.setHidePercent(parseDecimal(text.value) ?? this.hidePercent));
     }
     this.setupFlatFilterControls();
 
@@ -867,10 +879,23 @@ export class SceneViewerApp {
   //#region hide-flat filter
 
   private setupFlatFilterControls(): void {
+    // Restore the persisted state (sanitised - the saved blob is untrusted).
+    const f = this.flatFilter;
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+    f.enabled = f.enabled === true;
+    const cap = (v: number | null, max: number) => (v === null ? null : Math.min(max, v));
+    f.larger = cap(num(f.larger), FLAT_FILTER_SLIDERS.larger.max);
+    f.smaller = cap(num(f.smaller), FLAT_FILTER_SLIDERS.smaller.max);
+    f.minFaces = Math.round(cap(num(f.minFaces), FLAT_FILTER_SLIDERS.faces.max) ?? 0);
+    this.flatFilterCheckbox.checked = f.enabled;
+    this.flatFilterOptions.classList.toggle("hidden", !f.enabled);
+    this.syncFlatFilterUi();
+
     this.flatFilterCheckbox.addEventListener("change", () => {
       this.flatFilter.enabled = this.flatFilterCheckbox.checked;
       this.flatFilterOptions.classList.toggle("hidden", !this.flatFilter.enabled);
       this.syncFlatFilterUi();
+      this.appConfig.saveConfig();
       this.rebuildVisibleScene();
     });
 
@@ -882,54 +907,34 @@ export class SceneViewerApp {
       text.addEventListener("change", () => {
         // Comma and period both count as the decimal separator; no
         // thousands separators are assumed. Text input is never logarithmic.
-        const parsed = Number(text.value.trim().replace(",", "."));
-        if (text.value.trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
+        const parsed = parseDecimal(text.value);
+        if (parsed === null || parsed < 0) {
           this.syncFlatFilterUi(); // invalid - snap back to the current value
           return;
         }
-        this.setFlatFilterValue(key, parsed);
+        this.setFlatFilterValue(key, parsed); // clamped to the slider limit there
       });
     });
   }
 
-  /** Slider range for the diameter sliders: a bit outside the smallest
-   * (non-zero) and largest object. */
-  private getDiameterRange(): { min: number; max: number } {
-    let min = Infinity;
-    let max = 0;
-    for (const draw of this.loadedDraws) {
-      if (draw.diagonal > 0 && draw.diagonal < min) min = draw.diagonal;
-      if (draw.diagonal > max) max = draw.diagonal;
-    }
-    if (!Number.isFinite(min) || max <= 0) return { min: 0.01, max: 100 };
-    return { min: min / 2, max: Math.max(max * 2, min) };
-  }
-
-  private getMaxFaces(): number {
-    let max = 1;
-    for (const draw of this.loadedDraws) max = Math.max(max, draw.geometryData.positions.length / 9);
-    return max;
-  }
-
   private flatSliderToValue(key: "larger" | "smaller" | "faces", position: number): number {
-    const t = Math.min(1, Math.max(0, position / 1000));
-    if (key === "faces") return Math.round(Math.expm1(t * Math.log1p(this.getMaxFaces() + 1)));
-    const { min, max } = this.getDiameterRange();
-    return min * Math.pow(max / min, t);
+    const { max, shift } = FLAT_FILTER_SLIDERS[key];
+    const value = logSliderToValue(position, max, shift);
+    return key === "faces" ? Math.round(value) : value;
   }
 
   private flatValueToSlider(key: "larger" | "smaller" | "faces", value: number): number {
-    if (key === "faces") return (1000 * Math.log1p(value)) / Math.log1p(this.getMaxFaces() + 1);
-    const { min, max } = this.getDiameterRange();
-    if (value <= min) return 0;
-    return (1000 * Math.log(value / min)) / Math.log(max / min);
+    const { max, shift } = FLAT_FILTER_SLIDERS[key];
+    return valueToLogSlider(value, max, shift);
   }
 
   private setFlatFilterValue(key: "larger" | "smaller" | "faces", value: number, sourceSlider?: HTMLInputElement): void {
+    value = Math.min(FLAT_FILTER_SLIDERS[key].max, Math.max(0, value));
     if (key === "larger") this.flatFilter.larger = value;
     else if (key === "smaller") this.flatFilter.smaller = value;
     else this.flatFilter.minFaces = Math.round(value);
     this.syncFlatFilterUi(sourceSlider);
+    this.appConfig.saveConfig();
     this.rebuildVisibleScene();
   }
 
@@ -944,10 +949,9 @@ export class SceneViewerApp {
    * slider being dragged right now - its thumb is left alone so the
    * position->value->position round trip can't make it jitter. */
   private syncFlatFilterUi(skipSlider?: HTMLInputElement): void {
-    const range = this.getDiameterRange();
     const values = {
-      larger: this.flatFilter.larger ?? range.min,
-      smaller: this.flatFilter.smaller ?? range.min,
+      larger: this.flatFilter.larger ?? 0,
+      smaller: this.flatFilter.smaller ?? 0,
       faces: this.flatFilter.minFaces,
     };
     (["larger", "smaller", "faces"] as const).forEach((key) => {
@@ -1010,16 +1014,15 @@ export class SceneViewerApp {
    * objects get hidden, and non-flat objects are never touched. Always
    * false while the checkbox is off.
    *
-   * "Hide larger than" defaults to the bottom of its range (everything is
-   * larger), so ticking the box alone hides every flat object; raising it
+   * "Hide larger than" defaults to 0 (everything is larger), so ticking the box alone hides every flat object; raising it
    * or the other thresholds narrows that down. */
-  private isHiddenByFlatFilter(draw: LoadedDraw, range: { min: number; max: number }): boolean {
+  private isHiddenByFlatFilter(draw: LoadedDraw): boolean {
     const f = this.flatFilter;
     if (!f.enabled || !this.isPerfectlyFlat(draw)) return false;
 
     const d = draw.diagonal;
-    const larger = f.larger ?? range.min;
-    const smaller = f.smaller ?? range.min;
+    const larger = f.larger ?? 0;
+    const smaller = f.smaller ?? 0;
     const sizeHidden =
       larger < smaller
         ? // Crossed sliders: only flat objects satisfying BOTH conditions
@@ -1031,10 +1034,14 @@ export class SceneViewerApp {
 
   //#endregion
 
-  private setHidePercent(value: number): void {
-    const clamped = Math.min(100, Math.max(0, Math.round(Number.isFinite(value) ? value : 0)));
+  private setHidePercent(value: number, sourceSlider?: HTMLInputElement): void {
+    const { max, shift } = HIDE_PERCENT_SLIDER;
+    const clamped = Math.min(max, Math.max(0, Math.round((Number.isFinite(value) ? value : 0) * 10) / 10));
     this.hidePercent = clamped;
-    for (const slider of [this.viewportFilterSlider]) slider.value = String(clamped);
+    this.appConfig.config.objectFiltering.hideLargestObjectsPercent = clamped;
+    for (const slider of [this.viewportFilterSlider]) {
+      if (slider !== sourceSlider) slider.value = String(valueToLogSlider(clamped, max, shift));
+    }
     for (const text of [this.viewportFilterValue]) text.value = String(clamped);
     if (this.loadedDraws.length > 0) this.rebuildVisibleScene();
   }
@@ -1415,9 +1422,8 @@ export class SceneViewerApp {
     const hideCount = Math.round((this.hidePercent / 100) * sorted.length);
     this.hiddenDrawIndices = new Set(sorted.slice(0, hideCount).map((entry) => entry.index));
     if (this.flatFilter.enabled) {
-      const range = this.getDiameterRange();
       this.loadedDraws.forEach((draw, index) => {
-        if (this.isHiddenByFlatFilter(draw, range)) this.hiddenDrawIndices.add(index);
+        if (this.isHiddenByFlatFilter(draw)) this.hiddenDrawIndices.add(index);
       });
     }
 
@@ -1480,7 +1486,6 @@ export class SceneViewerApp {
       `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
       `${triCount.toLocaleString()} tris \u00b7 scale \u00d7${this.fixedScale.toExponential(2)} \u00b7 MMB drag to orbit, Shift+MMB to pan, scroll to zoom, A for fly mode`;
 
-    if (this.flatFilter.enabled && document.activeElement?.tagName !== "INPUT") this.syncFlatFilterUi();
     this.renderObjectListState();
   }
 

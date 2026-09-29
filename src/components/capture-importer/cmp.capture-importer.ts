@@ -5,6 +5,7 @@ import { guessIntelGPAImportTargetFromFilename, guessIntelGPAImportTargetsFromFi
 import type { IntelGPADropzone } from './intel-gpa-dropzone.type';
 import { FileInfo } from '../../types/file-info.interface';
 import { Config } from '../../config/cls.config';
+import { logSliderToValue, valueToLogSlider, parseDecimal, HIDE_PERCENT_SLIDER } from '../../util/fn.log-slider';
 import { collectFromDrop, collectFromInput, VirtualFileSystem } from '../../filesystem';
 import type { AffineDistortionResult } from '../../mesh-tools/calculator';
 import { calculateLandmarkTransform } from '../../mesh-tools/landmark-matching';
@@ -257,13 +258,25 @@ export class CaptureImporter extends HTMLElement {
   /**
    * Sets up the import options form.
    */
+  /** Applies a "hide largest %" value to the config and both controls,
+   * clamped to 0..25 and rounded to one decimal. `sourceSlider` is the
+   * slider being dragged (its thumb is left alone). */
+  private setImportSizeFilter(value: number, sourceSlider?: HTMLInputElement): void {
+    const { max, shift } = HIDE_PERCENT_SLIDER;
+    const clamped = Math.min(max, Math.max(0, Math.round((Number.isFinite(value) ? value : 0) * 10) / 10));
+    this.appConfig.config.objectFiltering.hideLargestObjectsPercent = clamped;
+    if (this.elements.importSizeFilterSlider !== sourceSlider) {
+      this.elements.importSizeFilterSlider.value = String(valueToLogSlider(clamped, max, shift));
+    }
+    this.elements.importSizeFilterInput.value = String(clamped);
+  }
+
   private setupImportOptionsUI() {
     // load initial values
     this.elements.captureUnitSize.value = this.appConfig.config.importOptions.captureUnitSize as any;
     this.elements.captureUnitUnit.value = this.appConfig.config.importOptions.captureUnitUnit;
 
-    this.elements.importSizeFilterSlider.value = this.appConfig.config.objectFiltering.hideLargestObjectsPercent as any;
-    this.elements.importSizeFilterInput.value = this.appConfig.config.objectFiltering.hideLargestObjectsPercent as any;
+    this.setImportSizeFilter(this.appConfig.config.objectFiltering.hideLargestObjectsPercent);
 
     this.elements.maxSceneSizeInput.value = this.appConfig.config.importOptions.maxSceneSize as any;
     this.elements.enforceMaxSceneSizeCheckbox.checked = this.appConfig.config.importOptions.forceMaxSceneSize;
@@ -293,13 +306,17 @@ export class CaptureImporter extends HTMLElement {
       this.elements.captureUnitUnit.addEventListener("change", () => {
         this.appConfig.config.importOptions.captureUnitUnit = this.elements.captureUnitUnit.value;
       });
+      // Logarithmic slider, 0..25 % (linear text box) - same as the sidebar's.
       this.elements.importSizeFilterSlider.addEventListener("input", () => {
-        this.appConfig.config.objectFiltering.hideLargestObjectsPercent = Number(this.elements.importSizeFilterSlider.value);
-        this.elements.importSizeFilterInput.value = this.elements.importSizeFilterSlider.value;
+        this.setImportSizeFilter(
+          logSliderToValue(Number(this.elements.importSizeFilterSlider.value), HIDE_PERCENT_SLIDER.max, HIDE_PERCENT_SLIDER.shift),
+          this.elements.importSizeFilterSlider,
+        );
       });
       this.elements.importSizeFilterInput.addEventListener("change", () => {
-        this.appConfig.config.objectFiltering.hideLargestObjectsPercent = Number(this.elements.importSizeFilterInput.value);
-        this.elements.importSizeFilterSlider.value = this.elements.importSizeFilterInput.value;
+        this.setImportSizeFilter(
+          parseDecimal(this.elements.importSizeFilterInput.value) ?? this.appConfig.config.objectFiltering.hideLargestObjectsPercent,
+        );
       });
       this.elements.enforceMaxSceneSizeCheckbox.addEventListener("change", () => {
         this.appConfig.config.importOptions.forceMaxSceneSize = this.elements.enforceMaxSceneSizeCheckbox.checked;
