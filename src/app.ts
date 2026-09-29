@@ -658,7 +658,15 @@ export class SceneViewerApp {
     return this.untexturedMaterial;
   }
 
-  private applyFlatFaceShading(material: THREE.MeshBasicMaterial): void {
+  /** Adds screen-space-derivative per-face shading to an unlit material.
+   * There are no real lights in the viewport, and THREE.Material.clone()
+   * does NOT copy onBeforeCompile - so anything that clones a material
+   * flagged here must call this again on the clone (see the export preview
+   * and buildSelectionShaderMaterial()), or the clone renders as a flat
+   * blob. The userData flag is what those call sites key off of (clone()
+   * does copy userData). */
+  private applyFlatFaceShading(material: THREE.Material): void {
+    material.userData.flatShaded = true;
     material.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", "varying vec3 vFlatShadeViewPos;\n#include <common>")
@@ -2926,6 +2934,11 @@ export class SceneViewerApp {
       if (textured) {
         material = draw.material.clone();
         material.side = THREE.DoubleSide;
+        // clone() drops onBeforeCompile, which is where the untextured
+        // material's per-face shading lives - restore it or untextured
+        // draws show up as a flat grey blob here (the DirectionalLight
+        // below is ignored by MeshBasicMaterial).
+        if (draw.material.userData.flatShaded) this.applyFlatFaceShading(material);
         material.needsUpdate = true;
       } else {
         material = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, flatShading: true, side: THREE.DoubleSide });
@@ -3931,6 +3944,14 @@ export class SceneViewerApp {
 
     const c = SELECTION_COLOR;
     const shaded = base.clone();
+    // The clone lost the base material's own per-face shading (see
+    // applyFlatFaceShading()), so unselected untextured geometry has to
+    // re-apply it here or it goes flat the moment anything is selected.
+    const unselectedShading = base.userData.flatShaded
+      ? `vec3 unselFaceNormal = normalize( cross( dFdx( vSelectionViewPos ), dFdy( vSelectionViewPos ) ) );
+            float unselNdotl = abs( dot( unselFaceNormal, normalize( vec3( 0.35, 0.55, 0.77 ) ) ) );
+            diffuseColor.rgb *= ( 0.45 + 0.55 * unselNdotl ) * 0.5;`
+      : `diffuseColor.rgb *= 0.5;`;
     shaded.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -3957,7 +3978,7 @@ export class SceneViewerApp {
             float shade = 0.45 + 0.55 * ndotl;
             diffuseColor.rgb = vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)}) * shade;
           } else {
-            diffuseColor.rgb *= 0.5;
+            ${unselectedShading}
           }`,
         );
     };
