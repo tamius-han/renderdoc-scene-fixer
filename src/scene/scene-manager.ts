@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { MovementBindings, WASD_BINDINGS, ESDF_BINDINGS } from './movement-bindings.interface';
 import { Config } from '../config/cls.config';
+import { isTextEntryFocused } from '../util/fn.text-entry-focus';
 import { OrientationGizmo } from './orientation-gizmo';
 
 export type ContextLossHandler = (lost: boolean) => void;
@@ -466,8 +467,7 @@ export class SceneManager {
   }
 
   private isTypingInFormField(): boolean {
-    const el = document.activeElement;
-    return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+    return isTextEntryFocused();
   }
 
   setFlying(value: boolean): void {

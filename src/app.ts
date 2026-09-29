@@ -2046,8 +2046,7 @@ export class SceneViewerApp {
   }
 
   private isTypingInFormField(): boolean {
-    const el = document.activeElement;
-    return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+    return isTextEntryFocused();
   }
 
   private handleGizmoKeydown(event: KeyboardEvent): void {
