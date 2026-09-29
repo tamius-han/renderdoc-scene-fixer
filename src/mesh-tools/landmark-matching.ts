@@ -220,32 +220,71 @@ export function matchLandmarkCorrespondence(
   return { sourcePositions, outputPositions, ambiguousMatch: ambiguous };
 }
 
-/** Entry point: computes the matrix that maps landmarkSource onto
- * landmarkOutput (plus the rest of calculateDistortionMatrix()'s result -
- * the inverse, the in-place shape-only correction, etc.), handling the
- * vertex-count and face-order mismatches between the two Intel GPA export
- * files. `result.nonPosedToPosed` is specifically the requested
- * source->output matrix (landmarkSource is passed as the "non-posed" side,
- * landmarkOutput as "posed" - see calculateDistortionMatrix()'s own
- * parameter naming in calculator.ts). */
-export function calculateLandmarkTransform(
-  sourceObj: ParsedOBJ,
-  outputObj: ParsedOBJ,
-): AffineDistortionResult & { ambiguousMatch: boolean } {
-  const { sourcePositions, outputPositions, ambiguousMatch } = matchLandmarkCorrespondence(sourceObj, outputObj);
+/** Correspondence that trusts the files' own order: face i of source <-> face i
+ * of output, corner j <-> corner j. Intel GPA exports the source and output of
+ * the same draw from the same index buffer, so this is normally exact - and
+ * unlike matchLandmarkCorrespondence()'s volume ranking it can't be fooled by
+ * faces of (near-)equal size. Whether it's actually right is decided by the
+ * caller from the resulting fit error, not assumed. */
+export function indexOrderCorrespondence(sourceObj: ParsedOBJ, outputObj: ParsedOBJ): { sourcePositions: number[]; outputPositions: number[] } {
+  const flatten = (obj: ParsedOBJ) =>
+    obj.faces.flatMap((face) => face.flatMap(({ v }) => obj.positions[v - 1] ?? [0, 0, 0]));
+  return { sourcePositions: flatten(sourceObj), outputPositions: flatten(outputObj) };
+}
 
-  const result = calculateDistortionMatrix({
+/** Below this relative RMS fit error the index-order correspondence is taken
+ * as correct outright (exact matches land around 1e-6). */
+const INDEX_ORDER_ACCEPT_ERROR = 1e-4;
+
+function fit(sourcePositions: number[], outputPositions: number[]) {
+  return calculateDistortionMatrix({
     geometryData: { positions: outputPositions }, // "posed" slot = output
     previewGeometryData: { positions: sourcePositions }, // "non-posed" slot = source
   });
+}
+
+/** Entry point: computes the matrix that maps landmarkSource onto
+ * landmarkOutput (plus the rest of calculateDistortionMatrix()'s result).
+ *
+ * Two correspondences are tried: (1) file/index order, (2) volume-rank
+ * matching (for exports where face order was NOT preserved). Index order is
+ * accepted immediately if it fits essentially exactly; otherwise both are
+ * fitted and the one with the lower relativeFitError wins. `result.nonPosedToPosed`
+ * is the source->output matrix (landmarkSource = "non-posed", landmarkOutput = "posed"). */
+export function calculateLandmarkTransform(
+  sourceObj: ParsedOBJ,
+  outputObj: ParsedOBJ,
+): AffineDistortionResult & { ambiguousMatch: boolean; correspondence: "index-order" | "volume-rank" } {
+  let indexResult: AffineDistortionResult | null = null;
+  if (sourceObj.faces.length === outputObj.faces.length) {
+    try {
+      const idx = indexOrderCorrespondence(sourceObj, outputObj);
+      indexResult = fit(idx.sourcePositions, idx.outputPositions);
+    } catch {
+      indexResult = null; // e.g. degenerate - the volume path below will report it properly
+    }
+  }
+  if (indexResult && indexResult.relativeFitError < INDEX_ORDER_ACCEPT_ERROR) {
+    return { ...indexResult, ambiguousMatch: false, correspondence: "index-order" };
+  }
+
+  const { sourcePositions, outputPositions, ambiguousMatch } = matchLandmarkCorrespondence(sourceObj, outputObj);
+  const rankResult = fit(sourcePositions, outputPositions);
+
+  if (indexResult && indexResult.relativeFitError <= rankResult.relativeFitError) {
+    console.warn(
+      `[landmark-matching] index-order correspondence used but fit is imperfect (relative fit error ${indexResult.relativeFitError.toExponential(2)}); ` +
+        `volume-rank matching was worse (${rankResult.relativeFitError.toExponential(2)}).`,
+    );
+    return { ...indexResult, ambiguousMatch, correspondence: "index-order" };
+  }
 
   if (ambiguousMatch) {
     console.warn(
       "[landmark-matching] two or more faces had near-identical volume signatures - face correspondence (and " +
-        "therefore the fitted transform) may be wrong for some faces. Double-check the landmark object has " +
-        "visibly different-sized faces if this matters for your capture.",
+        "therefore the fitted transform) may be wrong for some faces. Relative fit error: " +
+        rankResult.relativeFitError.toExponential(2),
     );
   }
-
-  return { ...result, ambiguousMatch };
+  return { ...rankResult, ambiguousMatch, correspondence: "volume-rank" };
 }

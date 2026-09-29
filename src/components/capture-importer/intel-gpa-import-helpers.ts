@@ -17,13 +17,17 @@ export function guessIntelGPAImportTargetFromFilename(entry: FileInfo): IntelGPA
   if (!filename) {
     return undefined;
   }
+  // Match whole trailing tokens only ('c3-li', 'c3_li', 'li'), so short tags
+  // like 'ls'/'li'/'lo' don't fire on names such as 'tools' or 'hello'.
+  const normalized = filename.replace(/[_ .]+/g, '-');
+  const hasTag = (tag: string) => normalized === tag || normalized.endsWith(`-${tag}`);
   for (const lsn of landmarkSources) {
-    if (filename.endsWith(lsn)) {
+    if (hasTag(lsn)) {
       return 'landmark-source';
     }
   }
   for (const lon of landmarkOutputs) {
-    if (filename.endsWith(lon)) {
+    if (hasTag(lon)) {
       return 'landmark-output';
     }
   }
@@ -63,14 +67,21 @@ export function guessIntelGPAImportTargetsFromFilenames(entries: FileInfo[]): { 
    * not correctly identified. However, since we later identify files based on their content, we just
    * chunk any remaining files into whatever slots are unfilled and call it a day.
    */
-  const keyOrder = ['scene', 'landmark-output', 'landmark-source'];
-  for (let i = 0; i < droppedFiles.length; i++) {
-    for (let j = 0; j < keyOrder.length; j++) {
-      const key = keyOrder[j] as IntelGPADropzone;
-      if (!mappedOutput[key] && droppedFiles[i].target === key) {
-        mappedOutput[key] = droppedFiles[i].entry;
-        break;
-      }
+  const keyOrder = ['scene', 'landmark-output', 'landmark-source'] as IntelGPADropzone[];
+  // 1st pass: leftovers whose guessed role is still free
+  for (let i = droppedFiles.length - 1; i >= 0; i--) {
+    const key = droppedFiles[i].target;
+    if (key && !mappedOutput[key]) {
+      mappedOutput[key] = droppedFiles[i].entry;
+      droppedFiles.splice(i, 1);
+    }
+  }
+  // 2nd pass: anything still left goes into whichever slot is empty
+  // (identifyIntelGPAImport() re-sorts roles by content anyway).
+  for (const leftover of droppedFiles) {
+    const freeKey = keyOrder.find((k) => !mappedOutput[k]);
+    if (freeKey) {
+      mappedOutput[freeKey] = leftover.entry;
     }
   }
 
@@ -99,7 +110,16 @@ export async function identifyIntelGPAImport(landmarkSourceFile: FileInfo, landm
     landmarkSourceGeometry.faces.length === landmarkOutputGeometry.faces.length &&
     landmarkSourceGeometry.faces.length > 0
   ) {
-    // TODO: check which file is source and which one is output, they could be reversed
+    // landmark-output has one unshared vertex per face corner, while
+    // landmark-source can share vertices between neighbouring faces - so the
+    // file with FEWER positions is the source. If they came in the wrong way
+    // round, swap them: fitting output->source instead of source->output
+    // yields the inverse transform, which makes the squish worse, not better.
+    // (Equal counts give no signal; the roles are then taken as given.)
+    if (landmarkSourceGeometry.positions.length > landmarkOutputGeometry.positions.length) {
+      console.warn('[identifyIntelGPAImport] landmark source/output appear to be swapped - swapping them.');
+      return identifyIntelGPAImport(landmarkOutputFile, landmarkSourceFile, sceneFile);
+    }
     const distortion = calculateLandmarkTransform(landmarkSourceGeometry, landmarkOutputGeometry);
 
     return {

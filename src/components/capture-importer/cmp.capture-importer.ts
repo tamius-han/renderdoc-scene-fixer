@@ -493,6 +493,28 @@ export class CaptureImporter extends HTMLElement {
         return;
       }
     }
+    if (!this.intelGPAImports['landmark-source'] || !this.intelGPAImports['landmark-output'] || !this.intelGPAImports['scene']) {
+      return;
+    }
+
+    try {
+      await this.processIntelGPAImportInner();
+    } catch (e) {
+      // Anything thrown while fitting the landmark (degenerate/flat landmark,
+      // corrupt OBJ, ...) used to leave the 'reading files' screen up forever.
+      console.error('[capture-importer] Intel GPA import failed', e);
+      this.showReadingFilesScreen(false);
+      this.setStatus(`Intel GPA import failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private async processIntelGPAImportInner() {
+    // bail out unless all files are present
+    for (const importTarget in this.intelGPAImports) {
+      if (!this.intelGPAImports[importTarget as IntelGPADropzone]) {
+        return;
+      }
+    }
 
     this.showReadingFilesScreen(true);
 
@@ -503,9 +525,12 @@ export class CaptureImporter extends HTMLElement {
     );
 
     if (!fileRoles) {
-      // TODO: throw an error or something
       this.showReadingFilesScreen(false);
       console.warn('Failed to identify Intel GPA import roles');
+      this.setStatus(
+        "Couldn't match the landmark files: landmark source and landmark output must have the same number of triangles. " +
+        "Re-export both from the same draw call (and check that the right files are in the right slots)."
+      );
       return;
     }
 
