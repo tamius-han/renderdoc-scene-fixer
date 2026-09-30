@@ -385,6 +385,26 @@ code {
   backdrop-filter: blur(0.5rem);
 }
 
+/* Mesh preview host. Deliberately NOT nested inside .resource-panel: the
+   "Fix & export" dialog uses the same class outside of any resource panel,
+   and when this was nested it lost position:relative there - so the
+   absolutely-positioned orientation gizmo (.orientation-gizmo--preview)
+   anchored to some far-away ancestor and ended up off-screen. */
+.resource-preview {
+  @apply relative min-w-[25vh] min-h-[25vh] w-full
+    flex flex-col items-center justify-center
+    bg-brown-900/90
+    border border-warm-800;
+
+  flex: 1 1 auto;
+  overflow: hidden;
+
+  .resource-preview-canvas {
+    @apply block w-full h-full cursor-grab;
+    touch-action: none;
+  }
+}
+
 .resource-panel {
   @apply absolute z-[20]
     p-4 pb-8
@@ -439,21 +459,6 @@ code {
     letter-spacing: 0.25em;
   }
 
-  .resource-preview {
-    @apply relative min-w-[25vh] min-h-[25vh] w-full
-      flex flex-col items-center justify-center
-      bg-brown-900/90
-      border border-warm-800;
-
-    flex: 1 1 auto;
-    overflow: hidden;
-
-    .resource-preview-canvas {
-      @apply block w-full h-full cursor-grab;
-      touch-action: none;
-    }
-
-  }
 
   .resource-multi-row {
     @apply m-0 p-0 pb-4 w-full text-sm

@@ -1,7 +1,7 @@
 <div class="overlay-backdrop-blur fixed top-0 left-0 w-[100vw] h-[100dvh] bg-cool-900/75 hidden z-100 flex flex-col items-center justify-center">
 
   <!-- Window -->
-  <div class="window max-w-[1600px] w-[95%] flex flex-col border border-warm-500 pointer-events-none">
+  <div class="window max-w-[1600px] w-[95%] max-h-[95dvh] flex flex-col border border-warm-500 pointer-events-none">
 
     <!-- Titlebar -->
     <div class="py-2 px-4 bg-warm-200 text-brown-900">
@@ -9,119 +9,86 @@
     </div>
 
     <!-- Content -->
-    <div class="p-8 bg-brown-900 pointer-events-auto overflow-y-auto max-h-[85dvh]">
+    <div class="p-8 bg-brown-900 pointer-events-auto flex flex-col flex-1 min-h-0">
 
-      <div class="flex flex-row gap-8 xl:gap-16 mb-4">
+      <div class="flex flex-row gap-8 xl:gap-16 mb-4 flex-1 min-h-0">
         <div class="flex-1">
           <h3>Export preview</h3>
-          <!-- resource-preview relies on flex:1-auto plus its canvas being
-               w-full/h-full to fill a DEFINITE-height ancestor (that's how
-               the floating resource panel uses it - see main.css - where
-               the panel's own height is set explicitly in JS pixels). This
-               dialog has no such definite height anywhere above this div
-               (its containing column only auto-sizes to content, and
-               nothing in that chain ever pins down an actual height) -
-               without one, the canvas's height:100% can't resolve, so the
-               canvas falls back to using its own height ATTRIBUTE (in CSS
-               pixels) as its rendered size - and that attribute is exactly
-               what resize() (attachMultiMeshPreview() in app.ts) writes on
-               every call. That's a real feedback loop: canvas's
-               attribute-driven size grows -> this auto-height container
-               grows to fit it -> the ResizeObserver watching it fires
-               again -> resize() reads the now-bigger size and writes an
-               even bigger attribute -> repeat, every frame, unbounded.
-               A percentage height (h-full, h-[45vh], ...) can't break this
-               on its own, because it's just as dependent on this same
-               ancestor chain ever resolving to something definite - it
-               doesn't. aspect-[4/3] below sidesteps the whole problem: it
-               derives this element's height from its OWN width instead,
-               and width already resolves correctly here (the flex-row
-               above genuinely divides horizontal space between this column
-               and "Export options" - see the WebGL console warnings this
-               bug produced, where only height was ever seen to run away,
-               never width). resize() in app.ts also clamps to the
-               viewport's own size as a hard backstop, so even a future,
-               unrelated layout regression can't spiral like this again. -->
-          <div id="export-mesh-export-preview" class="resource-preview aspect-[4/3]">
-
+          <div id="export-mesh-export-preview" class="relative resource-preview aspect-[4/3]">
           </div>
         </div>
 
-        <div class="flex-1">
+        <div class="flex-1 flex flex-col min-h-0">
           <h3>Export options</h3>
 
-          <div class="flex flex-row tab-row">
-            <button id="export-options-export-output" class="tab">Export with poses</button><button id="export-options-export-input" class="tab">Export original</button>
-          </div>
-
-          <div class="field row">
-            <input type="checkbox" id="export-options-lit-shading"> Lit shading (use normal/roughness maps)
-          </div>
-          <div class="field row">
-            <input type="checkbox" id="export-options-split-loose-parts"> Split by loose parts
-          </div>
-          <div class="field row">
-            <input type="checkbox" id="export-options-fill-holes"> Fill holes
-          </div>
-          <div class="field row">
-            <input type="checkbox" id="export-options-resize-exported"> Resize exported object
-          </div>
-          <div class="field row">
-            <div>Approximate height of model (units/mm):</div>
-            <input type="number" id="export-options-approximate-height" min="0">
-          </div>
-          <div class="field row">
-            <input type="checkbox" id="export-options-move-to-origin"> Move object to origin
-          </div>
-
-          <h4>Textures</h4>
-
-          <div class="field">
-            <div class="field row">
-              <input type="checkbox" id="export-options-export-basecolor"> Base color textures
+          <div class="shrink min-h-0 overflow-y-auto pr-2 mt-4">
+            <div class="flex flex-row tab-row">
+              <button id="export-options-export-output" class="tab">Export with poses</button><button id="export-options-export-input" class="tab">Export original</button>
             </div>
-            <button type="button" class="texture-picker-field" id="export-options-basecolor-field"></button>
-          </div>
 
-          <div class="field">
             <div class="field row">
-              <input type="checkbox" id="export-options-export-normal"> Normal map textures
+              <input type="checkbox" id="export-options-lit-shading"> Lit shading (use normal/roughness maps)
             </div>
-            <button type="button" class="texture-picker-field" id="export-options-normal-field"></button>
-          </div>
-
-          <div class="field">
             <div class="field row">
-              <input type="checkbox" id="export-options-export-metalrough"> Metalness/roughness textures
+              <input type="checkbox" id="export-options-split-loose-parts"> Split by loose parts
             </div>
-            <button type="button" class="texture-picker-field" id="export-options-metalrough-field"></button>
+            <div class="field row">
+              <input type="checkbox" id="export-options-fill-holes"> Fill holes
+            </div>
+            <div class="field row">
+              <input type="checkbox" id="export-options-resize-exported"> Resize exported object
+            </div>
+            <div class="field row">
+              <div>Approximate height of model (units/mm):</div>
+              <input type="number" id="export-options-approximate-height" min="0">
+            </div>
+            <div class="field row">
+              <input type="checkbox" id="export-options-move-to-origin"> Move object to origin
+            </div>
+
+            <h4>Textures</h4>
+
+            <div class="field">
+              <div class="field row">
+                <input type="checkbox" id="export-options-export-basecolor"> Base color textures
+              </div>
+              <button type="button" class="texture-picker-field" id="export-options-basecolor-field"></button>
+            </div>
+
+            <div class="field">
+              <div class="field row">
+                <input type="checkbox" id="export-options-export-normal"> Normal map textures
+              </div>
+              <button type="button" class="texture-picker-field" id="export-options-normal-field"></button>
+            </div>
+
+            <div class="field">
+              <div class="field row">
+                <input type="checkbox" id="export-options-export-metalrough"> Metalness/roughness textures
+              </div>
+              <button type="button" class="texture-picker-field" id="export-options-metalrough-field"></button>
+            </div>
+
+            <div class="field row">
+              <div>Metallic factor (used where no texture applies):</div>
+              <input type="range" id="export-options-metallic-factor" min="0" max="1" step="0.01">
+              <span id="export-options-metallic-factor-value" class="texture-factor-value"></span>
+            </div>
+            <div class="field row">
+              <div>Roughness factor (used where no texture applies):</div>
+              <input type="range" id="export-options-roughness-factor" min="0" max="1" step="0.01">
+              <span id="export-options-roughness-factor-value" class="texture-factor-value"></span>
+            </div>
           </div>
 
-          <div class="field row">
-            <div>Metallic factor (used where no texture applies):</div>
-            <input type="range" id="export-options-metallic-factor" min="0" max="1" step="0.01">
-            <span id="export-options-metallic-factor-value" class="texture-factor-value"></span>
-          </div>
-          <div class="field row">
-            <div>Roughness factor (used where no texture applies):</div>
-            <input type="range" id="export-options-roughness-factor" min="0" max="1" step="0.01">
-            <span id="export-options-roughness-factor-value" class="texture-factor-value"></span>
-          </div>
-
-          <div class="w-full flex flex-row justify-center">
-            <button id="export-options-start-export-btn" class="primary">Fix and export ...</button>
+          <div class="w-full flex flex-row justify-center shrink-0 mt-4">
+            <button id="export-options-start-export-btn" class="primary !mt-0">Fix and export ...</button>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Texture picker popup - a texture category's own thumbnail field
-       (above) opens this, showing every texture of that kind found in the
-       current selection with a checkbox to individually exclude it from
-       export (see ExportMesh.openTexturePicker()). Nested inside this same
-       backdrop rather than a second top-level Overlay, since it's only
-       ever meaningful while the export dialog itself is open. -->
   <div class="texture-picker-popup hidden" id="export-texture-picker-popup">
     <div class="texture-picker-popup-window">
       <div class="texture-picker-popup-header">

@@ -3296,9 +3296,21 @@ export class SceneViewerApp {
   private attachMultiMeshPreview(
     container: HTMLElement,
     draws: LoadedDraw[],
-    options: { interactive: boolean; poseMode?: "posed" | "non-posed"; textured?: boolean },
+    options: {
+      interactive: boolean;
+      poseMode?: "posed" | "non-posed";
+      textured?: boolean;
+      /** Rotation the main viewport applies to its content group (see
+       * getActiveSceneRotation() - e.g. the leveling correction from
+       * "Select ground plane"). Posed geometry only looks right in the
+       * main view WITH this rotation, so previews of posed meshes must
+       * apply it too; non-posed (original) geometry is shown unrotated,
+       * same as the main view's own "export original" transform. */
+      sceneRotation?: THREE.Quaternion;
+    },
   ): () => void {
     const poseMode = options.poseMode ?? "non-posed";
+    const sceneRotation = poseMode === "posed" && options.sceneRotation ? options.sceneRotation : null;
     const textured = options.textured ?? true;
 
     const previewCanvas = document.createElement("canvas");
@@ -3344,7 +3356,21 @@ export class SceneViewerApp {
 
       contentGroup.add(new THREE.Mesh(geometry, material));
 
-      const bounds = computeBounds(sourceData.positions);
+      // Bounds must be measured AFTER the scene rotation, or centering and
+      // camera fit would be computed for the unrotated box.
+      let boundsPositions: ArrayLike<number> = sourceData.positions;
+      if (sceneRotation) {
+        const rotated = new Array<number>(sourceData.positions.length);
+        const rv = new THREE.Vector3();
+        for (let i = 0; i < rotated.length; i += 3) {
+          rv.set(sourceData.positions[i], sourceData.positions[i + 1], sourceData.positions[i + 2]).applyQuaternion(sceneRotation);
+          rotated[i] = rv.x;
+          rotated[i + 1] = rv.y;
+          rotated[i + 2] = rv.z;
+        }
+        boundsPositions = rotated;
+      }
+      const bounds = computeBounds(boundsPositions as number[]);
       overallBounds = overallBounds ? unionBounds(overallBounds, bounds) : bounds;
     }
 
@@ -3356,6 +3382,9 @@ export class SceneViewerApp {
     const PREVIEW_CUBE_SIZE = 100;
     const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-6);
     const previewScale = maxDim > PREVIEW_CUBE_SIZE ? PREVIEW_CUBE_SIZE / maxDim : 1;
+    // `center` is already in post-rotation space, so the rotation is applied
+    // to the group itself and only the (rotated) center is used for offset.
+    if (sceneRotation) contentGroup.quaternion.copy(sceneRotation);
     contentGroup.position.copy(center).multiplyScalar(-previewScale);
     contentGroup.scale.setScalar(previewScale);
 
@@ -3542,6 +3571,7 @@ export class SceneViewerApp {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
       textured: exportOptions.baseColorTextures.enabled,
+      sceneRotation: this.getActiveSceneRotation(),
     });
   }
 

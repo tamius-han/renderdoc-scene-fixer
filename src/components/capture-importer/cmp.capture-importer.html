@@ -1,15 +1,16 @@
 <div id="capture-importer-container" class="absolute left-0 top-0 !w-[100vw] h-[100dvh] bg-cool-800 z-100 flex flex-col items-center justify-center">
 
-  <div class="max-h-[90%] w-[1280px] max-w-[90%] bg-brown-800 border border-warm-500 p-4 overflow-hidden">
+  <div class="max-h-[90%] w-[1280px] max-w-[90%] bg-brown-800 border border-warm-500 p-4 overflow-hidden flex flex-col">
     <div class="
       w-[calc(100%+2rem)] bg-warm-200 text-warm-800 smallcap grow-0 shrink-0
       -mx-4 -mt-4 pt-1 pb-1 px-4
     ">
       Renderdoc scene explorer
     </div>
-    <div class="pt-8 pb-8 overflow-y-auto flex flex-col items-center justify-center h-full -mr-4 pr-4">
+    <div class="pt-8 pb-8 overflow-y-auto min-h-0 flex-1 flex flex-col items-center -mr-4 pr-4">
+      <div class="my-auto w-full flex flex-col items-center">
       <div>
-        <h2 class="mt-8">Import scene</h2>
+        <h2 class="mt-0">Import scene</h2>
         <div class="text-warm-50 max-w-[720px]">Export scene from RenderDoc with Renderdoc Scene Exporter extension, then drop the exported folder below in order to reconstruct it.</div>
         <div class="text-warm-300 mt-4"> <> <button id="show-help" class="!text-warm-300 underline">What is this?</button></div>
       </div>
@@ -108,13 +109,12 @@
               <input type="text" id="capture-importer-initial-scale-limit" class="text-right input disabled" />
             </div>
           </div>
-
         </div>
 
         <div id="capture-importer-pose-warning" class="warning" style="display: none"></div>
 
-
         <button id="capture-importer-reconstruct-btn" class="primary disabled" >Reconstruct scene</button>
+      </div>
       </div>
     </div>
   </div>
