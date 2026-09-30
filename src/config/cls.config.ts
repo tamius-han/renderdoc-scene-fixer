@@ -46,12 +46,12 @@ export interface ViewOptions {
 export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
   showTextures: true,
   shading: null,
-  defaultColor: '#606a7a',
-  defaultHighlightColor: '#000000',
+  defaultColor: '#64606f',
+  defaultHighlightColor: '#4b4757',
   selectionColor: '#ff8c1a',
-  selectionHighlightColor: '#000000',
+  selectionHighlightColor: '#ffa348',
   flippedNormalsColor: '#ff0000',
-  flippedNormalsHighlightColor: '#000000',
+  flippedNormalsHighlightColor: '#c64600',
 };
 
 export interface AppConfiguration {
