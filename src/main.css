@@ -149,11 +149,11 @@ p {
 
     input {
       &.input-percent {
-        @apply !w-12 text-right pr-4 relative;
+        @apply !w-16 text-right pr-4 relative;
       }
 
       &.input-number {
-        @apply !w-20 text-right;
+        @apply !w-16 text-right;
       }
     }
     &::after {

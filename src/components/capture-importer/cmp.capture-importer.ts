@@ -498,6 +498,7 @@ export class CaptureImporter extends HTMLElement {
   private showReadingFilesScreen(visible: boolean) {
     this.elements.readingFilesScreen.classList.toggle('hidden', !visible);
     this.elements.dropzonesContainer.classList.toggle('hidden', visible);
+    this.elements.importProcessingSection.classList.toggle('hidden', visible);
   }
 
   /**
@@ -576,7 +577,7 @@ export class CaptureImporter extends HTMLElement {
     }
     this.vfs = loaded.vfs;
     this.elements.renderPassList.manifests = loaded.manifests;
-    this.elements.importProcessingSection.style.display = "block";
+    this.elements.importProcessingSection.classList.remove('hidden');
 
     // reset all dropzones on successful import
     for (const dropzone in this.intelGPADropzones) {
@@ -657,7 +658,7 @@ export class CaptureImporter extends HTMLElement {
 
     this.elements.renderPassList.manifests = loaded.manifests;
     this.showReadingFilesScreen(false);
-    this.elements.importProcessingSection.style.display = "block";
+    this.elements.importProcessingSection.classList.remove('hidden');
 
     // this.loaded = loaded;
     // this.elements.renderPassList();
