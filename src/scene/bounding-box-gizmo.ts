@@ -202,7 +202,9 @@ export class BoundingBoxGizmo {
     this.group.visible = visible;
   }
 
-  /** Sizes/positions the cube to exactly match `bounds` - no padding, per
+  /** Sizes/positions the cube to exactly match `bounds` (an axis-aligned box
+   * in WORLD space - this gizmo's group is never rotated or scaled, so it
+   * always stays aligned with the world axes) - no padding, per
    * the toggle's own spec: the box mesh's own local space is a unit cube
    * from -0.5..0.5, so a non-uniform scale to `bounds`' own size plus a
    * translation to its center reproduces `bounds` exactly. Both the fill
@@ -223,18 +225,6 @@ export class BoundingBoxGizmo {
     this.edgeOutlineMesh.position.copy(center);
     this.edgeFillMesh.scale.copy(safeSize);
     this.edgeFillMesh.position.copy(center);
-  }
-
-  /** Mirrors the content group's current scale/quaternion/position onto
-   * this gizmo's group - see this class's own doc comment for why the
-   * gizmo isn't simply parented under the content group instead. Cheap
-   * enough (a few vector/quaternion copies) to call unconditionally every
-   * frame from a beforeRender hook, same as the selection outline mask's
-   * own per-frame sync. */
-  syncTransform(contentGroup: THREE.Object3D | null): void {
-    this.group.scale.setScalar(contentGroup?.scale.x ?? 1);
-    this.group.quaternion.copy(contentGroup?.quaternion ?? new THREE.Quaternion());
-    this.group.position.copy(contentGroup?.position ?? new THREE.Vector3());
   }
 
   /** Keeps the fat-line shaders' pixel-width math correct as the canvas is

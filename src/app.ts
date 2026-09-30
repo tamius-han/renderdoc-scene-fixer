@@ -190,6 +190,8 @@ export class SceneViewerApp {
   // content-group rebuild (see BoundingBoxGizmo's own doc comment), so it
   // isn't disposed/recreated by clearSelectionVisuals().
   private boundingBoxGizmo = new BoundingBoxGizmo();
+  private boundingBoxIndices: number[] = [];
+  private boundingBoxTransformKey = "";
 
   // stuff for outline rendering
   private outlineMaskScene = new THREE.Scene();
@@ -334,7 +336,7 @@ export class SceneViewerApp {
     this.sceneManager.scene.add(this.viewLights.group);
     this.sceneManager.onBeforeRender(() => this.viewLights.syncToCamera(this.sceneManager.activeCamera));
     this.sceneManager.onBeforeRender(() => {
-      this.boundingBoxGizmo.syncTransform(this.sceneManager.getContentGroup());
+      this.refreshWorldBoundingBox(false);
       const size = new THREE.Vector2();
       this.sceneManager.renderer.getDrawingBufferSize(size);
       this.boundingBoxGizmo.setResolution(Math.max(1, size.x), Math.max(1, size.y));
@@ -621,7 +623,7 @@ export class SceneViewerApp {
 
   private setBoundingBoxVisible(visible: boolean): void {
     Config.sessionConfig.boundingBox.visible = visible;
-    this.updateBoundingBoxVisual(this.computeActiveSelectionUnionBounds());
+    this.updateBoundingBoxVisual(this.getActiveSelectedIndices());
   }
 
   // ===================== View options panel ================================
@@ -795,22 +797,6 @@ export class SceneViewerApp {
       this.viewMaterialCache.set(key, material);
     }
     return { key, material };
-  }
-
-  /** The union bounding box of every currently ACTIVE-selected (selected
-   * and actually visible - see getActiveSelectedIndices()) object, or null
-   * if there's nothing selected. Shared by updateSelectionVisuals() (which
-   * already walks this same list to place the per-object/union center dot
-   * markers) and setBoundingBoxVisible() (which needs it once, right
-   * when the toggle is switched on, without waiting for the next
-   * selection change to call updateSelectionVisuals() again). */
-  private computeActiveSelectionUnionBounds(): Bounds | null {
-    let acc: Bounds | null = null;
-    for (const index of this.getActiveSelectedIndices()) {
-      const bounds = this.loadedDraws[index].bounds;
-      acc = acc ? unionBounds(acc, bounds) : bounds;
-    }
-    return acc;
   }
 
   private noteSelectionTarget(candidate: number | null): void {
@@ -4244,7 +4230,7 @@ export class SceneViewerApp {
     this.rebuildSelectionOutlineMask(activeSelected);
 
     if (activeSelected.length === 0) {
-      this.updateBoundingBoxVisual(null);
+      this.updateBoundingBoxVisual([]);
       return;
     }
 
@@ -4258,9 +4244,8 @@ export class SceneViewerApp {
     }
     // #f82 - one dot per selected object, at its own bounding-box center.
     this.addDotPair(group, perObjectCenters, 0xff8822);
-    // "Show bounding box" - one cube around the whole selection (the same
-    // union bounds the second/lighter dot below marks the center of).
-    this.updateBoundingBoxVisual(unionBoundsAcc);
+    // "Show bounding box" - one world-aligned box around the whole selection.
+    this.updateBoundingBoxVisual(activeSelected);
 
     if (unionBoundsAcc) {
       const center = boundsCenter(unionBoundsAcc);
@@ -4471,13 +4456,68 @@ export class SceneViewerApp {
    * with up-to-date bounds the instant it IS toggled on. Visibility is
    * gated on both the toggle itself and there actually being a selection
    * to box. */
-  private updateBoundingBoxVisual(selectionBounds: Bounds | null): void {
-    if (selectionBounds && Config.sessionConfig.boundingBox.visible) {
-      this.boundingBoxGizmo.setBounds(selectionBounds);
-      this.boundingBoxGizmo.setVisible(true);
-    } else {
-      this.boundingBoxGizmo.setVisible(false);
+  /** Sets which draws the "Show bounding box" box wraps and (re)computes it. */
+  private updateBoundingBoxVisual(activeIndices: number[]): void {
+    this.boundingBoxIndices = activeIndices;
+    this.refreshWorldBoundingBox(true);
+  }
+
+  /** The bounding box is axis-aligned in WORLD space, not in the scene's own
+   * (content group) space: the content group is rotated by the scene's
+   * up-axis correction, so the selection's local bounds would show up as a
+   * tilted box. Instead the box wraps the selection's actual vertices after
+   * the content group's transform - recomputed only when the selection or
+   * that transform changes (the transform key is checked every frame, which
+   * is a 16-number comparison; the vertex pass only runs on a change). */
+  private refreshWorldBoundingBox(force: boolean): void {
+    const gizmo = this.boundingBoxGizmo;
+    const contentGroup = this.sceneManager.getContentGroup();
+    if (!contentGroup || this.boundingBoxIndices.length === 0 || !Config.sessionConfig.boundingBox.visible) {
+      gizmo.setVisible(false);
+      this.boundingBoxTransformKey = "";
+      return;
     }
+
+    contentGroup.updateMatrixWorld(true);
+    const m = contentGroup.matrixWorld;
+    const key = m.elements.join(",");
+    if (!force && key === this.boundingBoxTransformKey && gizmo.group.visible) return;
+    this.boundingBoxTransformKey = key;
+
+    const e = m.elements;
+    const isAxisAligned =
+      Math.abs(e[1]) + Math.abs(e[2]) + Math.abs(e[4]) + Math.abs(e[6]) + Math.abs(e[8]) + Math.abs(e[9]) < 1e-9;
+
+    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    const v = new THREE.Vector3();
+    for (const index of this.boundingBoxIndices) {
+      const draw = this.loadedDraws[index];
+      if (!draw) continue;
+      if (isAxisAligned) {
+        // Pure scale + translation: the transformed local box IS the exact
+        // world box, no need to visit every vertex.
+        for (const corner of [draw.bounds.min, draw.bounds.max]) {
+          v.copy(corner).applyMatrix4(m);
+          min.min(v);
+          max.max(v);
+        }
+        continue;
+      }
+      const positions = draw.geometryData.positions;
+      for (let i = 0; i < positions.length; i += 3) {
+        v.set(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(m);
+        min.min(v);
+        max.max(v);
+      }
+    }
+
+    if (!Number.isFinite(min.x)) {
+      gizmo.setVisible(false);
+      return;
+    }
+    gizmo.setBounds({ min, max });
+    gizmo.setVisible(true);
   }
 
 
