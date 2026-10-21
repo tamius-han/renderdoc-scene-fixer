@@ -49,6 +49,39 @@ dialog. Tick the options you want. In the export preview panel, check that every
 Hit fix & export.
 
 
+### Height maps from normal maps
+
+The export dialog (*Fix & export*) has a **Height maps** section with two dropdowns:
+
+* **Height map size** — Small 512, Medium 1024 (default), Large 2048, Extra large 4096 (slow, ~1 GB RAM). Disabled while *Generate height maps* is *None*.
+* **Generate height maps** —
+  * *None* (default): off.
+  * *As occlusion texture*: each height map is embedded in the `.glb`'s occlusion slot (glTF has no height slot, and this one is otherwise unused).
+  * *Replace normal maps*: each height map is embedded in the `.glb`'s normal slot instead of the normal map it was made from.
+  * *Zip + Blender script*: a `.zip` is downloaded next to the `.glb` containing the 16-bit PNGs, `height_maps.json` (object name → PNG),
+    `README.txt` and `apply_height_maps.py`. Import the `.glb`, run the script in Blender's Scripting workspace, and every object gets
+    Image Texture → Displacement → Material Output, true displacement enabled, and a Subdivision modifier. Re-running is safe; tweak `RELIEF` and the
+    subdivision levels at the top of the script.
+
+How it works: a normal map is a gradient field (`dh/dx = -nx/nz`, `dh/dy = -ny/nz`), so the height is recovered by solving the Poisson equation in the
+Fourier domain (Frankot–Chellappa). The gradient field is mirrored before solving so the texture's edges don't have to tile. Two-channel normal maps
+(blue channel empty) have `nz` rebuilt automatically. The solver runs in a Web Worker (`src/texture-tools/`); fields beyond the 2048 size are
+stored as Float32 to keep 4096 under ~1 GB.
+
+Things worth knowing:
+
+* Set *Normal map green channel* to match the source (OpenGL = +Y up, DirectX = +Y down). Picking wrong turns bumps into dents along one axis.
+* Height is only recoverable up to scale and offset, so each map is normalised to the full 0–65535 range.
+* Maps larger than the chosen size are downscaled first; output is written at that size.
+* Which normal maps get converted follows the *Normal map textures* picker's per-texture checkboxes (but not its category checkbox).
+* The two `.glb` modes need *Lit shading* on, otherwise viewers like Blender may ignore the slots.
+
+### Saved items
+
+**Save selection** (top bar) stores the selected draw calls - or everything visible if nothing is selected - as one saved item in this browser (IndexedDB): input and output geometry plus base color, normal and metalness/roughness textures. Saved items are independent copies, so they survive loading another pass or file.
+
+**View saved items** (next to *Fix & export*) swaps the draw-call list for the saved list. With an item selected: **G** move, **R** rotate, **S** scale, **Delete** remove (Ctrl+Z / Ctrl+Y undo/redo). While moving/rotating/scaling, **X/Y/Z** locks to that world axis and **Shift+X/Y/Z** locks to the plane perpendicular to it; click/Enter confirms, right-click/Esc cancels. **Arrange** lines every saved item up along +X with spacing (bottoms on y=0, centred on z=0). Double-click a name to rename.
+
 ## Local dev
 
 Perform the usual:
