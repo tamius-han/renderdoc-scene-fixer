@@ -1,4 +1,4 @@
-import { Config, type ExportTextureCategoryOptions } from '../../config/cls.config';
+import { Config, type ExportTextureCategoryOptions, type HeightMapMode } from '../../config/cls.config';
 import { Overlay } from '../common/overlay/cmp.overlay';
 import template from "./cmp.export-mesh.html?raw";
 
@@ -76,6 +76,11 @@ export class ExportMesh extends Overlay {
     roughnessFactorSlider: HTMLInputElement;
     roughnessFactorValue: HTMLElement;
 
+    heightModeSelect: HTMLSelectElement;
+    heightGreenSelect: HTMLSelectElement;
+    heightSizeSelect: HTMLSelectElement;
+    heightStatus: HTMLElement;
+
     texturePickerPopup: HTMLElement;
     texturePickerTitle: HTMLElement;
     texturePickerList: HTMLElement;
@@ -132,6 +137,12 @@ export class ExportMesh extends Overlay {
     this.elements.roughnessFactorSlider = this.element.querySelector('#export-options-roughness-factor') as HTMLInputElement;
     this.elements.roughnessFactorValue = this.element.querySelector('#export-options-roughness-factor-value') as HTMLElement;
 
+    this.elements.heightModeSelect = this.element.querySelector('#export-options-height-mode') as HTMLSelectElement;
+    this.elements.heightGreenSelect = this.element.querySelector('#export-options-height-green') as HTMLSelectElement;
+    this.elements.heightSizeSelect = this.element.querySelector('#export-options-height-size') as HTMLSelectElement;
+
+    this.elements.heightStatus = this.element.querySelector('#export-options-height-status') as HTMLElement;
+
     this.elements.texturePickerPopup = this.element.querySelector('#export-texture-picker-popup') as HTMLElement;
     this.elements.texturePickerTitle = this.element.querySelector('#export-texture-picker-popup-title') as HTMLElement;
     this.elements.texturePickerList = this.element.querySelector('#export-texture-picker-popup-list') as HTMLElement;
@@ -159,6 +170,13 @@ export class ExportMesh extends Overlay {
     this.elements.roughnessFactorSlider.value = this.appConfig.config.exportOptions.roughnessFactor.toString();
     this.refreshFactorReadouts();
 
+    const heightOptions = this.appConfig.config.exportOptions.heightMaps;
+    this.elements.heightModeSelect.value = heightOptions.mode;
+    if (this.elements.heightModeSelect.value !== heightOptions.mode) this.elements.heightModeSelect.value = 'none'; // unknown/stale saved value
+    this.elements.heightGreenSelect.value = heightOptions.greenConvention;
+    this.elements.heightSizeSelect.value = heightOptions.maxSize.toString();
+    if (this.elements.heightSizeSelect.value !== heightOptions.maxSize.toString()) this.elements.heightSizeSelect.value = '1024';
+
     this.elements.exportPosedButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'output');
     this.elements.exportOriginalButton.classList.toggle('active', this.appConfig.config.exportOptions.exportType === 'input');
 
@@ -178,6 +196,10 @@ export class ExportMesh extends Overlay {
 
     this.elements.metallicFactorSlider.addEventListener('input', () => this.updateExportOptions());
     this.elements.roughnessFactorSlider.addEventListener('input', () => this.updateExportOptions());
+
+    this.elements.heightModeSelect.addEventListener('change', () => this.updateExportOptions());
+    this.elements.heightGreenSelect.addEventListener('change', () => this.updateExportOptions());
+    this.elements.heightSizeSelect.addEventListener('change', () => this.updateExportOptions());
 
     this.elements.texturePickerCloseButton.addEventListener('click', () => this.closeTexturePicker());
     this.elements.texturePickerViewListButton.addEventListener('click', () => this.setTexturePickerViewMode('list'));
@@ -214,6 +236,14 @@ export class ExportMesh extends Overlay {
     const resizeEnabled = this.elements.resizeExportedCheckbox.checked;
     this.elements.approximateHeightInput.disabled = !resizeEnabled;
     this.elements.approximateHeightInput.classList.toggle('disabled', !resizeEnabled);
+
+    // Height map size/green channel only matter once a mode other than
+    // "None" is picked.
+    const heightEnabled = this.elements.heightModeSelect.value !== 'none';
+    for (const control of [this.elements.heightGreenSelect, this.elements.heightSizeSelect]) {
+      control.disabled = !heightEnabled;
+      control.classList.toggle('disabled', !heightEnabled);
+    }
   }
 
   /** Called by SceneViewerApp right before show(), so this dialog knows
@@ -278,6 +308,44 @@ export class ExportMesh extends Overlay {
       const overflowMarkup = overflow > 0 ? `<span class="texture-picker-field-count">+${overflow}</span>` : '';
       field.innerHTML = `<span class="texture-picker-thumbs">${thumbsMarkup}</span>${overflowMarkup}`;
     }
+    this.refreshHeightMapStatus();
+  }
+
+  /** Tells the user, before they export, what the height map option will
+   * do: how many normal maps it will pick up (the same set the app builds
+   * in SceneViewerApp.collectHeightMapSources(): every normal map in the
+   * current selection minus the ones unchecked in the "Normal map
+   * textures" picker, regardless of that category's own checkbox), where
+   * the result ends up, and - since each is a trap for the unwary - the
+   * caveats of the two modes that write into the .glb. */
+  private refreshHeightMapStatus(): void {
+    const statusEl = this.elements.heightStatus;
+    if (!statusEl) return;
+    const mode = this.elements.heightModeSelect.value as HeightMapMode;
+    if (mode === 'none') {
+      statusEl.textContent = '';
+      return;
+    }
+
+    const excluded = this.appConfig.config.exportOptions.normalTextures.excludedPaths;
+    const usable = this.textureCategories.normal.filter((entry) => !excluded.includes(entry.path)).length;
+    const parts: string[] = [
+      usable === 0
+        ? 'No normal maps in the current selection - nothing to convert.'
+        : `${usable} normal map${usable === 1 ? '' : 's'} will be converted.`,
+    ];
+
+    if (mode === 'occlusion') {
+      parts.push('Height maps go into the .glb\'s occlusion slot (other viewers will read them as ambient occlusion).');
+    } else if (mode === 'replace-normal') {
+      parts.push('Height maps go into the .glb\'s normal-map slot instead of the normal maps - Blender will treat them as normal maps until you rewire them.');
+    } else {
+      parts.push('Downloads a .zip (PNGs + Blender script) next to the .glb - see the README inside.');
+    }
+    if (mode !== 'zip-script' && !this.elements.litShadingCheckbox.checked) {
+      parts.push('Turn on "Lit shading" too: viewers like Blender may ignore these slots on unlit materials.');
+    }
+    statusEl.textContent = parts.join(' ');
   }
 
   private openTexturePicker(key: TextureCategoryKey): void {
@@ -420,12 +488,18 @@ export class ExportMesh extends Overlay {
     this.appConfig.config.exportOptions.roughnessFactor = Number(this.elements.roughnessFactorSlider.value);
     this.refreshFactorReadouts();
 
+    const heightOptions = this.appConfig.config.exportOptions.heightMaps;
+    heightOptions.mode = this.elements.heightModeSelect.value as HeightMapMode;
+    heightOptions.greenConvention = this.elements.heightGreenSelect.value === 'directx' ? 'directx' : 'opengl';
+    heightOptions.maxSize = Number(this.elements.heightSizeSelect.value) || 1024;
+
     const f = parseFloat(this.elements.approximateHeightInput.value);
     if (!isNaN(f)) {
       this.appConfig.config.exportOptions.approximateHeight = f;
     }
     this.appConfig.saveConfig();
 
+    this.refreshHeightMapStatus();
     this.notifyOptionsChanged();
   }
 

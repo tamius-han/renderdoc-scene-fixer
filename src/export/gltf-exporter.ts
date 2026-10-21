@@ -11,6 +11,15 @@ import type { Bounds } from "../scene/mesh-builder";
  * interface stays in the same flat/exploded shape as the rest of the
  * app's geometry pipeline purely so nothing upstream of export needs to
  * know or care about indexing. */
+/** An already-encoded PNG to embed as-is (rather than a THREE.Texture whose
+ * canvas gets re-encoded as 8-bit by canvasToPngBytes()) - used for height
+ * maps, which are 16-bit and would visibly band if squeezed to 8. `key`
+ * identifies the image so entries sharing one only embed it once. */
+export interface ExportEmbeddedImage {
+  key: string;
+  bytes: Uint8Array;
+}
+
 export interface ExportMeshEntry {
   name: string;
   positions: number[];
@@ -40,6 +49,12 @@ export interface ExportMeshEntry {
    * KHR_materials_unlit, can still make use of them from there. */
   normalTexture?: THREE.Texture;
   metallicRoughnessTexture?: THREE.Texture;
+  /** Height map written into the material's occlusionTexture slot (glTF
+   * has no height/displacement slot, and this one is otherwise unused). */
+  occlusionImage?: ExportEmbeddedImage;
+  /** Written into the normalTexture slot INSTEAD of `normalTexture` when
+   * set ("replace normal maps" height-map mode). */
+  normalImage?: ExportEmbeddedImage;
 }
 
 /** The overall scene orientation/scale to bake into a single root node that
@@ -279,11 +294,12 @@ interface GltfJson {
       roughnessFactor: number;
     };
     normalTexture?: { index: number };
+    occlusionTexture?: { index: number };
     doubleSided?: boolean;
     extensions?: { KHR_materials_unlit: Record<string, never> };
   }>;
   textures: Array<{ sampler: number; source: number }>;
-  images: Array<{ mimeType: string; bufferView: number }>;
+  images: Array<{ name?: string; mimeType: string; bufferView: number }>;
   samplers: Array<{ magFilter: number; minFilter: number; wrapS: number; wrapT: number }>;
   accessors: Array<{
     bufferView: number;
@@ -367,6 +383,20 @@ export function buildGlbBlob(
     return textureIndex;
   };
 
+  // Embedded pre-encoded images (see ExportEmbeddedImage), deduped by key.
+  const textureIndexByEmbeddedKey = new Map<string, number>();
+  const getOrCreateEmbeddedTexture = (embedded: ExportEmbeddedImage): number => {
+    const cached = textureIndexByEmbeddedKey.get(embedded.key);
+    if (cached !== undefined) return cached;
+    const bufferViewIndex = addBufferView(embedded.bytes);
+    const imageIndex = images.length;
+    images.push({ name: embedded.key, mimeType: "image/png", bufferView: bufferViewIndex });
+    const textureIndex = textures.length;
+    textures.push({ sampler: 0, source: imageIndex });
+    textureIndexByEmbeddedKey.set(embedded.key, textureIndex);
+    return textureIndex;
+  };
+
   const getOrCreateMaterial = (entry: ExportMeshEntry, fallbackName: string): number => {
     const material = entry.material;
     // Two draws can legitimately share the exact same diffuse-only
@@ -378,7 +408,7 @@ export function buildGlbBlob(
     // only applies when neither aux texture is present; entries that DO
     // have one always get their own glTF material rather than risking
     // reusing another entry's unrelated normal/roughness map.
-    const cacheable = !entry.normalTexture && !entry.metallicRoughnessTexture;
+    const cacheable = !entry.normalTexture && !entry.metallicRoughnessTexture && !entry.occlusionImage && !entry.normalImage;
     if (cacheable) {
       const cached = materialIndexByMaterial.get(material);
       if (cached !== undefined) return cached;
@@ -405,7 +435,14 @@ export function buildGlbBlob(
         metallicFactor: entry.metallicRoughnessTexture ? 1 : metallicFactor,
         roughnessFactor: entry.metallicRoughnessTexture ? 1 : roughnessFactor,
       },
-      ...(entry.normalTexture ? { normalTexture: { index: getOrCreateTexture(entry.normalTexture) } } : {}),
+      // normalImage (a height map standing in for the normal map) wins
+      // over the real normal texture when both are present.
+      ...(entry.normalImage
+        ? { normalTexture: { index: getOrCreateEmbeddedTexture(entry.normalImage) } }
+        : entry.normalTexture
+          ? { normalTexture: { index: getOrCreateTexture(entry.normalTexture) } }
+          : {}),
+      ...(entry.occlusionImage ? { occlusionTexture: { index: getOrCreateEmbeddedTexture(entry.occlusionImage) } } : {}),
       doubleSided: material.side === THREE.DoubleSide,
       // Every material in this app is rendered unlit ON SCREEN
       // (MeshBasicMaterial, no lights in the scene at all - see

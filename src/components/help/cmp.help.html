@@ -435,6 +435,14 @@
         <li><b>Move object to origin</b> — moves exported geometry such that its center is at 0,0 coordinates. Bottom of the object is placed at 0 height.</li>
         <li><b>Textures</b> — select which textures to export. Base color textures should look like they contain parts of your character and/or other objects you're exporting. Normal map and metalness/roughness textures should look like like base color textures, but in funny colors. If textures don't look like any part of your character, <b>UNSELECT THEM</b>.</li>
         <li><b>Metallic factor/Roughness factor</b> — allows you to adjust the metallic and roughness factors of the exported materials. You'll see when you get to blender.</li>
+        <li><b>Height map size / Generate height maps</b> — converts each normal map in your selection into a grayscale height (displacement) map, saved as a 16-bit PNG. Normal maps you've unticked under <i>Normal map textures</i> are skipped. Size is the longest side (4096 is slow and needs about 1 GB of RAM). Pick what happens with them:
+          <ul>
+            <li><i>None</i> — nothing (default).</li>
+            <li><i>As occlusion texture</i> — embeds them in the .glb's occlusion slot, which is otherwise unused (other viewers will show them as ambient occlusion).</li>
+            <li><i>Replace normal maps</i> — embeds them in the .glb's normal-map slot instead of the normal maps. Blender treats that slot as a normal map until you rewire it.</li>
+            <li><i>Zip + Blender script</i> — downloads a .zip next to the .glb with the PNGs and a script. Import the .glb, run <code>apply_height_maps.py</code> in Blender's Scripting tab, and every object gets a Displacement node and a Subdivision modifier.</li>
+          </ul>
+          Set <i>Normal map green channel</i> to match your source: if bumps look like dents, switch between OpenGL and DirectX. Height maps only encode relative height, so each is scaled to the full black–white range. The two .glb modes need <i>Lit shading</i> on.</li>
       </ul>
       <p>Strictly speaking, you <i>don't</i> have to export textures, especially if you'll be sculpting extra details onto your character yourself. However, if you export normal maps, you can try to use them in order to restore detail.</p>
       <p>Exports from Intel GPA do not come with textures, so no textures will be exported from there.</p>

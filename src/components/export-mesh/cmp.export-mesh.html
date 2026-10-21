@@ -79,6 +79,35 @@
               <input type="range" id="export-options-roughness-factor" min="0" max="1" step="0.01">
               <span id="export-options-roughness-factor-value" class="texture-factor-value"></span>
             </div>
+
+            <h4>Height maps</h4>
+
+            <div class="field row">
+              <div>Height map size:</div>
+              <select id="export-options-height-size">
+                <option value="512">Small (512)</option>
+                <option value="1024">Medium (1024)</option>
+                <option value="2048">Large (2048)</option>
+                <option value="4096">Extra large (4096) - slow, needs ~1 GB RAM</option>
+              </select>
+            </div>
+            <div class="field row">
+              <div>Generate height maps:</div>
+              <select id="export-options-height-mode">
+                <option value="none">None</option>
+                <option value="occlusion">As occlusion texture</option>
+                <option value="replace-normal">Replace normal maps</option>
+                <option value="zip-script">Zip + Blender script</option>
+              </select>
+            </div>
+            <div class="field row">
+              <div>Normal map green channel:</div>
+              <select id="export-options-height-green">
+                <option value="opengl">OpenGL (+Y up)</option>
+                <option value="directx">DirectX (+Y down)</option>
+              </select>
+            </div>
+            <div class="field row text-sm opacity-70" id="export-options-height-status"></div>
           </div>
 
           <div class="w-full flex flex-row justify-center shrink-0 mt-4">

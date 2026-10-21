@@ -20,6 +20,16 @@ export interface ExportTextureCategoryOptions {
   excludedPaths: string[];
 }
 
+/** What "Generate height maps" does with the maps it makes:
+ *  - 'none': nothing (the default); the size/green-channel options are inert.
+ *  - 'occlusion': embeds each in the .glb's occlusion-texture slot (glTF has
+ *    no height/displacement slot; this one is otherwise unused).
+ *  - 'replace-normal': embeds each in the .glb's NORMAL-texture slot instead
+ *    of the normal map it was made from.
+ *  - 'zip-script': downloads a .zip (PNGs + a Blender script that wires them
+ *    up as displacement) alongside the normal .glb. */
+export type HeightMapMode = 'none' | 'occlusion' | 'replace-normal' | 'zip-script';
+
 /** How the viewport lights geometry. 'none' leaves textures unlit (only
  * available when the loaded scene actually has textures); 'flat' shades per
  * triangle (the look untextured Intel GPA scenes have always had); 'smooth'
@@ -101,6 +111,23 @@ export interface AppConfiguration {
      * non-metallic, fully rough). */
     metallicFactor: number;
     roughnessFactor: number;
+
+    /** "Generate height maps" - derives a grayscale height map from each
+     * normal map in the export selection (see SceneViewerApp.
+     * computeHeightMaps() and texture-tools/normal-to-height.ts) as a
+     * 16-bit PNG. `mode` decides what happens with them; which normal maps
+     * are used follows the normal-map picker's excludedPaths, but NOT its
+     * `enabled` checkbox - so height maps can be made without also
+     * embedding the normal maps. */
+    heightMaps: {
+      mode: HeightMapMode;
+      /** Green-channel orientation of the SOURCE normal maps. */
+      greenConvention: 'opengl' | 'directx';
+      /** Longest side, in pixels, the solver works at (and the height map
+       * is written at). Larger maps are downscaled first - the solver's
+       * memory use grows with the square of this. */
+      maxSize: number;
+    };
   };
 
   objectFiltering: {
@@ -174,6 +201,8 @@ export class Config {
 
       metallicFactor: 0,
       roughnessFactor: 1,
+
+      heightMaps: { mode: 'none', greenConvention: 'opengl', maxSize: 1024 },
     },
 
     objectFiltering: {
@@ -317,6 +346,7 @@ export class Config {
           ...defaults.exportOptions.metallicRoughnessTextures,
           ...saved.exportOptions?.metallicRoughnessTextures,
         },
+        heightMaps: { ...defaults.exportOptions.heightMaps, ...saved.exportOptions?.heightMaps },
       },
       objectFiltering: {
         ...defaults.objectFiltering,

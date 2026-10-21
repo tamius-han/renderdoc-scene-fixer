@@ -21,7 +21,12 @@ import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, ParsedOBJ, TextureBinding } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
-import { buildGlbBlob, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
+import { buildGlbBlob, type ExportEmbeddedImage, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
+import { encodeGrayscale16Png } from "./texture-tools/png16";
+import { buildZip, type ZipEntry } from "./texture-tools/zip";
+import blenderHeightScript from "./texture-tools/blender/apply_height_maps.py?raw";
+import blenderHeightReadme from "./texture-tools/blender/README.txt?raw";
+import type { HeightWorkerRequest, HeightWorkerResponse } from "./texture-tools/normal-to-height.worker";
 import { CaptureImporter } from './components/capture-importer/cmp.capture-importer';
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
@@ -41,6 +46,19 @@ const SELECTION_COLOR = new THREE.Color(0xff8c1a);
 // Outline ring thickness, in device (drawing-buffer) pixels - see
 // renderSelectionOutlinePass()'s doc comment.
 const OUTLINE_THICKNESS_PIXELS = 3;
+
+/** One generated height map (see SceneViewerApp.computeHeightMaps()): the
+ * 16-bit PNG itself plus the form the .glb exporter embeds it in. */
+interface HeightMapFile {
+  fileName: string;
+  png: Uint8Array;
+  image: ExportEmbeddedImage;
+}
+
+/** An export entry that also remembers which height map file (if any) was
+ * made from its draw's normal map - used to write the zip's
+ * height_maps.json; the .glb exporter itself never sees this field. */
+type AppExportEntry = ExportMeshEntry & { heightFileName?: string };
 
 /** One draw's fully-parsed geometry/material/bounds, cached in memory so the
  * "hide largest % of objects" filter can rebuild the visible scene instantly
@@ -3024,34 +3042,50 @@ export class SceneViewerApp {
     }
 
     const posed = exportOptions.exportType === "output";
+    const heightMode = exportOptions.heightMaps.mode;
 
     this.elements.overlays.loadingScreen.show();
     this.elements.overlays.loadingScreen.log("Preparing export...");
 
-    Promise.all(draws.map(({ index, draw }) => this.buildExportEntriesForDraw(index, draw, posed, exportOptions)))
-      .then((entryLists) => {
-        const entries: ExportMeshEntry[] = entryLists.flat();
+    const run = async (): Promise<void> => {
+      // Height maps come first: the occlusion/replace-normal modes embed
+      // them in the .glb, so they have to exist before it's built. A
+      // failure here is reported (see computeHeightMaps()) but doesn't
+      // stop the mesh export - the mesh is still wanted.
+      const heightMaps =
+        heightMode === "none" ? new Map<string, HeightMapFile>() : await this.computeHeightMaps(selectedIndices, exportOptions);
 
-        const group = this.sceneManager.getContentGroup();
-        const sceneTransform: ExportSceneTransform = posed
-          ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
-          : { quaternion: new THREE.Quaternion(), scale: 1 };
+      const entryLists = await Promise.all(
+        draws.map(({ index, draw }) => this.buildExportEntriesForDraw(index, draw, posed, exportOptions, heightMaps)),
+      );
+      const entries: AppExportEntry[] = entryLists.flat();
 
-        if (exportOptions.resizeExportedObject) {
-          this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
-        }
-        if (exportOptions.moveToOrigin) {
-          this.applyExportMoveToOrigin(entries, sceneTransform);
-        }
+      const group = this.sceneManager.getContentGroup();
+      const sceneTransform: ExportSceneTransform = posed
+        ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
+        : { quaternion: new THREE.Quaternion(), scale: 1 };
 
-        const blob = buildGlbBlob(entries, sceneTransform, {
-          litShading: exportOptions.litShading,
-          metallicFactor: exportOptions.metallicFactor,
-          roughnessFactor: exportOptions.roughnessFactor,
-        });
-        const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
-        this.downloadBlob(blob, fileName);
-      })
+      if (exportOptions.resizeExportedObject) {
+        this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
+      }
+      if (exportOptions.moveToOrigin) {
+        this.applyExportMoveToOrigin(entries, sceneTransform);
+      }
+
+      const blob = buildGlbBlob(entries, sceneTransform, {
+        litShading: exportOptions.litShading,
+        metallicFactor: exportOptions.metallicFactor,
+        roughnessFactor: exportOptions.roughnessFactor,
+      });
+      const fileName = `scene-export-${entries.length}-object${entries.length === 1 ? "" : "s"}.glb`;
+      this.downloadBlob(blob, fileName);
+
+      if (heightMode === "zip-script") {
+        this.downloadHeightMapBundle(entries, heightMaps);
+      }
+    };
+
+    run()
       .catch((e) => {
         console.warn("Export failed", e);
         this.elements.overlays.loadingScreen.log("Export failed - see console for details.");
@@ -3059,6 +3093,156 @@ export class SceneViewerApp {
       .finally(() => {
         this.elements.overlays.loadingScreen.hide();
       });
+  }
+
+  /** Distinct normal-map files (as resolved virtual-filesystem paths)
+   * across `selectedIndices` that height maps should be generated from.
+   * Uses the same findDrawTextureBinding()/resolveTexturePath() lookup the
+   * export dialog's normal-map picker (buildExportTextureCategories())
+   * and the .glb export use, so all three always agree on what "this
+   * selection's normal maps" means, and honours the picker's per-texture
+   * exclusions - but deliberately NOT the "Normal map textures" category
+   * checkbox, since that one controls whether normal maps get embedded in
+   * the .glb, which is independent of wanting height maps. */
+  private collectHeightMapSources(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): string[] {
+    const paths = new Set<string>();
+    for (const index of selectedIndices) {
+      const draw = this.loadedDraws[index];
+      if (!draw) continue;
+      const binding = this.findDrawTextureBinding(draw, "normal map");
+      const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
+      if (path && !exportOptions.normalTextures.excludedPaths.includes(path)) paths.add(path);
+    }
+    return Array.from(paths);
+  }
+
+  /** Generates a height map for every normal map in the export selection
+   * (see collectHeightMapSources()), keyed by the normal map's resolved
+   * path. Each map is solved one at a time (the solver is memory-hungry,
+   * see texture-tools/normal-to-height.ts) in a Web Worker, so the loading
+   * overlay keeps updating while it runs. A map that fails to decode or
+   * solve is skipped (and logged) rather than aborting the rest. Returns
+   * an empty map - after an alert, since the loading overlay is hidden the
+   * moment export finishes and a log line there would never be seen - if
+   * there was nothing to convert or everything failed; the caller carries
+   * on with the plain mesh export either way. */
+  private async computeHeightMaps(
+    selectedIndices: number[],
+    exportOptions: AppConfiguration["exportOptions"],
+  ): Promise<Map<string, HeightMapFile>> {
+    const loading = this.elements.overlays.loadingScreen;
+    const { greenConvention, maxSize } = exportOptions.heightMaps;
+    const results = new Map<string, HeightMapFile>();
+
+    const sources = this.collectHeightMapSources(selectedIndices, exportOptions);
+    if (sources.length === 0) {
+      window.alert("No normal maps were found for the selected meshes, so no height maps were generated.");
+      return results;
+    }
+
+    const usedNames = new Set<string>();
+    for (let i = 0; i < sources.length; i++) {
+      const path = sources[i];
+      const baseName = (path.split("/").pop() || path).replace(/\.[^.]+$/, "");
+      let fileName = `${baseName}_height.png`;
+      for (let n = 2; usedNames.has(fileName); n++) fileName = `${baseName}_height_${n}.png`;
+      usedNames.add(fileName);
+
+      const item = loading.log(`Height map: ${fileName}`, { current: i, total: sources.length });
+      try {
+        const texture = await this.textures.load(this.vfs, path);
+        const image = texture?.image as HTMLCanvasElement | undefined;
+        if (!image) throw new Error("normal map could not be decoded");
+
+        // Downscale (never upscale) so the solver's working set stays
+        // bounded - see ExportOptions.heightMaps.maxSize.
+        const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(image.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) throw new Error("2D canvas unavailable");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(image, 0, 0, width, height);
+        const rgba = ctx.getImageData(0, 0, width, height).data;
+        // Release the (possibly 64 MB at 4096) scratch canvas right away.
+        canvas.width = canvas.height = 0;
+
+        const result = await this.solveHeightMapInWorker(rgba, width, height, greenConvention, (stage) =>
+          item.updateLogItem(`Height map: ${fileName} - ${stage}`, { current: i, total: sources.length }),
+        );
+        item.updateLogItem(`Height map: ${fileName} - encoding PNG`, { current: i, total: sources.length });
+        const png = await encodeGrayscale16Png(result.data, result.width, result.height);
+        results.set(path, { fileName, png, image: { key: fileName.replace(/\.png$/, ""), bytes: png } });
+        item.updateLogItem(`Height map: ${fileName} - done`, { current: i + 1, total: sources.length });
+      } catch (e) {
+        console.warn(`[height maps] failed for ${path}`, e);
+        item.updateLogItem(`Height map: ${fileName} - failed (${e instanceof Error ? e.message : e})`);
+      }
+    }
+
+    if (results.size === 0) {
+      window.alert("Height map generation failed for every normal map - see the browser console for details.");
+    }
+    return results;
+  }
+
+  /** "Zip + Blender script" mode: bundles every generated height map with
+   * apply_height_maps.py, a README, and height_maps.json - the object-name
+   * -> PNG lookup the script uses to decide which object gets which map.
+   * Keyed by entry name because that's exactly what becomes the node (and
+   * so the Blender object) name in the .glb; only entries that actually
+   * have a height map are listed. Downloaded as one .zip next to the .glb,
+   * so the whole batch is a single extra download. */
+  private downloadHeightMapBundle(entries: AppExportEntry[], heightMaps: Map<string, HeightMapFile>): void {
+    if (heightMaps.size === 0) return;
+
+    const objects: Record<string, string> = {};
+    for (const entry of entries) {
+      if (entry.heightFileName) objects[entry.name] = entry.heightFileName;
+    }
+
+    const encoder = new TextEncoder();
+    const files: ZipEntry[] = [
+      { name: "apply_height_maps.py", data: encoder.encode(blenderHeightScript) },
+      { name: "README.txt", data: encoder.encode(blenderHeightReadme) },
+      { name: "height_maps.json", data: encoder.encode(JSON.stringify({ objects }, null, 2)) },
+      ...Array.from(heightMaps.values()).map((h) => ({ name: h.fileName, data: h.png })),
+    ];
+    this.downloadBlob(buildZip(files), `height-maps-${heightMaps.size}.zip`);
+  }
+
+  /** Runs normalToHeight() (texture-tools/normal-to-height.ts) in a
+   * short-lived Web Worker. A fresh worker per map keeps this simple and
+   * lets its (large) working buffers be freed as soon as it's done. */
+  private solveHeightMapInWorker(
+    rgba: Uint8ClampedArray,
+    width: number,
+    height: number,
+    greenConvention: "opengl" | "directx",
+    onStage: (stage: string) => void,
+  ): Promise<{ width: number; height: number; data: Uint16Array }> {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(new URL("./texture-tools/normal-to-height.worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (e: MessageEvent<HeightWorkerResponse>) => {
+        const msg = e.data;
+        if (msg.type === "progress") {
+          onStage(msg.stage);
+          return;
+        }
+        worker.terminate();
+        if (msg.type === "done") resolve({ width: msg.width, height: msg.height, data: new Uint16Array(msg.data) });
+        else reject(new Error(msg.message));
+      };
+      worker.onerror = (e) => {
+        worker.terminate();
+        reject(new Error(e.message || "height map worker failed"));
+      };
+      const request: HeightWorkerRequest = { rgba: rgba.buffer as ArrayBuffer, width, height, greenConvention };
+      worker.postMessage(request, [request.rgba]);
+    });
   }
 
   /** Finds the FIRST texture binding captured for `draw` whose
@@ -3127,7 +3311,8 @@ export class SceneViewerApp {
     draw: LoadedDraw,
     posed: boolean,
     exportOptions: AppConfiguration["exportOptions"],
-  ): Promise<ExportMeshEntry[]> {
+    heightMaps: Map<string, HeightMapFile>,
+  ): Promise<AppExportEntry[]> {
     const sourceData = posed ? draw.geometryData : (draw.previewGeometryData ?? draw.geometryData);
     // draw.key is the resolved base-color texture path resolveMaterial()
     // loaded draw.material's own .map from (or the literal string
@@ -3147,9 +3332,25 @@ export class SceneViewerApp {
       draw,
       exportOptions,
     );
+    // This draw's height map, if one was made from its normal map (see
+    // computeHeightMaps()), and where it goes: the occlusion slot, or the
+    // normal slot in place of the normal map (the exporter lets normalImage
+    // win over normalTexture), or - zip mode - nowhere in the .glb, just
+    // remembered by file name for the zip's height_maps.json.
+    const heightMode = exportOptions.heightMaps.mode;
+    const normalSourceBinding = this.findDrawTextureBinding(draw, "normal map");
+    const normalSourcePath = normalSourceBinding ? this.resolveTexturePath(draw, normalSourceBinding.textureFile) : null;
+    const heightFile = normalSourcePath ? heightMaps.get(normalSourcePath) : undefined;
     const auxTextures = {
       ...(normalTexture ? { normalTexture } : {}),
       ...(metallicRoughnessTexture ? { metallicRoughnessTexture } : {}),
+      ...(heightFile
+        ? {
+            heightFileName: heightFile.fileName,
+            ...(heightMode === "occlusion" ? { occlusionImage: heightFile.image } : {}),
+            ...(heightMode === "replace-normal" ? { normalImage: heightFile.image } : {}),
+          }
+        : {}),
     };
 
     if (!exportOptions.splitLooseParts) {
