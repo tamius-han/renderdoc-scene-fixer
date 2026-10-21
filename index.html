@@ -22,6 +22,10 @@
         &middot;
         <button id="menu-fix-export">Fix & export</button>
         &middot;
+        <button id="menu-save-items">Save selection</button>
+        &middot;
+        <button id="menu-saved-items">View saved items</button>
+        &middot;
         <button id="menu-help">Help</button>
       </div>
 
@@ -44,6 +48,7 @@
             overflow-hidden
           "
         >
+          <div id="draw-call-panel" class="flex flex-col grow shrink min-h-0 overflow-hidden">
           <h2 class="text-[1.25rem] font-bold text-orange-400">Objects</h2>
 
           <div id="object-filter-menu">
@@ -90,14 +95,36 @@
           <div class="grow shrink flex flex-col gap-2 overflow-auto pr-3 -mr-2" id="object-list">
 
           </div>
+          </div>
+
+          <!-- Replaces the draw-call panel above while "View saved items" is active. -->
+          <div id="saved-items-panel" class="hidden flex flex-col grow shrink min-h-0 overflow-hidden">
+            <h2 class="text-[1.25rem] font-bold text-orange-400">Saved items</h2>
+            <div class="text-[0.75rem] text-warm-400 mt-1">
+              Kept in this browser. They stay put when you load another pass or file.
+            </div>
+
+            <div class="flex flex-row items-center gap-2 mt-4">
+              <button id="saved-items-arrange" class="option py-1" title="Line all saved items up along the X axis, with some spacing between them">Arrange</button>
+            </div>
+            <div class="text-[0.7rem] text-warm-500 mt-2 leading-relaxed">
+              <b>G</b> move &middot; <b>R</b> rotate &middot; <b>S</b> scale &middot; <b>Delete</b> remove<br />
+              While moving, rotating or scaling: <b>X</b> / <b>Y</b> / <b>Z</b> lock to that axis,
+              <b>Shift+X</b> / <b>Y</b> / <b>Z</b> lock to the plane perpendicular to it.
+              Click or <b>Enter</b> confirms, right-click or <b>Esc</b> cancels.
+            </div>
+
+            <b class="mt-6 text-white">Items:</b>
+            <div class="grow shrink flex flex-col gap-2 overflow-auto pr-3 -mr-2 mt-1" id="saved-items-list"></div>
+          </div>
         </div>
 
         <div id="viewport" class="h-full w-full relative">
           <div class="tool-menu-overlay">
             <div class="tools panel">
-              <button id="select-volume-btn">Select by volume</button>
+              <button id="select-volume-btn" data-main-scene-tool>Select by volume</button>
               &middot;
-              <div class="dropdown">
+              <div class="dropdown" data-main-scene-tool>
                 Distortion fix
                 <div class="dropdown-container">
                   <div class="dropdown-content">
@@ -108,7 +135,7 @@
                 </div>
               </div>
               &middot;
-              <div class="dropdown">
+              <div class="dropdown" data-main-scene-tool>
                 Scene orientation
                 <div class="dropdown-container">
                   <div class="dropdown-content">
@@ -119,8 +146,8 @@
                 </div>
               </div>
               &middot;
-              <button id="show-resources-panel-button">Show resource panel</button>
-              <button id="hide-resources-panel-button" class="hidden">Hide resource panel</button>
+              <button id="show-resources-panel-button" data-main-scene-tool>Show resource panel</button>
+              <button id="hide-resources-panel-button" class="hidden" data-main-scene-tool>Hide resource panel</button>
               &middot;
               <button id="view-options-btn" title="Textures, shading and colors">View options</button>
               &middot;

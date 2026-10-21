@@ -127,6 +127,15 @@ export class TextureManager {
     return texture;
   }
 
+  /** Disposes and forgets a single cached texture (e.g. when a saved item
+   * is deleted), leaving the rest of the cache alone. */
+  dispose(path: string): void {
+    const texture = this.cache.get(path);
+    if (!texture) return;
+    texture.dispose();
+    this.cache.delete(path);
+  }
+
   disposeAll(): void {
     for (const texture of this.cache.values()) texture.dispose();
     this.cache.clear();

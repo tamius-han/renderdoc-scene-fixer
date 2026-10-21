@@ -125,6 +125,9 @@ export class SceneManager {
    * handlers. */
   private viewTransition: ViewTransition | null = null;
   private contentGroup: THREE.Group | null = null;
+  /** When set, this group is shown INSTEAD of contentGroup (which is hidden
+   * but kept, so it can be shown again untouched) - see setAlternateContent(). */
+  private alternateContent: THREE.Group | null = null;
   private raycaster = new THREE.Raycaster();
 
   // mouse movement mode (needed for blender-style mouse navigation)
@@ -731,7 +734,7 @@ export class SceneManager {
   }
 
   private raycastAtMouse(clientX: number, clientY: number): THREE.Vector3 | null {
-    const group = this.contentGroup;
+    const group = this.alternateContent ?? this.contentGroup;
     if (!group) return null;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -804,7 +807,56 @@ export class SceneManager {
     group.scale.setScalar(scale);
     this.scene.add(group);
     this.contentGroup = group;
+    group.visible = !this.alternateContent;
     return group;
+  }
+
+  /** Shows `group` in place of the main scene content (the saved-items view),
+   * or - with null - brings the main content back. The group is flagged
+   * `persistent` so clear() (called on every scene rebuild) leaves it alone,
+   * and while it's set, mouse-picking for repivot-on-zoom and the framing
+   * helpers only consider it. The caller owns the group (and disposes it). */
+  setAlternateContent(group: THREE.Group | null): void {
+    if (this.alternateContent && this.alternateContent !== group) this.scene.remove(this.alternateContent);
+    this.alternateContent = group;
+    if (group) {
+      group.userData.persistent = true;
+      if (group.parent !== this.scene) this.scene.add(group);
+      group.visible = true;
+    }
+    if (this.contentGroup) this.contentGroup.visible = !group;
+  }
+
+  /** Orbit camera state, for switching between two views of the scene (the
+   * draw-call scene and the saved-items scene) without losing either one's
+   * framing. */
+  getCameraState(): { target: THREE.Vector3; offset: THREE.Vector3; up: THREE.Vector3; quaternion: THREE.Quaternion } {
+    return {
+      target: this.target.clone(),
+      offset: this.offset.clone(),
+      up: this.camera.up.clone(),
+      quaternion: this.camera.quaternion.clone(),
+    };
+  }
+
+  setCameraState(state: { target: THREE.Vector3; offset: THREE.Vector3; up: THREE.Vector3; quaternion: THREE.Quaternion }): void {
+    this.viewTransition = null;
+    this.target.copy(state.target);
+    this.offset.copy(state.offset);
+    this.camera.up.copy(state.up);
+    this.updateCamera();
+    this.camera.quaternion.copy(state.quaternion);
+  }
+
+  /** Bounding box of everything currently VISIBLE in the scene - hidden
+   * top-level content (e.g. the draw-call scene while the saved-items view is
+   * up) must not influence framing. */
+  private visibleSceneBox(): THREE.Box3 {
+    const box = new THREE.Box3();
+    for (const child of this.scene.children) {
+      if (child.visible) box.expandByObject(child);
+    }
+    return box;
   }
 
   /** The group created by the most recent addContent() call, or null if
@@ -823,7 +875,7 @@ export class SceneManager {
    * the sibling operation that restores the original import placement
    * instead of recomputing a fresh one from the current scene bounds. */
   frameOnScene(): void {
-    const box = new THREE.Box3().setFromObject(this.scene);
+    const box = this.visibleSceneBox();
     if (box.isEmpty()) return;
     // Reframing is itself an instant, unconditional move - cancel any
     // in-flight numpad view animation rather than have it fight this.
@@ -871,7 +923,7 @@ export class SceneManager {
    * the camera is pulled in to at most that distance - it's fine, and
    * expected, for it to end up closer. */
   placeCameraForImport(padding: number = 1.2, maxDistance?: number): void {
-    const box = new THREE.Box3().setFromObject(this.scene);
+    const box = this.visibleSceneBox();
     if (box.isEmpty()) return;
     this.viewTransition = null;
 

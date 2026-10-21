@@ -984,3 +984,41 @@ input[type="file"] { display: none; }
 }
 
 button#view-options-btn.active { @apply text-amber-100 underline; }
+
+
+/* ========================= Saved items ========================= */
+
+#draw-call-panel.hidden,
+#saved-items-panel.hidden { display: none; }
+
+/* Tools that only act on the draw-call scene are dimmed while saved items are shown. */
+#app.saved-items-mode [data-main-scene-tool] { opacity: 0.35; pointer-events: none; }
+#app.saved-items-mode #select-options-menu { display: none; }
+#app.saved-items-transforming #viewport canvas { cursor: crosshair; }
+
+#topbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+button#menu-saved-items.active { @apply text-amber-100 underline; }
+
+.saved-items-empty { @apply text-[0.8rem] text-warm-400 py-2 leading-relaxed; }
+
+.saved-item-actions .saved-action {
+  &.danger { color: #fca5a5; border-color: #7f1d1d; }
+  &.danger:hover { background: #7f1d1d; color: #fee2e2; }
+  .saved-action-key { opacity: 0.55; margin-left: 2px; font-size: 10px; }
+}
+
+.saved-name-input {
+  width: 100%; font: inherit; padding: 0 4px;
+  color: #f3e8dc; background: #1a1410; border: 1px solid #8a6f55;
+}
+
+.saved-toast {
+  position: absolute; left: 50%; bottom: 3.5rem; z-index: 20; max-width: 80%;
+  transform: translate(-50%, 8px);
+  padding: 0.4rem 0.9rem; font-size: 0.8rem;
+  color: #fde68a; background: rgb(40 28 20 / 0.92); border: 1px solid #8a6f55;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.saved-toast.visible { opacity: 1; transform: translate(-50%, 0); }
+.saved-toast.is-error { color: #fecaca; border-color: #b91c1c; }

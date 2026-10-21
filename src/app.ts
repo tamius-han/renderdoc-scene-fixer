@@ -39,6 +39,7 @@ import { isTextEntryFocused } from './util/fn.text-entry-focus';
 import { logSliderToValue, valueToLogSlider, parseDecimal, HIDE_PERCENT_SLIDER } from './util/fn.log-slider';
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 import { Help } from './components/help/cmp.help';
+import { SavedItemsController, type SaveDrawInput } from './saved-items/saved-items.controller';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -113,6 +114,9 @@ export class SceneViewerApp {
   private textures = new TextureManager();
   private sceneManager: SceneManager;
   private appConfig: Config;
+  private savedItems: SavedItemsController;
+  /** The draw-call view's HUD text, parked while the saved-items view uses the HUD. */
+  private hudTextBeforeSaved = "";
 
   private materialCache = new Map<string, THREE.Material>();
   private untexturedMaterial: THREE.Material | null = null;
@@ -224,6 +228,8 @@ export class SceneViewerApp {
       importScene: this.el("menu-import-scene"),
       controlOptions: this.el("menu-control-options"),
       fixExport: this.el("menu-fix-export"),
+      saveItems: this.el<HTMLButtonElement>("menu-save-items"),
+      savedItems: this.el<HTMLButtonElement>("menu-saved-items"),
       help: this.el("menu-help")
     },
 
@@ -343,6 +349,34 @@ export class SceneViewerApp {
       console.warn('setupSelectionOutlinePass failed', e);
     }
 
+    this.savedItems = new SavedItemsController(
+      {
+        sceneManager: this.sceneManager,
+        viewUniforms: this.viewUniforms,
+        wantsNormalMaps: () => this.getEffectiveShading() === "smooth" && this.viewOptions.showTextures,
+        isInputBlocked: () => this.isAnyOverlayOpen(),
+        isFlying: () => this.isFlying,
+        setStatus: (text) => {
+          this.hud.textContent = text;
+        },
+        onActiveChange: (active) => this.handleSavedItemsActiveChange(active),
+        onItemsChanged: () => {
+          this.applyViewOptions();
+          this.syncImporterSavedItemsLink();
+        },
+      },
+      {
+        toggleButton: this.elements.menu.savedItems,
+        saveButton: this.elements.menu.saveItems,
+        drawCallPanel: this.el("draw-call-panel"),
+        savedPanel: this.el("saved-items-panel"),
+        list: this.el("saved-items-list"),
+        arrangeButton: this.el<HTMLButtonElement>("saved-items-arrange"),
+        appRoot: this.el("app"),
+        viewport: this.viewport,
+      },
+    );
+
     // Lives directly in the scene, not under the content group - see
     // BoundingBoxGizmo's own doc comment for why - so it's added exactly
     // once here, then kept in sync every frame (transform + fat-line
@@ -409,6 +443,13 @@ export class SceneViewerApp {
     this.elements.menu.fixExport.addEventListener('click', () => {
       console.info('opening export overlay');
       this.openExportDialog();
+    });
+    this.elements.menu.saveItems.addEventListener('click', () => void this.saveSelectionToSavedItems());
+    // The importer covers the whole window (top bar included) until a scene
+    // is loaded, so it gets its own way in to the saved items.
+    this.elements.overlays.captureImporter.querySelector('#open-saved-items')?.addEventListener('click', () => {
+      this.elements.overlays.captureImporter.classList.add('hidden');
+      void this.savedItems.setActive(true);
     });
     this.elements.menu.help.addEventListener('click', () => {
       console.info('opening help overlay');
@@ -653,7 +694,7 @@ export class SceneViewerApp {
   /** True if any loaded draw has a base color texture - decides whether the
    * "Show textures" checkbox and the 'none' shading option are offered. */
   private sceneHasTextures(): boolean {
-    return this.loadedDraws.some((d) => d.key !== "untextured");
+    return this.loadedDraws.some((d) => d.key !== "untextured") || this.savedItems.hasTextures();
   }
 
   /** The shading actually in effect: the saved choice, unless it's 'none'
@@ -758,6 +799,7 @@ export class SceneViewerApp {
     ui.showBoundingBox.checked = Config.sessionConfig.boundingBox.visible;
 
     if (shading === "smooth" && v.showTextures) void this.ensureViewNormalMaps();
+    this.savedItems.refreshAppearance();
   }
 
   /** Loads (once per draw, sequentially - same decode-throttling reasoning
@@ -1236,6 +1278,10 @@ export class SceneViewerApp {
       return;
     }
     this.vfs = vfs;
+    // Saved items are independent of the loaded capture (own copies of the
+    // geometry and textures), so they survive this; but the new scene is what
+    // the user wants to look at now.
+    if (this.savedItems.isActive()) await this.savedItems.setActive(false);
 
     this.intelGpaDistortion = intelGpaDistortion ?? null;
     this.elements.toolsMenu.fixDistortionBtn.classList.toggle("hidden", this.intelGpaDistortion !== null);
@@ -1489,9 +1535,11 @@ export class SceneViewerApp {
     const visibleCount = this.loadedDraws.length - excludedCount;
     const triCount = Math.round(builder.totalVertexCount / 3);
 
-    this.hud.textContent =
+    const hudText =
       `${visibleCount}/${this.loadedDraws.length} objects \u00b7 ${meshes.length} draw calls \u00b7 ` +
       `${triCount.toLocaleString()} tris \u00b7 scale \u00d7${this.fixedScale.toExponential(2)} \u00b7 MMB drag to orbit, Shift+MMB to pan, scroll to zoom, A for fly mode`;
+    if (this.savedItems.isActive()) this.hudTextBeforeSaved = hudText;
+    else this.hud.textContent = hudText;
 
     this.renderObjectListState();
   }
@@ -2063,6 +2111,7 @@ export class SceneViewerApp {
 
   private handleGizmoKeydown(event: KeyboardEvent): void {
     if (event.repeat || this.isTypingInFormField() || this.isFlying || !this.selectAreaShape) return;
+    if (this.savedItems.isActive()) return; // G/R/S belong to the saved items then
     if (event.code === "KeyG") this.setSelectAreaGizmoMode("translate");
     else if (event.code === "KeyS") this.setSelectAreaGizmoMode("scale");
     else if (event.code === "KeyR") this.setSelectAreaGizmoMode("rotate");
@@ -2089,13 +2138,15 @@ export class SceneViewerApp {
         this.elements.overlays.controls.hide();
       } else if (this.elements.overlays.help.isVisible()) {
         this.elements.overlays.help.hide();
-      } else if (!this.isTypingInFormField()) {
+      } else if (!this.isTypingInFormField() && !this.savedItems.isActive()) {
         this.clearSelection();
       }
       return;
     }
 
     if (this.isTypingInFormField()) return;
+    // The saved-items view has its own shortcuts (see SavedItemsController).
+    if (this.savedItems.isActive()) return;
     const ctrlOrCmd = event.ctrlKey || event.metaKey;
 
     if (event.code === "KeyH" && !ctrlOrCmd) {
@@ -2263,7 +2314,102 @@ export class SceneViewerApp {
 
   /** Opens the export dialog for the current selection - shared by the
    * "Export..." menu item and the Ctrl+E / Ctrl+Shift+E shortcuts. */
+  //#region saved items
+
+  private isAnyOverlayOpen(): boolean {
+    const o = this.elements.overlays;
+    return o.export.isVisible() || o.controls.isVisible() || o.help.isVisible() || !o.captureImporter.classList.contains('hidden');
+  }
+
+  /** Shows the importer's "Saved items" link only when there is something to open. */
+  private syncImporterSavedItemsLink(): void {
+    const link = this.elements.overlays.captureImporter.querySelector<HTMLElement>('#open-saved-items');
+    if (!link) return;
+    const count = this.savedItems.itemCount();
+    link.classList.toggle('hidden', count === 0);
+    link.textContent = `Saved items (${count})`;
+  }
+
+  /** Tidies main-scene-only state when the viewport switches to/from saved items. */
+  private handleSavedItemsActiveChange(active: boolean): void {
+    if (active) {
+      this.cancelAllTools();
+      this.hideAllToolSubmenus();
+      Config.sessionConfig.tools.activeTool = null;
+      this.syncLandmarkSubmenuState();
+      this.removeResourcePanel();
+      this.hudTextBeforeSaved = this.hud.textContent ?? "";
+      this.hud.style.display = "block";
+      this.emptyHint.style.display = "none";
+      return;
+    }
+    const hasScene = this.loadedDraws.length > 0;
+    this.hud.textContent = this.hudTextBeforeSaved;
+    this.hud.style.display = hasScene ? "block" : "none";
+    this.emptyHint.style.display = hasScene ? "none" : "";
+    // Hand the shared selection uniform, outline and bounding box back to the draw-call scene.
+    this.viewUniforms.uHasSelection.value = this.selectedIndices.size > 0 ? 1 : 0;
+    this.updateSelectionVisuals();
+    this.syncResourcePanelVisibility();
+  }
+
+  /** "Save selection": stores the selected draw calls - or everything
+   * visible, if nothing is selected - as ONE saved item, with input and
+   * output geometry and base color / normal / metalness-roughness textures. */
+  private async saveSelectionToSavedItems(): Promise<void> {
+    if (this.savedItems.isActive()) return;
+    const group = this.sceneManager.getContentGroup();
+    const indices = this.getExportIndices();
+    if (!group || indices.length === 0) {
+      this.savedItems.showToast("Nothing to save - load a scene first.", true);
+      return;
+    }
+
+    const draws: SaveDrawInput[] = [];
+    for (const index of indices) {
+      const draw = this.loadedDraws[index];
+      if (draw) draws.push(this.buildSaveInput(index, draw));
+    }
+
+    group.updateMatrix();
+    try {
+      const meta = await this.savedItems.saveDraws(draws, group.matrix.toArray());
+      const n = draws.length;
+      this.savedItems.showToast(`Saved ${n} draw call${n === 1 ? "" : "s"} as \u201c${meta.name}\u201d`);
+    } catch (e) {
+      console.warn("Saving failed", e);
+      this.savedItems.showToast(`Could not save: ${e instanceof Error ? e.message : String(e)}`, true);
+    }
+  }
+
+  private buildSaveInput(index: number, draw: LoadedDraw): SaveDrawInput {
+    const textures: SaveDrawInput["textures"] = {};
+    const addTexture = (kind: keyof SaveDrawInput["textures"], path: string | null): void => {
+      const file = path ? this.vfs.get(path) : undefined;
+      if (!path || !file) return;
+      textures[kind] = { key: path, file, fileName: path.split("/").pop() || path };
+    };
+    addTexture("baseColor", draw.key === "untextured" ? null : draw.key);
+
+    const normalBinding = this.findDrawTextureBinding(draw, "normal map");
+    addTexture("normal", normalBinding ? this.resolveTexturePath(draw, normalBinding.textureFile) : null);
+    const roughnessBinding = this.findDrawTextureBinding(draw, "metalness / roughness");
+    addTexture("metallicRoughness", roughnessBinding ? this.resolveTexturePath(draw, roughnessBinding.textureFile) : null);
+
+    return {
+      name: `Draw #${index} (eid ${draw.draw.eventId})`,
+      eventId: draw.draw.eventId,
+      output: draw.geometryData,
+      input: draw.previewGeometryData === draw.geometryData ? null : draw.previewGeometryData,
+      textures,
+    };
+  }
+
+  //#endregion
+
   private openExportDialog(): void {
+    // Export works on draw calls - go back to them first.
+    if (this.savedItems.isActive()) void this.savedItems.setActive(false);
     const indices = this.getExportIndices();
     this.elements.overlays.export.setSelectedIndices(indices);
     this.elements.overlays.export.setTextureCategories(this.buildExportTextureCategories(indices));
@@ -4275,6 +4421,10 @@ export class SceneViewerApp {
   }
 
   private handleSceneObjectPointer(event: PointerEvent): void {
+    if (this.savedItems.isActive()) {
+      this.savedItems.handleViewportPointerDown(event);
+      return;
+    }
     // Gizmo handles take priority over everything else EXCEPT an armed
     // placement tool (ground-plane/select-area) - those already fully
     // claim left-click for their own purposes while active, so skip gizmo
@@ -4495,6 +4645,8 @@ export class SceneViewerApp {
    * or cloned, so a mesh with nothing selected is always exactly the
    * unselected look. */
   private applySelectionShading(): void {
+    // The shared selection uniform belongs to the saved-items view while it's up.
+    if (this.savedItems.isActive()) return;
     const group = this.sceneManager.getContentGroup();
     if (!group) return;
 
@@ -4605,6 +4757,7 @@ export class SceneViewerApp {
 
   private renderSelectionOutlinePass(): void {
     if (!this.outlineQuadMaterial || this.outlineMaskGroup.children.length === 0) return;
+    if (this.savedItems.isActive()) return;
 
     const contentGroup = this.sceneManager.getContentGroup();
     this.outlineMaskGroup.scale.setScalar(contentGroup?.scale.x ?? 1);
@@ -4703,7 +4856,7 @@ export class SceneViewerApp {
   private refreshWorldBoundingBox(force: boolean): void {
     const gizmo = this.boundingBoxGizmo;
     const contentGroup = this.sceneManager.getContentGroup();
-    if (!contentGroup || this.boundingBoxIndices.length === 0 || !Config.sessionConfig.boundingBox.visible) {
+    if (this.savedItems.isActive() || !contentGroup || this.boundingBoxIndices.length === 0 || !Config.sessionConfig.boundingBox.visible) {
       gizmo.setVisible(false);
       this.boundingBoxTransformKey = "";
       return;
