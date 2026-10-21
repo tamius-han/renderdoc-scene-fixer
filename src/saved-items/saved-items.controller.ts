@@ -220,6 +220,25 @@ export class SavedItemsController {
     return meta;
   }
 
+  /**
+   * What "Fix & export" should cover from the saved-items view: the selected
+   * items, or every item when nothing is selected (mirroring how export falls
+   * back to everything visible for draw calls). Each comes with its current
+   * world matrix (move/rotate/scale/arrange applied), ready to bake into
+   * posed geometry. Items whose data can't be read from storage are skipped.
+   */
+  async getItemsForExport(): Promise<{ name: string; payload: SavedItemPayload; world: Mat4 }[]> {
+    await this.loadMetadata();
+    const chosen = this.selected.size > 0 ? this.selectedItems() : [...this.items];
+    const result: { name: string; payload: SavedItemPayload; world: Mat4 }[] = [];
+    for (const item of chosen) {
+      const payload = await this.ensurePayload(item);
+      if (!payload) continue;
+      result.push({ name: item.meta.name, payload, world: math.multiply(item.meta.matrix, item.meta.baseMatrix) });
+    }
+    return result;
+  }
+
   /** Switches between the draw-call view and the saved-items view. */
   async setActive(active: boolean): Promise<void> {
     if (active === this.active) return;

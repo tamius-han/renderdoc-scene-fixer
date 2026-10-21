@@ -40,6 +40,7 @@ import { logSliderToValue, valueToLogSlider, parseDecimal, HIDE_PERCENT_SLIDER }
 import { trianglesIntersect } from "fast-triangle-triangle-intersection";
 import { Help } from './components/help/cmp.help';
 import { SavedItemsController, type SaveDrawInput } from './saved-items/saved-items.controller';
+import * as math from './saved-items/transform-math';
 
 // Shared by both the selected-mesh flat-orange recolor and the outline
 // ring around it.
@@ -89,6 +90,20 @@ interface LoadedDraw {
   viewNormalMap?: THREE.Texture | null;
 }
 
+/** Where the export dialog and exporter read their draws, texture files and
+ * decoded textures from. Normally that's the loaded capture (no ExportSource -
+ * see exportDraws() & co.); when "Fix & export" is used from the saved-items
+ * view it's a synthetic stand-in built from saved items (see
+ * buildSavedExportSource()), so the whole existing pipeline - texture pickers,
+ * height maps, input/output geometry, split/fill options - works unchanged. */
+interface ExportSource {
+  draws: LoadedDraw[];
+  vfs: VirtualFileSystem;
+  textures: TextureManager;
+  /** Entry (= Blender object) names, overriding the default "Draw #n (eid e)". */
+  names: Map<LoadedDraw, string>;
+}
+
 /** A point-in-time snapshot of everything Ctrl+Z/Ctrl+Y travel through -
  * selection, manual visibility, and the landmark object. See
  * SceneViewerApp.pushUndoSnapshot()/undo()/redo(). */
@@ -115,6 +130,8 @@ export class SceneViewerApp {
   private sceneManager: SceneManager;
   private appConfig: Config;
   private savedItems: SavedItemsController;
+  /** Non-null while the export dialog is working on saved items. */
+  private exportSource: ExportSource | null = null;
   /** The draw-call view's HUD text, parked while the saved-items view uses the HUD. */
   private hudTextBeforeSaved = "";
 
@@ -2145,8 +2162,15 @@ export class SceneViewerApp {
     }
 
     if (this.isTypingInFormField()) return;
-    // The saved-items view has its own shortcuts (see SavedItemsController).
-    if (this.savedItems.isActive()) return;
+    // The saved-items view has its own shortcuts (see SavedItemsController)...
+    if (this.savedItems.isActive()) {
+      // ...except export, which works from there too.
+      if ((event.ctrlKey || event.metaKey) && event.code === "KeyE") {
+        event.preventDefault();
+        this.openExportDialog();
+      }
+      return;
+    }
     const ctrlOrCmd = event.ctrlKey || event.metaKey;
 
     if (event.code === "KeyH" && !ctrlOrCmd) {
@@ -2408,14 +2432,164 @@ export class SceneViewerApp {
   //#endregion
 
   private openExportDialog(): void {
-    // Export works on draw calls - go back to them first.
-    if (this.savedItems.isActive()) void this.savedItems.setActive(false);
-    const indices = this.getExportIndices();
+    void this.openExportDialogAsync();
+  }
+
+  private async openExportDialogAsync(): Promise<void> {
+    if (this.savedItems.isActive()) {
+      // From the saved-items view, export covers the selected saved items
+      // (or all of them if none is selected).
+      const source = await this.buildSavedExportSource();
+      if (!source) {
+        this.savedItems.showToast("Nothing to export - save something first.", true);
+        return;
+      }
+      this.setExportSource(source);
+    } else {
+      this.setExportSource(null);
+    }
+
+    const indices = this.exportIndices();
     this.elements.overlays.export.setSelectedIndices(indices);
     this.elements.overlays.export.setTextureCategories(this.buildExportTextureCategories(indices));
     this.renderExportMeshPreview();
     this.elements.overlays.export.show();
   }
+
+  //#region export source (draw calls or saved items)
+
+  private exportDraws(): LoadedDraw[] {
+    return this.exportSource?.draws ?? this.loadedDraws;
+  }
+
+  private exportVfs(): VirtualFileSystem {
+    return this.exportSource?.vfs ?? this.vfs;
+  }
+
+  private exportTextures(): TextureManager {
+    return this.exportSource?.textures ?? this.textures;
+  }
+
+  /** The draws the open export dialog is for. */
+  private exportIndices(): number[] {
+    return this.exportSource ? this.exportSource.draws.map((_, i) => i) : this.getExportIndices();
+  }
+
+  private setExportSource(source: ExportSource | null): void {
+    this.exportSource?.textures.disposeAll();
+    this.exportSource = source;
+  }
+
+  /**
+   * Turns the saved items to export into stand-ins for loaded draws:
+   *  - posed ("output") geometry is baked through the item's current world
+   *    matrix (move/rotate/scale/arrange, plus the scene's up-axis and scale
+   *    at save time), so the export matches what the saved-items view shows.
+   *    Baking - rather than a node transform - is what lets non-uniform
+   *    scaling (a world-axis scale of a rotated item) through, which glTF
+   *    nodes can't represent.
+   *  - input ("original") geometry is the raw stored input mesh, untouched,
+   *    exactly like input export of a normal draw call.
+   * Texture files are re-registered in a private virtual filesystem under
+   * unique paths, so same-named files from different items can't collide.
+   */
+  private async buildSavedExportSource(): Promise<ExportSource | null> {
+    const items = await this.savedItems.getItemsForExport();
+    if (items.length === 0) return null;
+
+    const vfs = new VirtualFileSystem();
+    const textures = new TextureManager();
+    const materials = new Map<string, THREE.Material>();
+    const draws: LoadedDraw[] = [];
+    const names = new Map<LoadedDraw, string>();
+    const usedNames = new Set<string>();
+
+    for (const [itemIndex, item] of items.entries()) {
+      const pathsByKey = new Map<string, string>();
+      const pathFor = (key: string | undefined): string | null => {
+        if (!key) return null;
+        const known = pathsByKey.get(key);
+        if (known) return known;
+        const tex = item.payload.textures[key];
+        if (!tex) return null;
+        const path = `saved/${itemIndex}/${pathsByKey.size}/${tex.fileName}`;
+        vfs.set(path, new File([tex.blob], tex.fileName, { type: tex.type }));
+        pathsByKey.set(key, path);
+        return path;
+      };
+
+      for (const [drawIndex, saved] of item.payload.draws.entries()) {
+        let key = "untextured";
+        let material: THREE.Material = this.getUntexturedMaterial();
+        const basePath = pathFor(saved.textures.baseColor);
+        if (basePath) {
+          const cached = materials.get(basePath);
+          if (cached) {
+            key = basePath;
+            material = cached;
+          } else {
+            const texture = await textures.load(vfs, basePath);
+            if (texture) {
+              material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+              materials.set(basePath, material);
+              key = basePath;
+            }
+          }
+        }
+
+        // describeTextureType() recognises these exact names (see there).
+        const bindings: TextureBinding[] = [];
+        const normalPath = pathFor(saved.textures.normal);
+        if (normalPath) bindings.push({ bindPoint: 1, name: "normal map", textureFile: normalPath });
+        const roughnessPath = pathFor(saved.textures.metallicRoughness);
+        if (roughnessPath) bindings.push({ bindPoint: 2, name: "metalness / roughness", textureFile: roughnessPath });
+
+        const posedPositions = math.transformPositions(saved.output.positions, item.world);
+        const geometryData: GeometryArrays = {
+          positions: posedPositions,
+          normals: math.transformNormals(saved.output.normals, item.world),
+          uvs: Array.from(saved.output.uvs),
+        };
+        const rawInput = saved.input ?? saved.output;
+        const previewGeometryData: GeometryArrays = {
+          positions: Array.from(rawInput.positions),
+          normals: Array.from(rawInput.normals),
+          uvs: Array.from(rawInput.uvs),
+        };
+        const bounds = computeBounds(geometryData.positions);
+
+        const draw: LoadedDraw = {
+          draw: { eventId: saved.eventId, name: saved.name, mesh: null, posedMesh: null, textures: bindings },
+          key,
+          material,
+          geometryData,
+          previewGeometryData,
+          rawPreviewObj: null,
+          bounds,
+          diagonal: boundsDiagonal(bounds),
+          meshPath: null,
+          previewPath: null,
+          originalPosedPositions: null,
+          originalPosedNormals: null,
+          originalPosedUvs: null,
+          appliedDistortionMatrix: null,
+        };
+        draws.push(draw);
+
+        // Entry names become Blender object names (and height_maps.json keys),
+        // so they must be unique even when two items share a name.
+        const base = `${item.name} - draw ${drawIndex + 1} (eid ${saved.eventId})`;
+        let name = base;
+        for (let n = 2; usedNames.has(name); n++) name = `${base} #${n}`;
+        usedNames.add(name);
+        names.set(draw, name);
+      }
+    }
+
+    return draws.length > 0 ? { draws, vfs, textures, names } : null;
+  }
+
+  //#endregion
 
   /** Blob URLs handed to the export dialog's texture-picker thumbnails
    * (see buildExportTextureCategories()) - tracked so the PREVIOUS batch
@@ -2447,10 +2621,12 @@ export class SceneViewerApp {
     for (const url of this.exportTextureThumbUrls) URL.revokeObjectURL(url);
     this.exportTextureThumbUrls = [];
 
-    const draws = selectedIndices.map((i) => this.loadedDraws[i]).filter((d): d is LoadedDraw => !!d);
+    const sourceDraws = this.exportDraws();
+    const sourceVfs = this.exportVfs();
+    const draws = selectedIndices.map((i) => sourceDraws[i]).filter((d): d is LoadedDraw => !!d);
 
     const makeEntry = (path: string): ExportTextureCategoryEntry | null => {
-      const file = this.vfs.get(path);
+      const file = sourceVfs.get(path);
       if (!file) return null;
       const objectUrl = URL.createObjectURL(file);
       this.exportTextureThumbUrls.push(objectUrl);
@@ -2470,11 +2646,11 @@ export class SceneViewerApp {
       if (draw.key !== "untextured") baseColorPaths.add(draw.key);
 
       const normalBinding = this.findDrawTextureBinding(draw, "normal map");
-      const normalPath = normalBinding ? this.resolveTexturePath(draw, normalBinding.textureFile) : null;
+      const normalPath = normalBinding ? this.resolveTexturePath(draw, normalBinding.textureFile, sourceVfs) : null;
       if (normalPath) normalPaths.add(normalPath);
 
       const roughnessBinding = this.findDrawTextureBinding(draw, "metalness / roughness");
-      const roughnessPath = roughnessBinding ? this.resolveTexturePath(draw, roughnessBinding.textureFile) : null;
+      const roughnessPath = roughnessBinding ? this.resolveTexturePath(draw, roughnessBinding.textureFile, sourceVfs) : null;
       if (roughnessPath) metallicRoughnessPaths.add(roughnessPath);
     }
 
@@ -3180,8 +3356,9 @@ export class SceneViewerApp {
   }
 
   private handleStartExport(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): void {
+    const sourceDraws = this.exportDraws();
     const draws = selectedIndices
-      .map((index) => ({ index, draw: this.loadedDraws[index] }))
+      .map((index) => ({ index, draw: sourceDraws[index] }))
       .filter((entry): entry is { index: number; draw: LoadedDraw } => !!entry.draw);
     if (draws.length === 0) {
       return;
@@ -3207,9 +3384,12 @@ export class SceneViewerApp {
       const entries: AppExportEntry[] = entryLists.flat();
 
       const group = this.sceneManager.getContentGroup();
-      const sceneTransform: ExportSceneTransform = posed
-        ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
-        : { quaternion: new THREE.Quaternion(), scale: 1 };
+      // Saved items arrive with their pose already baked into the vertices
+      // (see buildSavedExportSource()), so they need no scene transform.
+      const sceneTransform: ExportSceneTransform =
+        posed && !this.exportSource
+          ? { quaternion: this.getActiveSceneRotation(), scale: group?.scale.x || this.fixedScale || 1 }
+          : { quaternion: new THREE.Quaternion(), scale: 1 };
 
       if (exportOptions.resizeExportedObject) {
         this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
@@ -3252,11 +3432,13 @@ export class SceneViewerApp {
    * the .glb, which is independent of wanting height maps. */
   private collectHeightMapSources(selectedIndices: number[], exportOptions: AppConfiguration["exportOptions"]): string[] {
     const paths = new Set<string>();
+    const sourceDraws = this.exportDraws();
+    const sourceVfs = this.exportVfs();
     for (const index of selectedIndices) {
-      const draw = this.loadedDraws[index];
+      const draw = sourceDraws[index];
       if (!draw) continue;
       const binding = this.findDrawTextureBinding(draw, "normal map");
-      const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
+      const path = binding ? this.resolveTexturePath(draw, binding.textureFile, sourceVfs) : null;
       if (path && !exportOptions.normalTextures.excludedPaths.includes(path)) paths.add(path);
     }
     return Array.from(paths);
@@ -3296,7 +3478,7 @@ export class SceneViewerApp {
 
       const item = loading.log(`Height map: ${fileName}`, { current: i, total: sources.length });
       try {
-        const texture = await this.textures.load(this.vfs, path);
+        const texture = await this.exportTextures().load(this.exportVfs(), path);
         const image = texture?.image as HTMLCanvasElement | undefined;
         if (!image) throw new Error("normal map could not be decoded");
 
@@ -3441,8 +3623,8 @@ export class SceneViewerApp {
       binding: TextureBinding | null,
       category: ExportTextureCategoryOptions,
     ): Promise<THREE.Texture | null> => {
-      const path = binding ? this.resolveTexturePath(draw, binding.textureFile) : null;
-      return this.shouldExportTexture(path, category) ? this.textures.load(this.vfs, path!) : null;
+      const path = binding ? this.resolveTexturePath(draw, binding.textureFile, this.exportVfs()) : null;
+      return this.shouldExportTexture(path, category) ? this.exportTextures().load(this.exportVfs(), path!) : null;
     };
 
     const [normal, metallicRoughness] = await Promise.all([
@@ -3472,7 +3654,7 @@ export class SceneViewerApp {
     // .mtl file instead).
     const includeBaseColor = this.shouldExportTexture(draw.key === "untextured" ? null : draw.key, exportOptions.baseColorTextures);
     const material = includeBaseColor ? draw.material : this.getUntexturedMaterial();
-    const baseName = `Draw #${index} (eid ${draw.draw.eventId})`;
+    const baseName = this.exportSource?.names.get(draw) ?? `Draw #${index} (eid ${draw.draw.eventId})`;
 
     const { normal: normalTexture, metallicRoughness: metallicRoughnessTexture } = await this.loadAuxiliaryDrawTextures(
       draw,
@@ -3485,7 +3667,9 @@ export class SceneViewerApp {
     // remembered by file name for the zip's height_maps.json.
     const heightMode = exportOptions.heightMaps.mode;
     const normalSourceBinding = this.findDrawTextureBinding(draw, "normal map");
-    const normalSourcePath = normalSourceBinding ? this.resolveTexturePath(draw, normalSourceBinding.textureFile) : null;
+    const normalSourcePath = normalSourceBinding
+      ? this.resolveTexturePath(draw, normalSourceBinding.textureFile, this.exportVfs())
+      : null;
     const heightFile = normalSourcePath ? heightMaps.get(normalSourcePath) : undefined;
     const auxTextures = {
       ...(normalTexture ? { normalTexture } : {}),
@@ -3618,6 +3802,9 @@ export class SceneViewerApp {
   }
 
   private describeTextureType(binding: { bindPoint: number; name: string | null; textureFile: string | null }): string {
+    // Saved items label their bindings with these exact kinds (see
+    // buildSavedExportSource()); trust that over guessing from file names.
+    if (binding.name === "normal map" || binding.name === "metalness / roughness") return binding.name;
     const haystack = `${binding.bindPoint} ${binding.name ?? ""} ${binding.textureFile ?? ""}`.toLowerCase();
     if (/normal|bump|height|detail/.test(haystack)) return "normal map";
     if (/metal|rough|gloss|spec|reflect/.test(haystack)) return "metalness / roughness";
@@ -3908,8 +4095,9 @@ export class SceneViewerApp {
     this.disposeExportMeshPreview();
     const host = this.el<HTMLElement>("export-mesh-export-preview");
 
-    const draws = this.getExportIndices()
-      .map((i) => this.loadedDraws[i])
+    const sourceDraws = this.exportDraws();
+    const draws = this.exportIndices()
+      .map((i) => sourceDraws[i])
       .filter((d): d is LoadedDraw => !!d);
     if (draws.length === 0) return;
 
@@ -3918,7 +4106,8 @@ export class SceneViewerApp {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
       textured: exportOptions.baseColorTextures.enabled,
-      sceneRotation: this.getActiveSceneRotation(),
+      // Saved items are already posed in world space (see buildSavedExportSource()).
+      sceneRotation: this.exportSource ? new THREE.Quaternion() : this.getActiveSceneRotation(),
     });
   }
 
@@ -4090,7 +4279,7 @@ export class SceneViewerApp {
     window.addEventListener("pointerup", onUp, { once: true });
   }
 
-  private resolveTexturePath(draw: LoadedDraw, textureFile: string | null): string | null {
+  private resolveTexturePath(draw: LoadedDraw, textureFile: string | null, vfs: VirtualFileSystem = this.vfs): string | null {
     if (!textureFile) return null;
 
     const raw = textureFile.replace(/\\/g, "/").replace(/^\.\//, "");
@@ -4109,11 +4298,11 @@ export class SceneViewerApp {
     ]);
 
     for (const candidate of candidates) {
-      const resolved = this.vfs.get(candidate);
+      const resolved = vfs.get(candidate);
       if (resolved) return candidate;
     }
 
-    for (const key of this.vfs.keys()) {
+    for (const key of vfs.keys()) {
       const normalized = key.replace(/\\/g, "/");
       if (normalized === raw || normalized.endsWith(`/${raw}`) || normalized.endsWith(`/${baseName}`)) {
         return normalized;

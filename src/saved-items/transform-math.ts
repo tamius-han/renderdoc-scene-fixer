@@ -360,3 +360,58 @@ export function computeArrangement(entries: ArrangeEntry[]): Map<string, Vec3> {
   });
   return result;
 }
+
+// ------------------------------------------------------------ baking (export)
+
+/** Positions run through `m` (flat xyz array in, plain number[] out). */
+export function transformPositions(positions: ArrayLike<number>, m: Mat4): number[] {
+  const out = new Array<number>(positions.length);
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    const x = positions[i];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
+    out[i] = m[0] * x + m[4] * y + m[8] * z + m[12];
+    out[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+    out[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+  }
+  return out;
+}
+
+/**
+ * Normals run through the inverse-transpose of `m`'s upper 3x3 (the correct
+ * transform for normals - plain `m` skews them under non-uniform scale, which
+ * is exactly what a world-axis scale or a rotate-then-scale produces) and
+ * re-normalised. Degenerate (zero-length) normals are left as zero.
+ */
+export function transformNormals(normals: ArrayLike<number>, m: Mat4): number[] {
+  // Cofactor matrix of the 3x3 = det * inverse-transpose. Multiplying by
+  // sign(det) keeps normals consistent with the (possibly mirrored) winding.
+  const a = m[0], b = m[4], c = m[8];
+  const d = m[1], e = m[5], f = m[9];
+  const g = m[2], h = m[6], i = m[10];
+  const c00 = e * i - f * h, c01 = f * g - d * i, c02 = d * h - e * g;
+  const c10 = c * h - b * i, c11 = a * i - c * g, c12 = b * g - a * h;
+  const c20 = b * f - c * e, c21 = c * d - a * f, c22 = a * e - b * d;
+  const det = a * c00 + b * c01 + c * c02;
+  const s = det < 0 ? -1 : 1;
+
+  const out = new Array<number>(normals.length);
+  for (let k = 0; k + 2 < normals.length; k += 3) {
+    const x = normals[k];
+    const y = normals[k + 1];
+    const z = normals[k + 2];
+    let nx = s * (c00 * x + c01 * y + c02 * z);
+    let ny = s * (c10 * x + c11 * y + c12 * z);
+    let nz = s * (c20 * x + c21 * y + c22 * z);
+    const len = Math.hypot(nx, ny, nz);
+    if (len > 1e-12) {
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    }
+    out[k] = nx;
+    out[k + 1] = ny;
+    out[k + 2] = nz;
+  }
+  return out;
+}

@@ -82,6 +82,8 @@ Things worth knowing:
 
 **View saved items** (next to *Fix & export*) swaps the draw-call list for the saved list. With an item selected: **G** move, **R** rotate, **S** scale, **Delete** remove (Ctrl+Z / Ctrl+Y undo/redo). While moving/rotating/scaling, **X/Y/Z** locks to that world axis and **Shift+X/Y/Z** locks to the plane perpendicular to it; click/Enter confirms, right-click/Esc cancels. **Arrange** lines every saved item up along +X with spacing (bottoms on y=0, centred on z=0). Double-click a name to rename.
 
+**Fix & export** works from the saved-items view too (also Ctrl+E): it exports the selected saved items, or all of them if none is selected, through the normal export dialog - same texture pickers, height maps and options. *Output* geometry is exported in each item's current pose (move/rotate/scale/arrange baked into the vertices); *input* geometry is exported raw, as for a normal draw call, so items' moves don't apply to it.
+
 ## Local dev
 
 Perform the usual:
