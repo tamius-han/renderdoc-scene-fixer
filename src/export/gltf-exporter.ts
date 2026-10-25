@@ -55,6 +55,13 @@ export interface ExportMeshEntry {
   /** Written into the normalTexture slot INSTEAD of `normalTexture` when
    * set ("replace normal maps" height-map mode). */
   normalImage?: ExportEmbeddedImage;
+  /** When set, positions/normals/uvs are per-VERTEX (not per-corner) arrays
+   * and this is the triangle index list into them. The exporter then uses
+   * them exactly as given and does NOT run its own weldVertices() on the
+   * entry - that merge only compares position/normal/uv, so it would undo
+   * decisions mesh-tools/weld.ts made deliberately (e.g. keeping a vertex
+   * unwelded because merging it would be non-manifold). */
+  indices?: number[];
 }
 
 /** The overall scene orientation/scale to bake into a single root node that
@@ -463,7 +470,9 @@ export function buildGlbBlob(
   };
 
   meshes.forEach((entry) => {
-    const welded = weldVertices(entry.positions, entry.normals, entry.uvs);
+    const welded = entry.indices
+      ? { positions: entry.positions, normals: entry.normals, uvs: entry.uvs, indices: entry.indices }
+      : weldVertices(entry.positions, entry.normals, entry.uvs);
     const vertexCount = welded.positions.length / 3;
 
     const positionView = addBufferView(floatArrayToBytes(welded.positions), TARGET_ARRAY_BUFFER);

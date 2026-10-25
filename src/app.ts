@@ -21,6 +21,7 @@ import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, ParsedOBJ, TextureBinding } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
+import { weldGeometry } from "./mesh-tools/weld";
 import { buildGlbBlob, type ExportEmbeddedImage, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { encodeGrayscale16Png } from "./texture-tools/png16";
 import { buildZip, type ZipEntry } from "./texture-tools/zip";
@@ -3394,6 +3395,12 @@ export class SceneViewerApp {
       if (exportOptions.resizeExportedObject) {
         this.applyExportResize(entries, sceneTransform, exportOptions.approximateHeight);
       }
+      // Welding runs after the resize (so its distances can be expressed in
+      // FINAL export units) and before move-to-origin (so the pushed-apart
+      // vertices are part of the bounds that gets centered).
+      if (exportOptions.weldGeometry) {
+        this.applyExportWeld(entries, sceneTransform.scale, exportOptions.weldOptions);
+      }
       if (exportOptions.moveToOrigin) {
         this.applyExportMoveToOrigin(entries, sceneTransform);
       }
@@ -3770,6 +3777,30 @@ export class SceneViewerApp {
     }
 
     return found ? { min, max } : null;
+  }
+
+  /** "Weld geometry": replaces each entry's flat per-corner geometry with the
+   * welded, indexed result of mesh-tools/weld.ts (see that file for the
+   * rules - UV-seam bridging, opposing normals, manifold-safe merging).
+   * `scale` is the scene transform's uniform scale, which the .glb applies
+   * on top of the raw vertex data; the dialog's distances are in final
+   * (scaled) units, so they're divided by it to get raw-data distances. */
+  private applyExportWeld(entries: ExportMeshEntry[], scale: number, options: AppConfiguration["exportOptions"]["weldOptions"]): void {
+    const rawPerUnit = scale > 1e-12 ? 1 / scale : 1;
+    for (const entry of entries) {
+      const result = weldGeometry(entry, {
+        positionTolerance: options.mergeDistance * rawPerUnit,
+        uvTolerance: options.uvTolerance,
+        opposingAngleDegrees: options.opposingAngle,
+        separationDistance: options.pushDistance * rawPerUnit,
+      });
+      console.info(`[weld] ${entry.name}:`, result.stats);
+      entry.positions = result.positions;
+      entry.normals = result.normals;
+      entry.uvs = result.uvs;
+      entry.indices = result.indices;
+      entry.bounds = computeBounds(result.positions);
+    }
   }
 
   private applyExportResize(entries: ExportMeshEntry[], sceneTransform: ExportSceneTransform, targetHeight: number): void {

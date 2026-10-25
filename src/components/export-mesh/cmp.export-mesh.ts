@@ -60,6 +60,12 @@ export class ExportMesh extends Overlay {
     litShadingCheckbox: HTMLInputElement;
     splitLoosePartsCheckbox: HTMLInputElement;
     fillHolesCheckbox: HTMLInputElement;
+    weldGeometryCheckbox: HTMLInputElement;
+    weldOptionsContainer: HTMLElement;
+    weldPushInput: HTMLInputElement;
+    weldMergeInput: HTMLInputElement;
+    weldUvInput: HTMLInputElement;
+    weldAngleInput: HTMLInputElement;
     resizeExportedCheckbox: HTMLInputElement;
     approximateHeightInput: HTMLInputElement;
     moveToOriginCheckbox: HTMLInputElement;
@@ -114,6 +120,12 @@ export class ExportMesh extends Overlay {
     this.elements.litShadingCheckbox = this.element.querySelector('#export-options-lit-shading') as HTMLInputElement;
     this.elements.splitLoosePartsCheckbox = this.element.querySelector('#export-options-split-loose-parts') as HTMLInputElement;
     this.elements.fillHolesCheckbox = this.element.querySelector('#export-options-fill-holes') as HTMLInputElement;
+    this.elements.weldGeometryCheckbox = this.element.querySelector('#export-options-weld-geometry') as HTMLInputElement;
+    this.elements.weldOptionsContainer = this.element.querySelector('#export-options-weld-options') as HTMLElement;
+    this.elements.weldPushInput = this.element.querySelector('#export-options-weld-push') as HTMLInputElement;
+    this.elements.weldMergeInput = this.element.querySelector('#export-options-weld-merge') as HTMLInputElement;
+    this.elements.weldUvInput = this.element.querySelector('#export-options-weld-uv') as HTMLInputElement;
+    this.elements.weldAngleInput = this.element.querySelector('#export-options-weld-angle') as HTMLInputElement;
     this.elements.resizeExportedCheckbox = this.element.querySelector('#export-options-resize-exported') as HTMLInputElement;
     this.elements.approximateHeightInput = this.element.querySelector('#export-options-approximate-height') as HTMLInputElement;
     this.elements.moveToOriginCheckbox = this.element.querySelector('#export-options-move-to-origin') as HTMLInputElement;
@@ -155,6 +167,12 @@ export class ExportMesh extends Overlay {
     this.elements.litShadingCheckbox.checked = this.appConfig.config.exportOptions.litShading;
     this.elements.splitLoosePartsCheckbox.checked = this.appConfig.config.exportOptions.splitLooseParts;
     this.elements.fillHolesCheckbox.checked = this.appConfig.config.exportOptions.fillHoles;
+    this.elements.weldGeometryCheckbox.checked = this.appConfig.config.exportOptions.weldGeometry;
+    const weldOptions = this.appConfig.config.exportOptions.weldOptions;
+    this.elements.weldPushInput.value = weldOptions.pushDistance.toString();
+    this.elements.weldMergeInput.value = weldOptions.mergeDistance.toString();
+    this.elements.weldUvInput.value = weldOptions.uvTolerance.toString();
+    this.elements.weldAngleInput.value = weldOptions.opposingAngle.toString();
     this.elements.resizeExportedCheckbox.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
     this.elements.resizeExportedCheckbox.checked = this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.value = this.appConfig.config.exportOptions.approximateHeight.toString();
@@ -186,6 +204,10 @@ export class ExportMesh extends Overlay {
     this.elements.litShadingCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.weldGeometryCheckbox.addEventListener('change', () => this.updateExportOptions());
+    for (const input of [this.elements.weldPushInput, this.elements.weldMergeInput, this.elements.weldUvInput, this.elements.weldAngleInput]) {
+      input.addEventListener('input', () => this.updateExportOptions());
+    }
     this.elements.resizeExportedCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.moveToOriginCheckbox.addEventListener('change', () => this.updateExportOptions());
 
@@ -232,6 +254,9 @@ export class ExportMesh extends Overlay {
     this.elements.fillHolesCheckbox.disabled = !splitEnabled;
     this.elements.fillHolesCheckbox.classList.toggle('disabled', !splitEnabled);
     if (!splitEnabled) this.elements.fillHolesCheckbox.checked = false;
+
+    // The weld tunables only show while "Weld geometry" is checked.
+    this.elements.weldOptionsContainer.classList.toggle('hidden', !this.elements.weldGeometryCheckbox.checked);
 
     const resizeEnabled = this.elements.resizeExportedCheckbox.checked;
     this.elements.approximateHeightInput.disabled = !resizeEnabled;
@@ -476,6 +501,18 @@ export class ExportMesh extends Overlay {
     this.syncDependentDisabledStates(); // may force-uncheck fillHoles/clear approximateHeight's enabled state above
 
     this.appConfig.config.exportOptions.fillHoles = this.elements.fillHolesCheckbox.checked;
+    this.appConfig.config.exportOptions.weldGeometry = this.elements.weldGeometryCheckbox.checked;
+    // Weld tunables: a field that's empty/invalid/out of range keeps its last
+    // good value rather than clobbering the config mid-typing.
+    const weldOptions = this.appConfig.config.exportOptions.weldOptions;
+    const readNumber = (input: HTMLInputElement, min: number, max: number, fallback: number): number => {
+      const value = parseFloat(input.value);
+      return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+    };
+    weldOptions.pushDistance = readNumber(this.elements.weldPushInput, 0, Infinity, weldOptions.pushDistance);
+    weldOptions.mergeDistance = readNumber(this.elements.weldMergeInput, 0, Infinity, weldOptions.mergeDistance);
+    weldOptions.uvTolerance = readNumber(this.elements.weldUvInput, 0, 1, weldOptions.uvTolerance);
+    weldOptions.opposingAngle = readNumber(this.elements.weldAngleInput, 90, 180, weldOptions.opposingAngle);
     this.appConfig.config.exportOptions.resizeExportedObject = this.elements.resizeExportedCheckbox.checked;
     this.appConfig.config.exportOptions.moveToOrigin = this.elements.moveToOriginCheckbox.checked;
     this.appConfig.config.exportOptions.litShading = this.elements.litShadingCheckbox.checked;

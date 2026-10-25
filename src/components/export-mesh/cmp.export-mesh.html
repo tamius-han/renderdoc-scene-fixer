@@ -35,6 +35,27 @@
             <div class="field row">
               <input type="checkbox" id="export-options-fill-holes"> Fill holes
             </div>
+            <div class="field row" title="Merge touching triangles into shared vertices. UV seams are kept intact (bridged with invisible zero-width triangles); back-to-back triangles are nudged apart along their normals.">
+              <input type="checkbox" id="export-options-weld-geometry"> Weld geometry
+            </div>
+            <div id="export-options-weld-options" class="hidden pl-6 mb-2">
+              <div class="field row" title="How far triangles with opposing normals (e.g. the two sides of double-sided geometry) are pushed apart along their normals. In export units (after resizing).">
+                <div>Push opposing triangles by (units):</div>
+                <input type="number" id="export-options-weld-push" min="0" step="0.01">
+              </div>
+              <div class="field row" title="Vertices closer together than this are considered to be in the same place and may be welded. In export units (after resizing).">
+                <div>Merge distance (units):</div>
+                <input type="number" id="export-options-weld-merge" min="0" step="0.0001">
+              </div>
+              <div class="field row" title="UV coordinates differing by more than this (per axis, 0-1 range) are kept apart as a UV seam, bridged with invisible zero-width triangles.">
+                <div>UV tolerance:</div>
+                <input type="number" id="export-options-weld-uv" min="0" step="0.0001">
+              </div>
+              <div class="field row" title="Triangles whose normals differ by more than this angle are treated as opposing: never welded together and pushed apart. 180 = only exactly back-to-back.">
+                <div>Opposing normals angle (degrees):</div>
+                <input type="number" id="export-options-weld-angle" min="90" max="180" step="1">
+              </div>
+            </div>
             <div class="field row">
               <input type="checkbox" id="export-options-resize-exported"> Resize exported object
             </div>

@@ -82,6 +82,27 @@ export interface AppConfiguration {
   exportOptions: {
     splitLooseParts: boolean;
     fillHoles: boolean;
+    /** "Weld geometry" - merges triangles that touch (same position within a
+     * tiny tolerance) into shared vertices so the exported mesh is one
+     * connected surface, UV-seam- and opposing-normal-aware. See
+     * mesh-tools/weld.ts for the full rules. Off by default. */
+    weldGeometry: boolean;
+    /** Tunables for "Weld geometry" (see mesh-tools/weld.ts). Distances are
+     * in FINAL export units - i.e. after "Resize exported object" (same
+     * units as "Approximate height") - not raw capture units. */
+    weldOptions: {
+      /** How far triangles with opposing normals (double-sided geometry) are
+       * pushed apart along their normals. */
+      pushDistance: number;
+      /** Vertices closer than this count as "at the same place" and may be merged. */
+      mergeDistance: number;
+      /** Max per-axis UV difference still treated as "the same UV"; larger
+       * differences are kept as UV seams (bridged with zero-width triangles). */
+      uvTolerance: number;
+      /** Triangles whose normals differ by more than this many degrees are
+       * "opposing": never welded, and pushed apart. */
+      opposingAngle: number;
+    };
     resizeExportedObject: boolean;
     approximateHeight: number;
     moveToOrigin: boolean;
@@ -189,6 +210,8 @@ export class Config {
     exportOptions: {
       splitLooseParts: true,
       fillHoles: true,
+      weldGeometry: false,
+      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162 },
       resizeExportedObject: true,
       approximateHeight: 100,
       moveToOrigin: true,
@@ -347,6 +370,7 @@ export class Config {
           ...saved.exportOptions?.metallicRoughnessTextures,
         },
         heightMaps: { ...defaults.exportOptions.heightMaps, ...saved.exportOptions?.heightMaps },
+        weldOptions: { ...defaults.exportOptions.weldOptions, ...saved.exportOptions?.weldOptions },
       },
       objectFiltering: {
         ...defaults.objectFiltering,
