@@ -51,6 +51,12 @@
                 <div>UV tolerance:</div>
                 <input type="number" id="export-options-weld-uv" min="0" step="0.0001">
               </div>
+              <div class="field row" title="Also weld separate draw calls that share an edge. They're exported as one mesh with one material slot per draw call, sharing vertices.">
+                <input type="checkbox" id="export-options-weld-across-draws"> Weld across draw calls
+              </div>
+              <div class="field row" title="Where pushing opposing triangles apart left a gap between open edges (e.g. the rim of a double-sided sheet), bridge it with a strip of triangles so the shell is closed.">
+                <input type="checkbox" id="export-options-weld-bridge-gaps"> Bridge gaps between pushed-apart edges
+              </div>
               <div class="field row" title="Triangles whose normals differ by more than this angle are treated as opposing: never welded together and pushed apart. 180 = only exactly back-to-back.">
                 <div>Opposing normals angle (degrees):</div>
                 <input type="number" id="export-options-weld-angle" min="90" max="180" step="1">

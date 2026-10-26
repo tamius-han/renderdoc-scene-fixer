@@ -62,6 +62,13 @@ export interface ExportMeshEntry {
    * decisions mesh-tools/weld.ts made deliberately (e.g. keeping a vertex
    * unwelded because merging it would be non-manifold). */
   indices?: number[];
+  /** Entries carrying the SAME object here (set by app.ts when "Weld geometry"
+   * welds draw calls that share an edge) also share the exact same
+   * positions/normals/uvs arrays, with their own `indices` into them. They are
+   * exported as primitives of ONE glTF mesh/node, all pointing at one set of
+   * vertex accessors - so the shared vertices really are shared in the file -
+   * while each primitive keeps its own material. */
+  weldGroup?: object;
 }
 
 /** The overall scene orientation/scale to bake into a single root node that
@@ -321,9 +328,10 @@ interface GltfJson {
 }
 
 /** Builds a single, self-contained .glb (binary glTF 2.0) file from the
- * given meshes - each becomes its own named node/object, so a "drag and
- * drop into Blender" (or File > Import > glTF 2.0) load shows a list of
- * separate objects rather than one merged mesh. Every material's texture
+ * given meshes - each becomes its own named node/object (except meshes
+ * welded together via ExportMeshEntry.weldGroup, which become one node with a
+ * primitive per mesh), so a "drag and drop into Blender" (or File > Import >
+ * glTF 2.0) load shows a list of separate objects rather than one merged mesh. Every material's texture
  * (if any) is embedded directly in the binary payload as PNG data - there
  * are no external file references, so the one .glb is everything Blender
  * needs.
@@ -469,33 +477,48 @@ export function buildGlbBlob(
     return materialIndex;
   };
 
+  // Entries welded together (same `weldGroup`) share one set of vertex
+  // accessors and become primitives of a single mesh/node.
+  const sharedVertexData = new Map<object, { position: number; normal: number; uv: number; meshIndex: number }>();
+
   meshes.forEach((entry) => {
+    // A mesh whose triangles all collapsed while welding has nothing to export.
+    if (entry.indices && entry.indices.length === 0) return;
+
     const welded = entry.indices
       ? { positions: entry.positions, normals: entry.normals, uvs: entry.uvs, indices: entry.indices }
       : weldVertices(entry.positions, entry.normals, entry.uvs);
     const vertexCount = welded.positions.length / 3;
 
-    const positionView = addBufferView(floatArrayToBytes(welded.positions), TARGET_ARRAY_BUFFER);
-    const positionAccessor = accessors.length;
-    accessors.push({
-      bufferView: positionView,
-      componentType: COMPONENT_TYPE_FLOAT,
-      count: vertexCount,
-      type: "VEC3",
-      // Still the pre-weld, whole-mesh bounds computed upstream (see
-      // app.ts) - welding only merges duplicate corners, it can't change
-      // the mesh's actual extent, so these remain correct.
-      min: entry.bounds.min.toArray(),
-      max: entry.bounds.max.toArray(),
-    });
+    const shared = entry.weldGroup ? sharedVertexData.get(entry.weldGroup) : undefined;
+    let positionAccessor: number, normalAccessor: number, uvAccessor: number;
+    if (shared) {
+      positionAccessor = shared.position;
+      normalAccessor = shared.normal;
+      uvAccessor = shared.uv;
+    } else {
+      const positionView = addBufferView(floatArrayToBytes(welded.positions), TARGET_ARRAY_BUFFER);
+      positionAccessor = accessors.length;
+      accessors.push({
+        bufferView: positionView,
+        componentType: COMPONENT_TYPE_FLOAT,
+        count: vertexCount,
+        type: "VEC3",
+        // Whole-mesh bounds computed upstream (see app.ts). Welding only merges
+        // duplicate corners, so for the plain path they stay correct; the
+        // "Weld geometry" step recomputes them for its own (moved) vertices.
+        min: entry.bounds.min.toArray(),
+        max: entry.bounds.max.toArray(),
+      });
 
-    const normalView = addBufferView(floatArrayToBytes(welded.normals), TARGET_ARRAY_BUFFER);
-    const normalAccessor = accessors.length;
-    accessors.push({ bufferView: normalView, componentType: COMPONENT_TYPE_FLOAT, count: vertexCount, type: "VEC3" });
+      const normalView = addBufferView(floatArrayToBytes(welded.normals), TARGET_ARRAY_BUFFER);
+      normalAccessor = accessors.length;
+      accessors.push({ bufferView: normalView, componentType: COMPONENT_TYPE_FLOAT, count: vertexCount, type: "VEC3" });
 
-    const uvView = addBufferView(floatArrayToBytes(flipUvV(welded.uvs)), TARGET_ARRAY_BUFFER);
-    const uvAccessor = accessors.length;
-    accessors.push({ bufferView: uvView, componentType: COMPONENT_TYPE_FLOAT, count: vertexCount, type: "VEC2" });
+      const uvView = addBufferView(floatArrayToBytes(flipUvV(welded.uvs)), TARGET_ARRAY_BUFFER);
+      uvAccessor = accessors.length;
+      accessors.push({ bufferView: uvView, componentType: COMPONENT_TYPE_FLOAT, count: vertexCount, type: "VEC2" });
+    }
 
     const { bytes: indexBytes, componentType: indexComponentType } = indicesToBytes(welded.indices, vertexCount);
     const indexView = addBufferView(indexBytes, TARGET_ELEMENT_ARRAY_BUFFER);
@@ -503,20 +526,20 @@ export function buildGlbBlob(
     accessors.push({ bufferView: indexView, componentType: indexComponentType, count: welded.indices.length, type: "SCALAR" });
 
     const materialIndex = getOrCreateMaterial(entry, entry.name);
+    const primitive = {
+      attributes: { POSITION: positionAccessor, NORMAL: normalAccessor, TEXCOORD_0: uvAccessor },
+      indices: indexAccessor,
+      material: materialIndex,
+    };
 
+    if (shared) {
+      gltfMeshes[shared.meshIndex].primitives.push(primitive);
+      return;
+    }
     const meshIndex = gltfMeshes.length;
-    gltfMeshes.push({
-      name: entry.name,
-      primitives: [
-        {
-          attributes: { POSITION: positionAccessor, NORMAL: normalAccessor, TEXCOORD_0: uvAccessor },
-          indices: indexAccessor,
-          material: materialIndex,
-        },
-      ],
-    });
-
+    gltfMeshes.push({ name: entry.name, primitives: [primitive] });
     nodes.push({ name: entry.name, mesh: meshIndex });
+    if (entry.weldGroup) sharedVertexData.set(entry.weldGroup, { position: positionAccessor, normal: normalAccessor, uv: uvAccessor, meshIndex });
   });
 
   // One root node carries the scene's current orientation/scale; every

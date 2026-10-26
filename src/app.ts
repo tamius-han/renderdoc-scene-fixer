@@ -21,7 +21,7 @@ import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, ParsedOBJ, TextureBinding } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
-import { weldGeometry } from "./mesh-tools/weld";
+import { weldEntries } from "./mesh-tools/weld";
 import { buildGlbBlob, type ExportEmbeddedImage, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { encodeGrayscale16Png } from "./texture-tools/png16";
 import { buildZip, type ZipEntry } from "./texture-tools/zip";
@@ -3787,19 +3787,32 @@ export class SceneViewerApp {
    * (scaled) units, so they're divided by it to get raw-data distances. */
   private applyExportWeld(entries: ExportMeshEntry[], scale: number, options: AppConfiguration["exportOptions"]["weldOptions"]): void {
     const rawPerUnit = scale > 1e-12 ? 1 / scale : 1;
-    for (const entry of entries) {
-      const result = weldGeometry(entry, {
-        positionTolerance: options.mergeDistance * rawPerUnit,
-        uvTolerance: options.uvTolerance,
-        opposingAngleDegrees: options.opposingAngle,
-        separationDistance: options.pushDistance * rawPerUnit,
+    // All entries are welded in one go so draw calls sharing an edge end up
+    // welded to each other; each group of linked entries then shares one
+    // vertex buffer (see ExportMeshEntry.weldGroup), every entry keeping its
+    // own triangles (and so its own material).
+    const result = weldEntries(entries, {
+      positionTolerance: options.mergeDistance * rawPerUnit,
+      uvTolerance: options.uvTolerance,
+      opposingAngleDegrees: options.opposingAngle,
+      separationDistance: options.pushDistance * rawPerUnit,
+      bridgePushedGaps: options.bridgePushedGaps,
+      acrossEntries: options.weldAcrossDrawCalls,
+    });
+    console.info(`[weld] ${entries.length} mesh(es) -> ${result.groups.length} group(s), ${result.crossEntryGroups} spanning several draw calls:`, result.stats);
+    for (const group of result.groups) {
+      const bounds = computeBounds(group.positions);
+      const weldGroup = group.entryIndices.length > 1 ? {} : undefined;
+      if (weldGroup) console.info(`[weld] welded together: ${group.entryIndices.map((i) => entries[i].name).join(", ")}`);
+      group.entryIndices.forEach((entryIndex, slot) => {
+        const entry = entries[entryIndex];
+        entry.positions = group.positions;
+        entry.normals = group.normals;
+        entry.uvs = group.uvs;
+        entry.indices = group.indices[slot];
+        entry.bounds = bounds;
+        entry.weldGroup = weldGroup;
       });
-      console.info(`[weld] ${entry.name}:`, result.stats);
-      entry.positions = result.positions;
-      entry.normals = result.normals;
-      entry.uvs = result.uvs;
-      entry.indices = result.indices;
-      entry.bounds = computeBounds(result.positions);
     }
   }
 

@@ -102,6 +102,12 @@ export interface AppConfiguration {
       /** Triangles whose normals differ by more than this many degrees are
        * "opposing": never welded, and pushed apart. */
       opposingAngle: number;
+      /** Also weld draw calls (separate meshes) that share an edge, exporting
+       * them as one mesh with a primitive per draw call. */
+      weldAcrossDrawCalls: boolean;
+      /** Bridge the gap between open edges that pushing opposing triangles
+       * apart opened up (e.g. the rim of a double-sided sheet). */
+      bridgePushedGaps: boolean;
     };
     resizeExportedObject: boolean;
     approximateHeight: number;
@@ -211,7 +217,7 @@ export class Config {
       splitLooseParts: true,
       fillHoles: true,
       weldGeometry: false,
-      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162 },
+      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true },
       resizeExportedObject: true,
       approximateHeight: 100,
       moveToOrigin: true,

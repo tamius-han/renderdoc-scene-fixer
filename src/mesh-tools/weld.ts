@@ -65,7 +65,16 @@
  *     (quad A1,B1,B2,A2 with A1/A2 and B1/B2 coincident in 3D) joins the two
  *     sides, so any smeared texture lookup only happens in zero-area
  *     geometry. They use the seam's own separate vertices and are added after
- *     all merging is done, so they can't be welded away. */
+ *     all merging is done, so they can't be welded away.
+ *
+ *  6. GAP BRIDGING. Open edges (one triangle only) that sit at the same two
+ *     places but were pushed apart in step 3 - typically the rim of a
+ *     double-sided sheet - are joined by a strip of two triangles that re-uses
+ *     their vertices, so the thin shell comes out closed rather than slit
+ *     open. Skipped for any strip that would make an edge non-manifold.
+ *
+ * weldEntries() below runs all of this over SEVERAL meshes (draw calls) at
+ * once, so meshes that share an edge are welded to each other too. */
 
 export interface WeldInput {
   positions: number[];
@@ -85,6 +94,9 @@ export interface WeldOptions {
   /** How far opposing-normal vertices are pushed along their normal (same
    * units as the positions). */
   separationDistance?: number;
+  /** Close the gap between pushed-apart open edges with a strip of triangles
+   * (default true). See the header comment, rule 6. */
+  bridgePushedGaps?: boolean;
 }
 
 export interface WeldStats {
@@ -107,6 +119,8 @@ export interface WeldStats {
   layeredPlaces: number;
   /** Zero-width triangles added to keep UV seams connected. */
   seamBridgeTriangles: number;
+  /** Triangles added to close the gap between pushed-apart open edges. */
+  gapBridgeTriangles: number;
 }
 
 export interface WeldResult {
@@ -119,6 +133,11 @@ export interface WeldResult {
   /** For each INPUT corner, the output vertex it ended up as (-1 if its
    * triangle was dropped as collapsed). Handy for diagnostics and tests. */
   vertexOfCorner: Int32Array;
+  /** Owner (the value from `triangleOwners`, else 0) of every output triangle.
+   * Added bridge triangles belong to the owner of the triangle they bridge from. */
+  triangleOwner: number[];
+  /** Flat (ownerA, ownerB) pairs: owners that ended up sharing an edge. */
+  ownerLinks: number[];
   stats: WeldStats;
 }
 
@@ -133,7 +152,7 @@ function hasUVMap(uvs: number[]): boolean {
   return false;
 }
 
-export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldResult {
+export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangleOwners?: Int32Array): WeldResult {
   const { positions, normals, uvs } = data;
   const cornerCount = Math.floor(positions.length / 3);
   const triCount = Math.floor(cornerCount / 3);
@@ -150,8 +169,9 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
     pushedVertices: 0,
     layeredPlaces: 0,
     seamBridgeTriangles: 0,
+    gapBridgeTriangles: 0,
   };
-  if (triCount === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), stats };
+  if (triCount === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), triangleOwner: [], ownerLinks: [], stats };
 
   const uvTol = options.uvTolerance ?? DEFAULT_WELD_UV_TOLERANCE;
   const opposingAngle = Math.min(180, Math.max(0, options.opposingAngleDegrees ?? DEFAULT_WELD_OPPOSING_ANGLE));
@@ -226,7 +246,7 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
     if (a !== b && b !== c && a !== c) liveTris.push(t);
   }
   stats.collapsedTriangles = triCount - liveTris.length;
-  if (liveTris.length === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), stats };
+  if (liveTris.length === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), triangleOwner: [], ownerLinks: [], stats };
 
   // ---- face directions -----------------------------------------------------------
   // faceNormal: what the triangle "faces" per its supplied vertex normals
@@ -388,6 +408,8 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
     return true;
   };
 
+  const ownerLinks: number[] = [];
+
   // The corner flags mark triangles that had an edge partner refused for
   // opposing normals - they get pushed apart in step 3 if they share a place
   // with other vertices.
@@ -486,6 +508,10 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
         used.add(x);
         used.add(y);
         stats.mergedEdges++;
+        if (triangleOwners) {
+          const ox = triangleOwners[(x / 3) | 0], oy = triangleOwners[(y / 3) | 0];
+          if (ox !== oy) ownerLinks.push(ox, oy);
+        }
       } else {
         stats.rejectedNonManifold++;
       }
@@ -631,55 +657,7 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
   }
   const ovCount = ovU.length;
 
-  // ---- triangles + 5. UV-seam bridging ----------------------------------------------------
-  const indices: number[] = [];
-  for (const t of liveTris) indices.push(ovOfCorner[t * 3], ovOfCorner[t * 3 + 1], ovOfCorner[t * 3 + 2]);
-
-  const pushBridge = (a: number, b: number, c: number): void => {
-    if (a === b || b === c || a === c) return; // a coincident pair is the same vertex - nothing to add
-    indices.push(a, b, c);
-    stats.seamBridgeTriangles++;
-  };
-
-  if (ovCount > bvCount) {
-    const bvEdgeHead = new Map<number, number>();
-    const bvEdgeNext = new Int32Array(triCount * 3).fill(-1);
-    for (const t of liveTris) {
-      for (let k = 0; k < 3; k++) {
-        const inst = t * 3 + k;
-        const a = bvOfCorner[inst], b = bvOfCorner[endCorner(inst)];
-        const key = a < b ? a * bvCount + b : b * bvCount + a;
-        const head = bvEdgeHead.get(key);
-        if (head !== undefined) bvEdgeNext[inst] = head;
-        bvEdgeHead.set(key, inst);
-      }
-    }
-    for (const head of bvEdgeHead.values()) {
-      if (bvEdgeNext[head] === -1) continue;
-      // One representative per distinct (uv variant at A, uv variant at B).
-      const reps: { ovA: number; ovB: number; forward: boolean }[] = [];
-      for (let inst = head; inst !== -1; inst = bvEdgeNext[inst]) {
-        const forward = bvOfCorner[inst] < bvOfCorner[endCorner(inst)]; // "A" = lower vertex id
-        const startOv = ovOfCorner[inst], endOv = ovOfCorner[endCorner(inst)];
-        const ovA = forward ? startOv : endOv;
-        const ovB = forward ? endOv : startOv;
-        if (!reps.some((r) => r.ovA === ovA && r.ovB === ovB)) reps.push({ ovA, ovB, forward });
-      }
-      for (let i = 0; i + 1 < reps.length; i++) {
-        const X = reps[i], Y = reps[i + 1];
-        // Wound to cancel X's own edge (and Y's, for consistent winding).
-        if (X.forward) {
-          pushBridge(X.ovB, X.ovA, Y.ovA);
-          pushBridge(Y.ovA, Y.ovB, X.ovB);
-        } else {
-          pushBridge(X.ovA, X.ovB, Y.ovB);
-          pushBridge(Y.ovB, Y.ovA, X.ovA);
-        }
-      }
-    }
-  }
-
-  // ---- emit ------------------------------------------------------------------------------------
+  // ---- output vertex attributes -----------------------------------------------------------------
   const outPositions = new Array<number>(ovCount * 3);
   const outNormals = new Array<number>(ovCount * 3);
   const outUvs = new Array<number>(ovCount * 2);
@@ -707,7 +685,272 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}): WeldRe
     outUvs[ov * 2 + 1] = ovV[ov];
   }
 
+  // ---- triangles + 5. UV-seam bridging ----------------------------------------------------
+  const ownerOfTri = (t: number): number => (triangleOwners ? triangleOwners[t] : 0);
+  const indices: number[] = [];
+  const triangleOwner: number[] = [];
+  for (const t of liveTris) {
+    indices.push(ovOfCorner[t * 3], ovOfCorner[t * 3 + 1], ovOfCorner[t * 3 + 2]);
+    triangleOwner.push(ownerOfTri(t));
+  }
+
+  const pushBridge = (a: number, b: number, c: number, owner: number): void => {
+    if (a === b || b === c || a === c) return; // a coincident pair is the same vertex - nothing to add
+    indices.push(a, b, c);
+    triangleOwner.push(owner);
+    stats.seamBridgeTriangles++;
+  };
+
+  // Edges at the welded-vertex ("bv") level, used by both bridging passes.
+  const bvEdgeHead = new Map<number, number>();
+  const bvEdgeNext = new Int32Array(triCount * 3).fill(-1);
+  for (const t of liveTris) {
+    for (let k = 0; k < 3; k++) {
+      const inst = t * 3 + k;
+      const a = bvOfCorner[inst], b = bvOfCorner[endCorner(inst)];
+      const key = a < b ? a * bvCount + b : b * bvCount + a;
+      const head = bvEdgeHead.get(key);
+      if (head !== undefined) bvEdgeNext[inst] = head;
+      bvEdgeHead.set(key, inst);
+    }
+  }
+
+  if (ovCount > bvCount) {
+    for (const head of bvEdgeHead.values()) {
+      if (bvEdgeNext[head] === -1) continue;
+      // One representative per distinct (uv variant at A, uv variant at B).
+      const reps: { ovA: number; ovB: number; forward: boolean; owner: number }[] = [];
+      for (let inst = head; inst !== -1; inst = bvEdgeNext[inst]) {
+        const forward = bvOfCorner[inst] < bvOfCorner[endCorner(inst)]; // "A" = lower vertex id
+        const startOv = ovOfCorner[inst], endOv = ovOfCorner[endCorner(inst)];
+        const ovA = forward ? startOv : endOv;
+        const ovB = forward ? endOv : startOv;
+        if (!reps.some((r) => r.ovA === ovA && r.ovB === ovB)) reps.push({ ovA, ovB, forward, owner: ownerOfTri((inst / 3) | 0) });
+      }
+      for (let i = 0; i + 1 < reps.length; i++) {
+        const X = reps[i], Y = reps[i + 1];
+        // Wound to cancel X's own edge (and Y's, for consistent winding).
+        if (X.forward) {
+          pushBridge(X.ovB, X.ovA, Y.ovA, X.owner);
+          pushBridge(Y.ovA, Y.ovB, X.ovB, X.owner);
+        } else {
+          pushBridge(X.ovA, X.ovB, Y.ovB, X.owner);
+          pushBridge(Y.ovB, Y.ovA, X.ovA, X.owner);
+        }
+      }
+    }
+  }
+
+  // ---- 6. close the gaps pushing opened up ------------------------------------------------------
+  // Two OPEN edges (each used by one triangle only) that sit at the same two
+  // places - the rim where the front and back of a double-sided sheet would
+  // have met - and that pushing has now moved apart get a strip of two
+  // triangles across the gap, wound to continue both surfaces, re-using the
+  // edges' own vertices (so the mesh stays welded: the shell comes out closed
+  // instead of with a slit all around its rim). Each strip is only added if it
+  // keeps every edge used at most once per direction and twice in total.
+  if (options.bridgePushedGaps !== false && stats.pushedVertices > 0) {
+    const isOpen = new Uint8Array(triCount * 3);
+    for (const head of bvEdgeHead.values()) if (bvEdgeNext[head] === -1) isOpen[head] = 1;
+
+    const dirUsed = new Set<number>();
+    const undUses = new Map<number, number>();
+    const undKey = (a: number, b: number): number => (a < b ? a * ovCount + b : b * ovCount + a);
+    const noteEdge = (a: number, b: number): void => {
+      dirUsed.add(a * ovCount + b);
+      const k = undKey(a, b);
+      undUses.set(k, (undUses.get(k) ?? 0) + 1);
+    };
+    const edgeFree = (a: number, b: number): boolean => !dirUsed.has(a * ovCount + b) && (undUses.get(undKey(a, b)) ?? 0) < 2;
+    for (let i = 0; i < indices.length; i += 3) {
+      noteEdge(indices[i], indices[i + 1]);
+      noteEdge(indices[i + 1], indices[i + 2]);
+      noteEdge(indices[i + 2], indices[i]);
+    }
+    const area2 = (a: number, b: number, c: number): number => {
+      const ux = outPositions[b * 3] - outPositions[a * 3], uy = outPositions[b * 3 + 1] - outPositions[a * 3 + 1], uz = outPositions[b * 3 + 2] - outPositions[a * 3 + 2];
+      const vx = outPositions[c * 3] - outPositions[a * 3], vy = outPositions[c * 3 + 1] - outPositions[a * 3 + 1], vz = outPositions[c * 3 + 2] - outPositions[a * 3 + 2];
+      return Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    };
+    const apart = (a: number, b: number): boolean =>
+      Math.hypot(outPositions[a * 3] - outPositions[b * 3], outPositions[a * 3 + 1] - outPositions[b * 3 + 1], outPositions[a * 3 + 2] - outPositions[b * 3 + 2]) > tol * 4;
+    const minArea = tol * tol;
+
+    const open: number[] = [];
+    const candidates: { x: number; y: number; dot: number }[] = [];
+    for (const head of edgeHead.values()) {
+      open.length = 0;
+      for (let inst = head; inst !== -1 && open.length < MAX_EDGE_GROUP; inst = edgeNext[inst]) if (isOpen[inst]) open.push(inst);
+      if (open.length < 2) continue;
+      candidates.length = 0;
+      for (let i = 0; i < open.length; i++) {
+        for (let j = i + 1; j < open.length; j++) {
+          const x = open[i], y = open[j];
+          if (clusterOfCorner[y] !== clusterOfCorner[endCorner(x)]) continue; // must run the opposite way
+          if (!apart(ovOfCorner[x], ovOfCorner[endCorner(y)]) || !apart(ovOfCorner[endCorner(x)], ovOfCorner[y])) continue; // not pushed apart
+          candidates.push({ x, y, dot: dotOf(faceNormal, (x / 3) | 0, (y / 3) | 0) });
+        }
+      }
+      candidates.sort((p, q) => p.dot - q.dot); // most opposed first
+      const taken = new Set<number>();
+      for (const { x, y } of candidates) {
+        if (taken.has(x) || taken.has(y)) continue;
+        // x runs A->B and y runs B->A (A, B = the two places the edge joins).
+        const aX = ovOfCorner[x], bX = ovOfCorner[endCorner(x)];
+        const bY = ovOfCorner[y], aY = ovOfCorner[endCorner(y)];
+        const strip: number[][] = [];
+        if (area2(bX, aX, aY) > minArea) strip.push([bX, aX, aY]);
+        if (area2(aY, bY, bX) > minArea) strip.push([aY, bY, bX]);
+        if (strip.length === 0) continue;
+        if (!strip.every(([a, b, c]) => edgeFree(a, b) && edgeFree(b, c) && edgeFree(c, a))) continue;
+        // (the strip's own shared diagonal is used once per direction by its two triangles - fine)
+        taken.add(x);
+        taken.add(y);
+        const owner = ownerOfTri((x / 3) | 0);
+        for (const [a, b, c] of strip) {
+          indices.push(a, b, c);
+          triangleOwner.push(owner);
+          noteEdge(a, b);
+          noteEdge(b, c);
+          noteEdge(c, a);
+          stats.gapBridgeTriangles++;
+        }
+        if (triangleOwners) {
+          const oy = ownerOfTri((y / 3) | 0);
+          if (oy !== owner) ownerLinks.push(owner, oy);
+        }
+      }
+    }
+  }
+
   stats.outputTriangles = indices.length / 3;
   stats.outputVertices = ovCount;
-  return { positions: outPositions, normals: outNormals, uvs: outUvs, indices, vertexOfCorner: ovOfCorner, stats };
+  return { positions: outPositions, normals: outNormals, uvs: outUvs, indices, vertexOfCorner: ovOfCorner, triangleOwner, ownerLinks, stats };
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Welding several meshes (draw calls) together
+// ---------------------------------------------------------------------------------------
+
+export interface WeldedGroup {
+  /** Indices (into the `entries` passed to weldEntries) welded into this group, ascending. */
+  entryIndices: number[];
+  /** Per-vertex arrays SHARED by every entry in the group. */
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  /** Triangle indices into the shared vertex arrays, one list per entry (aligned with entryIndices). */
+  indices: number[][];
+}
+
+export interface WeldEntriesResult {
+  groups: WeldedGroup[];
+  stats: WeldStats;
+  /** Groups holding more than one entry - i.e. draw calls actually welded together. */
+  crossEntryGroups: number;
+}
+
+/** Welds a list of meshes (flat per-corner arrays, all in the same space).
+ * With `acrossEntries` meshes that end up sharing at least one welded edge
+ * (or a bridged gap) come out as ONE group with a shared vertex buffer - the
+ * caller keeps each mesh's own material/identity and just points them at the
+ * shared vertices. Without it, every mesh is welded on its own. */
+export function weldEntries(entries: WeldInput[], options: WeldOptions & { acrossEntries?: boolean } = {}): WeldEntriesResult {
+  const sum = (a: WeldStats, b: WeldStats): WeldStats => ({
+    inputTriangles: a.inputTriangles + b.inputTriangles,
+    collapsedTriangles: a.collapsedTriangles + b.collapsedTriangles,
+    outputTriangles: a.outputTriangles + b.outputTriangles,
+    outputVertices: a.outputVertices + b.outputVertices,
+    mergedEdges: a.mergedEdges + b.mergedEdges,
+    rejectedNonManifold: a.rejectedNonManifold + b.rejectedNonManifold,
+    rejectedOpposing: a.rejectedOpposing + b.rejectedOpposing,
+    rejectedWinding: a.rejectedWinding + b.rejectedWinding,
+    pushedVertices: a.pushedVertices + b.pushedVertices,
+    layeredPlaces: a.layeredPlaces + b.layeredPlaces,
+    seamBridgeTriangles: a.seamBridgeTriangles + b.seamBridgeTriangles,
+    gapBridgeTriangles: a.gapBridgeTriangles + b.gapBridgeTriangles,
+  });
+
+  if (!options.acrossEntries || entries.length < 2) {
+    const groups: WeldedGroup[] = [];
+    let total: WeldStats | undefined;
+    entries.forEach((entry, i) => {
+      const r = weldGeometry(entry, options);
+      groups.push({ entryIndices: [i], positions: r.positions, normals: r.normals, uvs: r.uvs, indices: [r.indices] });
+      total = total ? sum(total, r.stats) : r.stats;
+    });
+    return { groups, stats: total ?? weldGeometry({ positions: [], normals: [], uvs: [] }).stats, crossEntryGroups: 0 };
+  }
+
+  // Concatenate everything into one soup, remembering which entry owns each triangle.
+  let cornerTotal = 0;
+  for (const e of entries) cornerTotal += Math.floor(e.positions.length / 9) * 3;
+  const positions = new Array<number>(cornerTotal * 3);
+  const normals = new Array<number>(cornerTotal * 3);
+  const uvs = new Array<number>(cornerTotal * 2);
+  const owners = new Int32Array(cornerTotal / 3);
+  let corner = 0;
+  entries.forEach((e, ei) => {
+    const corners = Math.floor(e.positions.length / 9) * 3;
+    for (let i = 0; i < corners; i++) {
+      positions[(corner + i) * 3] = e.positions[i * 3];
+      positions[(corner + i) * 3 + 1] = e.positions[i * 3 + 1];
+      positions[(corner + i) * 3 + 2] = e.positions[i * 3 + 2];
+      normals[(corner + i) * 3] = e.normals[i * 3] ?? 0;
+      normals[(corner + i) * 3 + 1] = e.normals[i * 3 + 1] ?? 0;
+      normals[(corner + i) * 3 + 2] = e.normals[i * 3 + 2] ?? 0;
+      uvs[(corner + i) * 2] = e.uvs[i * 2] ?? 0;
+      uvs[(corner + i) * 2 + 1] = e.uvs[i * 2 + 1] ?? 0;
+    }
+    owners.fill(ei, corner / 3, (corner + corners) / 3);
+    corner += corners;
+  });
+
+  const r = weldGeometry({ positions, normals, uvs }, options, owners);
+
+  // Entries linked by a shared edge form one group.
+  const parent = entries.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let i = 0; i < r.ownerLinks.length; i += 2) parent[find(r.ownerLinks[i])] = find(r.ownerLinks[i + 1]);
+
+  const groupOfRoot = new Map<number, WeldedGroup>();
+  const groupOfEntry: WeldedGroup[] = [];
+  const slotOfEntry: number[] = []; // position of the entry inside its group's lists
+  entries.forEach((_, ei) => {
+    const root = find(ei);
+    let g = groupOfRoot.get(root);
+    if (!g) groupOfRoot.set(root, (g = { entryIndices: [], positions: [], normals: [], uvs: [], indices: [] }));
+    slotOfEntry[ei] = g.entryIndices.length;
+    g.entryIndices.push(ei);
+    g.indices.push([]);
+    groupOfEntry[ei] = g;
+  });
+
+  // Every output vertex belongs to exactly one group (shared vertices only come
+  // from linked entries), so one remap table serves them all.
+  const localIndex = new Int32Array(r.positions.length / 3).fill(-1);
+  for (let i = 0; i < r.indices.length; i++) {
+    const owner = r.triangleOwner[(i / 3) | 0];
+    const g = groupOfEntry[owner];
+    const v = r.indices[i];
+    let local = localIndex[v];
+    if (local < 0) {
+      local = g.positions.length / 3;
+      localIndex[v] = local;
+      g.positions.push(r.positions[v * 3], r.positions[v * 3 + 1], r.positions[v * 3 + 2]);
+      g.normals.push(r.normals[v * 3], r.normals[v * 3 + 1], r.normals[v * 3 + 2]);
+      g.uvs.push(r.uvs[v * 2], r.uvs[v * 2 + 1]);
+    }
+    g.indices[slotOfEntry[owner]].push(local);
+  }
+
+  const groups = [...groupOfRoot.values()];
+  return { groups, stats: r.stats, crossEntryGroups: groups.filter((g) => g.entryIndices.length > 1).length };
 }
