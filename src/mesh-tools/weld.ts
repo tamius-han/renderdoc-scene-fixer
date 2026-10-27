@@ -76,6 +76,8 @@
  * weldEntries() below runs all of this over SEVERAL meshes (draw calls) at
  * once, so meshes that share an edge are welded to each other too. */
 
+import { TriangleBVH, crossingParity, pointTriangleDistSq } from "./spatial.ts";
+
 export interface WeldInput {
   positions: number[];
   normals: number[];
@@ -97,6 +99,17 @@ export interface WeldOptions {
   /** Close the gap between pushed-apart open edges with a strip of triangles
    * (default true). See the header comment, rule 6. */
   bridgePushedGaps?: boolean;
+  /** -1..1, default 0. Splits the push between the two sides of an opposing
+   * pair: 0 pushes both by `separationDistance`; -1 pushes only the layer
+   * facing the model's inside (by twice the distance), +1 only the layer
+   * facing the outside; values between interpolate. Needs a closed-enough
+   * model to tell inside from outside - where that can't be told (e.g. a
+   * lone double-sided sheet) the push stays symmetric. */
+  pushBias?: number;
+  /** Per-owner flags (see `triangleOwners`): every vertex of a flagged
+   * owner is pushed along its normal, even with no coincident partner vertex
+   * (used for whole draw calls detected as the opposing layer of another). */
+  ownerPush?: Uint8Array;
 }
 
 export interface WeldStats {
@@ -571,30 +584,66 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
     if (list) list.push(bv);
     else bvsOfCluster.set(bvCluster[bv], [bv]);
   }
-  const bvOffset = new Float64Array(bvCount * 3);
+  // Which vertices get pushed: opposed vertices sharing a place, plus every
+  // vertex of an owner flagged as an opposing draw-call layer.
+  const pushed = new Uint8Array(bvCount);
   for (const [cl, list] of bvsOfCluster) {
     if (list.length < 2) continue;
     const thr = layered[cl] ? Math.max(opposingDot, 0) : opposingDot;
     const nDir = list.map((bv) => unit(bvNormalSum, bv));
     const gDir = list.map((bv) => unit(bvGeoSum, bv));
     const dot3 = (a: number[], b: number[]): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    const push = new Array<boolean>(list.length).fill(false);
     for (let i = 0; i < list.length; i++) {
-      if (bvFlag[list[i]]) push[i] = true;
+      if (bvFlag[list[i]]) pushed[list[i]] = 1;
       for (let j = i + 1; j < list.length; j++) {
-        if (dot3(nDir[i], nDir[j]) < thr || dot3(gDir[i], gDir[j]) < thr) push[i] = push[j] = true;
+        if (dot3(nDir[i], nDir[j]) < thr || dot3(gDir[i], gDir[j]) < thr) pushed[list[i]] = pushed[list[j]] = 1;
       }
     }
-    for (let i = 0; i < list.length; i++) {
-      if (!push[i]) continue;
-      let d = gDir[i];
-      if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, list[i]);
-      if (d[0] === 0 && d[1] === 0 && d[2] === 0) continue;
-      bvOffset[list[i] * 3] = d[0] * separation;
-      bvOffset[list[i] * 3 + 1] = d[1] * separation;
-      bvOffset[list[i] * 3 + 2] = d[2] * separation;
-      stats.pushedVertices++;
+  }
+  if (options.ownerPush && triangleOwners) {
+    for (const t of liveTris) {
+      if (!options.ownerPush[triangleOwners[t]]) continue;
+      for (let k = 0; k < 3; k++) pushed[bvOfCorner[t * 3 + k]] = 1;
     }
+  }
+
+  // Push bias: which side of the model does each pushed vertex face?
+  const bias = Math.min(1, Math.max(-1, options.pushBias ?? 0));
+  const bvFactor = new Float64Array(bvCount).fill(1);
+  if (bias !== 0) {
+    const soup = new Float64Array(liveTris.length * 9);
+    liveTris.forEach((t, i) => {
+      for (let k = 0; k < 9; k++) soup[i * 9 + k] = positions[t * 9 + k];
+    });
+    const bvh = new TriangleBVH(soup);
+    const off = Math.max(tol * 4, separation * 0.02);
+    const near = Math.max(tol * 4, separation * 1.01); // a partner layer this close doesn't count as part of the model
+    for (let bv = 0; bv < bvCount; bv++) {
+      if (!pushed[bv]) continue;
+      let d = unit(bvGeoSum, bv);
+      if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, bv);
+      if (d[0] === 0 && d[1] === 0 && d[2] === 0) continue;
+      const cl = bvCluster[bv];
+      const px = clusterPos[cl * 3], py = clusterPos[cl * 3 + 1], pz = clusterPos[cl * 3 + 2];
+      const front = crossingParity(bvh, px + d[0] * off, py + d[1] * off, pz + d[2] * off, d[0], d[1], d[2], near, near);
+      const back = crossingParity(bvh, px - d[0] * off, py - d[1] * off, pz - d[2] * off, -d[0], -d[1], -d[2], near, near);
+      // outside = even crossings, inside = odd; undecidable (both alike) stays symmetric
+      if (front === 0 && back === 1) bvFactor[bv] = 1 + bias; // faces the outside
+      else if (front === 1 && back === 0) bvFactor[bv] = 1 - bias; // faces the inside
+    }
+  }
+
+  const bvOffset = new Float64Array(bvCount * 3);
+  for (let bv = 0; bv < bvCount; bv++) {
+    if (!pushed[bv]) continue;
+    let d = unit(bvGeoSum, bv);
+    if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, bv);
+    if (d[0] === 0 && d[1] === 0 && d[2] === 0) continue;
+    const amount = separation * bvFactor[bv];
+    bvOffset[bv * 3] = d[0] * amount;
+    bvOffset[bv * 3 + 1] = d[1] * amount;
+    bvOffset[bv * 3 + 2] = d[2] * amount;
+    stats.pushedVertices++;
   }
 
   // ---- 4. UV variants -> output vertices ------------------------------------------------
@@ -849,6 +898,82 @@ export interface WeldEntriesResult {
   stats: WeldStats;
   /** Groups holding more than one entry - i.e. draw calls actually welded together. */
   crossEntryGroups: number;
+  /** Entries detected as an opposing layer of another entry (pushed apart as a whole). */
+  opposingEntries: number[];
+}
+
+
+/** Finds entries (draw calls) that are the opposing layer of another entry:
+ * pairs where MOST of each one's triangle area lies within `dist` of a
+ * triangle of the other that faces the opposite way (normals more than 120
+ * degrees apart) - e.g. a double-sided material drawn as a front-face pass and
+ * a back-face pass, whose vertices needn't coincide at all. Returns a flag per
+ * entry. */
+function detectOpposingEntries(entries: WeldInput[], dist: number): Uint8Array {
+  const flags = new Uint8Array(entries.length);
+  if (entries.length < 2) return flags;
+  interface Info { tris: Float64Array; area: Float64Array; nrm: Float64Array; total: number; min: number[]; max: number[]; bvh: TriangleBVH }
+  const infos: (Info | null)[] = entries.map((e) => {
+    const n = Math.floor(e.positions.length / 9);
+    if (n === 0) return null;
+    const tris = new Float64Array(n * 9);
+    for (let i = 0; i < n * 9; i++) tris[i] = e.positions[i];
+    const area = new Float64Array(n), nrm = new Float64Array(n * 3);
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    let total = 0;
+    for (let t = 0; t < n; t++) {
+      const b = t * 9;
+      for (let k = 0; k < 3; k++) for (let a = 0; a < 3; a++) {
+        const v = tris[b + k * 3 + a];
+        if (v < min[a]) min[a] = v;
+        if (v > max[a]) max[a] = v;
+      }
+      const ux = tris[b + 3] - tris[b], uy = tris[b + 4] - tris[b + 1], uz = tris[b + 5] - tris[b + 2];
+      const vx = tris[b + 6] - tris[b], vy = tris[b + 7] - tris[b + 1], vz = tris[b + 8] - tris[b + 2];
+      const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+      const len = Math.hypot(cx, cy, cz);
+      area[t] = len / 2;
+      total += area[t];
+      if (len > 1e-12) { nrm[t * 3] = cx / len; nrm[t * 3 + 1] = cy / len; nrm[t * 3 + 2] = cz / len; }
+    }
+    return total > 0 ? { tris, area, nrm, total, min, max, bvh: new TriangleBVH(tris) } : null;
+  });
+
+  const dist2 = dist * dist;
+  // share of A's area that sits on an opposite-facing triangle of B
+  const coverage = (A: Info, B: Info): number => {
+    let covered = 0;
+    const n = A.area.length;
+    for (let t = 0; t < n; t++) {
+      if (A.area[t] <= 0) continue;
+      const b = t * 9;
+      const cx = (A.tris[b] + A.tris[b + 3] + A.tris[b + 6]) / 3, cy = (A.tris[b + 1] + A.tris[b + 4] + A.tris[b + 7]) / 3, cz = (A.tris[b + 2] + A.tris[b + 5] + A.tris[b + 8]) / 3;
+      let hit = false;
+      B.bvh.queryBox(cx - dist, cy - dist, cz - dist, cx + dist, cy + dist, cz + dist, (u) => {
+        if (hit) return;
+        if (A.nrm[t * 3] * B.nrm[u * 3] + A.nrm[t * 3 + 1] * B.nrm[u * 3 + 1] + A.nrm[t * 3 + 2] * B.nrm[u * 3 + 2] >= -0.5) return;
+        const q = u * 9, T = B.tris;
+        if (pointTriangleDistSq(cx, cy, cz, T[q], T[q + 1], T[q + 2], T[q + 3], T[q + 4], T[q + 5], T[q + 6], T[q + 7], T[q + 8]) <= dist2) hit = true;
+      });
+      if (hit) covered += A.area[t];
+    }
+    return covered / A.total;
+  };
+
+  for (let i = 0; i < entries.length; i++) {
+    const A = infos[i];
+    if (!A) continue;
+    for (let j = i + 1; j < entries.length; j++) {
+      const B = infos[j];
+      if (!B) continue;
+      if (flags[i] && flags[j]) continue;
+      let apart = false;
+      for (let a = 0; a < 3 && !apart; a++) apart = A.min[a] > B.max[a] + dist || B.min[a] > A.max[a] + dist;
+      if (apart) continue;
+      if (coverage(A, B) >= 0.5 && coverage(B, A) >= 0.5) flags[i] = flags[j] = 1;
+    }
+  }
+  return flags;
 }
 
 /** Welds a list of meshes (flat per-corner arrays, all in the same space).
@@ -856,7 +981,7 @@ export interface WeldEntriesResult {
  * (or a bridged gap) come out as ONE group with a shared vertex buffer - the
  * caller keeps each mesh's own material/identity and just points them at the
  * shared vertices. Without it, every mesh is welded on its own. */
-export function weldEntries(entries: WeldInput[], options: WeldOptions & { acrossEntries?: boolean } = {}): WeldEntriesResult {
+export function weldEntries(entries: WeldInput[], options: WeldOptions & { acrossEntries?: boolean; detectOpposingDraws?: boolean } = {}): WeldEntriesResult {
   const sum = (a: WeldStats, b: WeldStats): WeldStats => ({
     inputTriangles: a.inputTriangles + b.inputTriangles,
     collapsedTriangles: a.collapsedTriangles + b.collapsedTriangles,
@@ -872,15 +997,23 @@ export function weldEntries(entries: WeldInput[], options: WeldOptions & { acros
     gapBridgeTriangles: a.gapBridgeTriangles + b.gapBridgeTriangles,
   });
 
+  // Whole draw calls that are the opposing layer of another draw call get pushed
+  // apart as a whole (see detectOpposingEntries()).
+  const layerDist = Math.max(options.separationDistance ?? DEFAULT_WELD_SEPARATION, (options.positionTolerance ?? 0) * 8);
+  const opposing = options.detectOpposingDraws === false ? new Uint8Array(entries.length) : detectOpposingEntries(entries, layerDist);
+  const opposingEntries: number[] = [];
+  opposing.forEach((f, i) => { if (f) opposingEntries.push(i); });
+
   if (!options.acrossEntries || entries.length < 2) {
     const groups: WeldedGroup[] = [];
     let total: WeldStats | undefined;
     entries.forEach((entry, i) => {
-      const r = weldGeometry(entry, options);
+      const owners = new Int32Array(Math.floor(entry.positions.length / 9));
+      const r = weldGeometry(entry, { ...options, ownerPush: Uint8Array.of(opposing[i]) }, owners);
       groups.push({ entryIndices: [i], positions: r.positions, normals: r.normals, uvs: r.uvs, indices: [r.indices] });
       total = total ? sum(total, r.stats) : r.stats;
     });
-    return { groups, stats: total ?? weldGeometry({ positions: [], normals: [], uvs: [] }).stats, crossEntryGroups: 0 };
+    return { groups, stats: total ?? weldGeometry({ positions: [], normals: [], uvs: [] }).stats, crossEntryGroups: 0, opposingEntries };
   }
 
   // Concatenate everything into one soup, remembering which entry owns each triangle.
@@ -907,7 +1040,7 @@ export function weldEntries(entries: WeldInput[], options: WeldOptions & { acros
     corner += corners;
   });
 
-  const r = weldGeometry({ positions, normals, uvs }, options, owners);
+  const r = weldGeometry({ positions, normals, uvs }, { ...options, ownerPush: opposing }, owners);
 
   // Entries linked by a shared edge form one group.
   const parent = entries.map((_, i) => i);
@@ -952,5 +1085,5 @@ export function weldEntries(entries: WeldInput[], options: WeldOptions & { acros
   }
 
   const groups = [...groupOfRoot.values()];
-  return { groups, stats: r.stats, crossEntryGroups: groups.filter((g) => g.entryIndices.length > 1).length };
+  return { groups, stats: r.stats, crossEntryGroups: groups.filter((g) => g.entryIndices.length > 1).length, opposingEntries };
 }
