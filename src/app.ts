@@ -21,7 +21,7 @@ import { TextureManager } from "./scene/texture-manager";
 import type { DrawEntry, ParsedOBJ, TextureBinding } from "./types";
 import { calculateDistortionMatrix, isGoodDistortionFitCandidate, findDistortionConsensus, type AffineDistortionResult } from "./mesh-tools/calculator";
 import { splitGeometryByLooseParts, groupFixedMeshes, type NamedMeshPart, type MeshFixStatus } from "./mesh-tools/fill";
-import { weldEntries } from "./mesh-tools/weld";
+import { weldAndRepair } from "./mesh-tools/repair";
 import { buildGlbBlob, type ExportEmbeddedImage, type ExportMeshEntry, type ExportSceneTransform } from "./export/gltf-exporter";
 import { encodeGrayscale16Png } from "./texture-tools/png16";
 import { buildZip, type ZipEntry } from "./texture-tools/zip";
@@ -3399,7 +3399,7 @@ export class SceneViewerApp {
       // FINAL export units) and before move-to-origin (so the pushed-apart
       // vertices are part of the bounds that gets centered).
       if (exportOptions.weldGeometry) {
-        this.applyExportWeld(entries, sceneTransform.scale, exportOptions.weldOptions);
+        this.applyExportWeld(entries, sceneTransform.scale, exportOptions.weldOptions, exportOptions.fillHoles, exportOptions.fixSelfIntersections);
       }
       if (exportOptions.moveToOrigin) {
         this.applyExportMoveToOrigin(entries, sceneTransform);
@@ -3785,21 +3785,37 @@ export class SceneViewerApp {
    * `scale` is the scene transform's uniform scale, which the .glb applies
    * on top of the raw vertex data; the dialog's distances are in final
    * (scaled) units, so they're divided by it to get raw-data distances. */
-  private applyExportWeld(entries: ExportMeshEntry[], scale: number, options: AppConfiguration["exportOptions"]["weldOptions"]): void {
+  private applyExportWeld(
+    entries: ExportMeshEntry[],
+    scale: number,
+    options: AppConfiguration["exportOptions"]["weldOptions"],
+    fillHoles: boolean,
+    fixSelfIntersections: boolean,
+  ): void {
     const rawPerUnit = scale > 1e-12 ? 1 / scale : 1;
     // All entries are welded in one go so draw calls sharing an edge end up
     // welded to each other; each group of linked entries then shares one
     // vertex buffer (see ExportMeshEntry.weldGroup), every entry keeping its
-    // own triangles (and so its own material).
-    const result = weldEntries(entries, {
-      positionTolerance: options.mergeDistance * rawPerUnit,
-      uvTolerance: options.uvTolerance,
-      opposingAngleDegrees: options.opposingAngle,
-      separationDistance: options.pushDistance * rawPerUnit,
-      bridgePushedGaps: options.bridgePushedGaps,
-      acrossEntries: options.weldAcrossDrawCalls,
+    // own triangles (and so its own material). Hole filling and
+    // self-intersection fixing (mesh-tools/repair.ts) then run per group.
+    const result = weldAndRepair(entries, {
+      weld: {
+        positionTolerance: options.mergeDistance * rawPerUnit,
+        uvTolerance: options.uvTolerance,
+        opposingAngleDegrees: options.opposingAngle,
+        separationDistance: options.pushDistance * rawPerUnit,
+        pushBias: options.pushBias,
+        bridgePushedGaps: options.bridgePushedGaps,
+        acrossEntries: options.weldAcrossDrawCalls,
+      },
+      fillHoles,
+      fixSelfIntersections,
     });
-    console.info(`[weld] ${entries.length} mesh(es) -> ${result.groups.length} group(s), ${result.crossEntryGroups} spanning several draw calls:`, result.stats);
+    console.info(
+      `[weld] ${entries.length} mesh(es) -> ${result.groups.length} group(s), ${result.crossEntryGroups} spanning several draw calls, ${result.opposingEntries.length} draw call(s) pushed apart as opposing layers:`,
+      result.stats,
+    );
+    if (fillHoles || fixSelfIntersections) console.info(`[weld] repair (${result.repair.groupsRepaired} group(s) changed):`, result.repair);
     for (const group of result.groups) {
       const bounds = computeBounds(group.positions);
       const weldGroup = group.entryIndices.length > 1 ? {} : undefined;
