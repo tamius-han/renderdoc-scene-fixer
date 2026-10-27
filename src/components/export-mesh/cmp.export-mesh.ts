@@ -66,6 +66,8 @@ export class ExportMesh extends Overlay {
     weldMergeInput: HTMLInputElement;
     weldUvInput: HTMLInputElement;
     weldAngleInput: HTMLInputElement;
+    weldBiasSlider: HTMLInputElement;
+    fixSelfIntersectionsCheckbox: HTMLInputElement;
     weldAcrossDrawsCheckbox: HTMLInputElement;
     weldBridgeGapsCheckbox: HTMLInputElement;
     resizeExportedCheckbox: HTMLInputElement;
@@ -128,6 +130,8 @@ export class ExportMesh extends Overlay {
     this.elements.weldMergeInput = this.element.querySelector('#export-options-weld-merge') as HTMLInputElement;
     this.elements.weldUvInput = this.element.querySelector('#export-options-weld-uv') as HTMLInputElement;
     this.elements.weldAngleInput = this.element.querySelector('#export-options-weld-angle') as HTMLInputElement;
+    this.elements.weldBiasSlider = this.element.querySelector('#export-options-weld-bias') as HTMLInputElement;
+    this.elements.fixSelfIntersectionsCheckbox = this.element.querySelector('#export-options-fix-self-intersections') as HTMLInputElement;
     this.elements.weldAcrossDrawsCheckbox = this.element.querySelector('#export-options-weld-across-draws') as HTMLInputElement;
     this.elements.weldBridgeGapsCheckbox = this.element.querySelector('#export-options-weld-bridge-gaps') as HTMLInputElement;
     this.elements.resizeExportedCheckbox = this.element.querySelector('#export-options-resize-exported') as HTMLInputElement;
@@ -177,6 +181,8 @@ export class ExportMesh extends Overlay {
     this.elements.weldMergeInput.value = weldOptions.mergeDistance.toString();
     this.elements.weldUvInput.value = weldOptions.uvTolerance.toString();
     this.elements.weldAngleInput.value = weldOptions.opposingAngle.toString();
+    this.elements.weldBiasSlider.value = weldOptions.pushBias.toString();
+    this.elements.fixSelfIntersectionsCheckbox.checked = this.appConfig.config.exportOptions.fixSelfIntersections;
     this.elements.weldAcrossDrawsCheckbox.checked = weldOptions.weldAcrossDrawCalls;
     this.elements.weldBridgeGapsCheckbox.checked = weldOptions.bridgePushedGaps;
     this.elements.resizeExportedCheckbox.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
@@ -211,6 +217,12 @@ export class ExportMesh extends Overlay {
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.weldGeometryCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.fixSelfIntersectionsCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.weldBiasSlider.addEventListener('input', () => this.updateExportOptions());
+    this.elements.weldBiasSlider.addEventListener('dblclick', () => {
+      this.elements.weldBiasSlider.value = '0';
+      this.updateExportOptions();
+    });
     this.elements.weldAcrossDrawsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.weldBridgeGapsCheckbox.addEventListener('change', () => this.updateExportOptions());
     for (const input of [this.elements.weldPushInput, this.elements.weldMergeInput, this.elements.weldUvInput, this.elements.weldAngleInput]) {
@@ -259,9 +271,16 @@ export class ExportMesh extends Overlay {
    * changes. */
   private syncDependentDisabledStates(): void {
     const splitEnabled = this.elements.splitLoosePartsCheckbox.checked;
-    this.elements.fillHolesCheckbox.disabled = !splitEnabled;
-    this.elements.fillHolesCheckbox.classList.toggle('disabled', !splitEnabled);
-    if (!splitEnabled) this.elements.fillHolesCheckbox.checked = false;
+    const weldEnabled = this.elements.weldGeometryCheckbox.checked;
+    // Filling holes happens either per loose part ("Split by loose parts") or
+    // after welding ("Weld geometry"); it needs one of the two.
+    const fillAvailable = splitEnabled || weldEnabled;
+    this.elements.fillHolesCheckbox.disabled = !fillAvailable;
+    this.elements.fillHolesCheckbox.classList.toggle('disabled', !fillAvailable);
+    if (!fillAvailable) this.elements.fillHolesCheckbox.checked = false;
+    // Fixing self-intersections is a step of the weld pipeline.
+    this.elements.fixSelfIntersectionsCheckbox.disabled = !weldEnabled;
+    this.elements.fixSelfIntersectionsCheckbox.classList.toggle('disabled', !weldEnabled);
 
     // The weld tunables only show while "Weld geometry" is checked.
     this.elements.weldOptionsContainer.classList.toggle('hidden', !this.elements.weldGeometryCheckbox.checked);
@@ -521,6 +540,8 @@ export class ExportMesh extends Overlay {
     weldOptions.mergeDistance = readNumber(this.elements.weldMergeInput, 0, Infinity, weldOptions.mergeDistance);
     weldOptions.uvTolerance = readNumber(this.elements.weldUvInput, 0, 1, weldOptions.uvTolerance);
     weldOptions.opposingAngle = readNumber(this.elements.weldAngleInput, 90, 180, weldOptions.opposingAngle);
+    weldOptions.pushBias = readNumber(this.elements.weldBiasSlider, -1, 1, weldOptions.pushBias);
+    this.appConfig.config.exportOptions.fixSelfIntersections = this.elements.fixSelfIntersectionsCheckbox.checked;
     weldOptions.weldAcrossDrawCalls = this.elements.weldAcrossDrawsCheckbox.checked;
     weldOptions.bridgePushedGaps = this.elements.weldBridgeGapsCheckbox.checked;
     this.appConfig.config.exportOptions.resizeExportedObject = this.elements.resizeExportedCheckbox.checked;

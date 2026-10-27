@@ -87,6 +87,10 @@ export interface AppConfiguration {
      * connected surface, UV-seam- and opposing-normal-aware. See
      * mesh-tools/weld.ts for the full rules. Off by default. */
     weldGeometry: boolean;
+    /** After welding (and hole filling), cut the mesh along its own intersection
+     * curves and remove the interior pieces so only the outer shape remains;
+     * holes are filled again afterwards. Only has an effect with "Weld geometry". */
+    fixSelfIntersections: boolean;
     /** Tunables for "Weld geometry" (see mesh-tools/weld.ts). Distances are
      * in FINAL export units - i.e. after "Resize exported object" (same
      * units as "Approximate height") - not raw capture units. */
@@ -108,6 +112,10 @@ export interface AppConfiguration {
       /** Bridge the gap between open edges that pushing opposing triangles
        * apart opened up (e.g. the rim of a double-sided sheet). */
       bridgePushedGaps: boolean;
+      /** -1..1. Splits the push between the two sides of an opposing pair:
+       * 0 = both by the same amount; -1 = only the side facing the model's
+       * inside moves; +1 = only the side facing the outside moves. */
+      pushBias: number;
     };
     resizeExportedObject: boolean;
     approximateHeight: number;
@@ -217,7 +225,8 @@ export class Config {
       splitLooseParts: true,
       fillHoles: true,
       weldGeometry: false,
-      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true },
+      fixSelfIntersections: false,
+      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true, pushBias: 0 },
       resizeExportedObject: true,
       approximateHeight: 100,
       moveToOrigin: true,
