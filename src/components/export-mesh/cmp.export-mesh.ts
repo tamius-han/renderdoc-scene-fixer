@@ -67,6 +67,9 @@ export class ExportMesh extends Overlay {
     weldUvInput: HTMLInputElement;
     weldAngleInput: HTMLInputElement;
     weldBiasSlider: HTMLInputElement;
+    weldFalloffInput: HTMLInputElement;
+    weldNarrowGapsCheckbox: HTMLInputElement;
+    weldNarrowGapInput: HTMLInputElement;
     fixSelfIntersectionsCheckbox: HTMLInputElement;
     weldAcrossDrawsCheckbox: HTMLInputElement;
     weldBridgeGapsCheckbox: HTMLInputElement;
@@ -131,6 +134,9 @@ export class ExportMesh extends Overlay {
     this.elements.weldUvInput = this.element.querySelector('#export-options-weld-uv') as HTMLInputElement;
     this.elements.weldAngleInput = this.element.querySelector('#export-options-weld-angle') as HTMLInputElement;
     this.elements.weldBiasSlider = this.element.querySelector('#export-options-weld-bias') as HTMLInputElement;
+    this.elements.weldFalloffInput = this.element.querySelector('#export-options-weld-falloff') as HTMLInputElement;
+    this.elements.weldNarrowGapsCheckbox = this.element.querySelector('#export-options-weld-narrow-gaps') as HTMLInputElement;
+    this.elements.weldNarrowGapInput = this.element.querySelector('#export-options-weld-narrow-gap') as HTMLInputElement;
     this.elements.fixSelfIntersectionsCheckbox = this.element.querySelector('#export-options-fix-self-intersections') as HTMLInputElement;
     this.elements.weldAcrossDrawsCheckbox = this.element.querySelector('#export-options-weld-across-draws') as HTMLInputElement;
     this.elements.weldBridgeGapsCheckbox = this.element.querySelector('#export-options-weld-bridge-gaps') as HTMLInputElement;
@@ -182,6 +188,9 @@ export class ExportMesh extends Overlay {
     this.elements.weldUvInput.value = weldOptions.uvTolerance.toString();
     this.elements.weldAngleInput.value = weldOptions.opposingAngle.toString();
     this.elements.weldBiasSlider.value = weldOptions.pushBias.toString();
+    this.elements.weldFalloffInput.value = weldOptions.pushFalloff.toString();
+    this.elements.weldNarrowGapsCheckbox.checked = weldOptions.bridgeNarrowGaps;
+    this.elements.weldNarrowGapInput.value = weldOptions.narrowGapDistance.toString();
     this.elements.fixSelfIntersectionsCheckbox.checked = this.appConfig.config.exportOptions.fixSelfIntersections;
     this.elements.weldAcrossDrawsCheckbox.checked = weldOptions.weldAcrossDrawCalls;
     this.elements.weldBridgeGapsCheckbox.checked = weldOptions.bridgePushedGaps;
@@ -219,6 +228,9 @@ export class ExportMesh extends Overlay {
     this.elements.weldGeometryCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fixSelfIntersectionsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.weldBiasSlider.addEventListener('input', () => this.updateExportOptions());
+    this.elements.weldNarrowGapsCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.weldFalloffInput.addEventListener('input', () => this.updateExportOptions());
+    this.elements.weldNarrowGapInput.addEventListener('input', () => this.updateExportOptions());
     this.elements.weldBiasSlider.addEventListener('dblclick', () => {
       this.elements.weldBiasSlider.value = '0';
       this.updateExportOptions();
@@ -278,6 +290,7 @@ export class ExportMesh extends Overlay {
     this.elements.fillHolesCheckbox.disabled = !fillAvailable;
     this.elements.fillHolesCheckbox.classList.toggle('disabled', !fillAvailable);
     if (!fillAvailable) this.elements.fillHolesCheckbox.checked = false;
+    this.elements.weldNarrowGapInput.disabled = !this.elements.weldNarrowGapsCheckbox.checked;
     // Fixing self-intersections is a step of the weld pipeline.
     this.elements.fixSelfIntersectionsCheckbox.disabled = !weldEnabled;
     this.elements.fixSelfIntersectionsCheckbox.classList.toggle('disabled', !weldEnabled);
@@ -541,6 +554,9 @@ export class ExportMesh extends Overlay {
     weldOptions.uvTolerance = readNumber(this.elements.weldUvInput, 0, 1, weldOptions.uvTolerance);
     weldOptions.opposingAngle = readNumber(this.elements.weldAngleInput, 90, 180, weldOptions.opposingAngle);
     weldOptions.pushBias = readNumber(this.elements.weldBiasSlider, -1, 1, weldOptions.pushBias);
+    weldOptions.pushFalloff = readNumber(this.elements.weldFalloffInput, 0, Infinity, weldOptions.pushFalloff);
+    weldOptions.bridgeNarrowGaps = this.elements.weldNarrowGapsCheckbox.checked;
+    weldOptions.narrowGapDistance = readNumber(this.elements.weldNarrowGapInput, 0, Infinity, weldOptions.narrowGapDistance);
     this.appConfig.config.exportOptions.fixSelfIntersections = this.elements.fixSelfIntersectionsCheckbox.checked;
     weldOptions.weldAcrossDrawCalls = this.elements.weldAcrossDrawsCheckbox.checked;
     weldOptions.bridgePushedGaps = this.elements.weldBridgeGapsCheckbox.checked;

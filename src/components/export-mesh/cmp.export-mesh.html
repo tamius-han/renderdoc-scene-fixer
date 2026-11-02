@@ -57,6 +57,17 @@
                 <input type="range" id="export-options-weld-bias" min="-1" max="1" step="0.05" value="0">
                 <span class="texture-factor-value">Outside</span>
               </div>
+              <div class="field row" title="How far the push fades out over the surrounding surface, as a multiple of the push distance. Larger = smoother transitions (no spikes) but more of the neighbouring surface is disturbed. 0 = no fade.">
+                <div>Push falloff (x push distance):</div>
+                <input type="number" id="export-options-weld-falloff" min="0" step="1">
+              </div>
+              <div class="field row" title="Bridge narrow gaps between open edges (seams between panels, cracks, thin slits) with new triangles. A bridge is only added if it doesn't pass through other geometry and keeps the mesh manifold.">
+                <input type="checkbox" id="export-options-weld-narrow-gaps"> Close narrow gaps
+              </div>
+              <div class="field row" title="Widest gap to bridge, in export units (after resizing).">
+                <div>Narrow gap width (units):</div>
+                <input type="number" id="export-options-weld-narrow-gap" min="0" step="0.01">
+              </div>
               <div class="field row" title="Also weld separate draw calls that share an edge. They're exported as one mesh with one material slot per draw call, sharing vertices.">
                 <input type="checkbox" id="export-options-weld-across-draws"> Weld across draw calls
               </div>
