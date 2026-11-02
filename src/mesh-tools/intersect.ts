@@ -108,6 +108,18 @@ export function intersectTriangles(A: Tri9, idsA: ArrayLike<number>, B: Tri9, id
   let lx = pA.ny * pB.nz - pA.nz * pB.ny, ly = pA.nz * pB.nx - pA.nx * pB.nz, lz = pA.nx * pB.ny - pA.ny * pB.nx;
   const ll = Math.hypot(lx, ly, lz);
   if (ll < 1e-12) return "coplanar"; // parallel planes within tolerance
+  // Nearly parallel planes (under ~1 degree) AND every vertex within 2% of the edge
+  // length of the other plane: the line where the planes meet is numerically
+  // meaningless (this is two neighbouring triangles of one smooth surface, or two
+  // layers resting on each other) - treat as coplanar contact rather than inventing
+  // a long, noisy crossing segment.
+  if (ll < 0.02) {
+    let maxD = 0;
+    for (let i = 0; i < 3; i++) maxD = Math.max(maxD, Math.abs(dA[i]), Math.abs(dB[i]));
+    let size = 0;
+    for (const T of [A, B]) for (let i = 0; i < 3; i++) { const j = (i + 1) % 3; size = Math.max(size, Math.hypot(T[i * 3] - T[j * 3], T[i * 3 + 1] - T[j * 3 + 1], T[i * 3 + 2] - T[j * 3 + 2])); }
+    if (maxD <= 0.02 * size) return "coplanar";
+  }
   lx /= ll; ly /= ll; lz /= ll;
   const dir: [number, number, number] = [lx, ly, lz];
 
