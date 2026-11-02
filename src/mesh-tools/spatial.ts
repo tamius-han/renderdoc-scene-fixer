@@ -379,15 +379,33 @@ function tangentBasis(nx: number, ny: number, nz: number): [number[], number[]] 
 }
 
 /** Test-ray directions in a cone around (nx,ny,nz) (all within ~35 degrees). */
-export function coneDirections(nx: number, ny: number, nz: number): number[][] {
+export function coneDirections(nx: number, ny: number, nz: number, spread = 1): number[][] {
   const len = Math.hypot(nx, ny, nz) || 1;
   nx /= len; ny /= len; nz /= len;
   const [u, v] = tangentBasis(nx, ny, nz);
-  return JITTER.map(([a, b]) => {
+  return JITTER.map(([ja, jb]) => {
+    const a = ja * spread, b = jb * spread;
     const x = nx + u[0] * a + v[0] * b, y = ny + u[1] * a + v[1] * b, z = nz + u[2] * a + v[2] * b;
     const l = Math.hypot(x, y, z);
     return [x / l, y / l, z / l];
   });
+}
+
+/** Distance from a point to the nearest surface hit along a cone of jittered
+ * rays around `(nx,ny,nz)`, ignoring hits closer than `skipNear` (the layer
+ * being measured from and anything coincident with it). Infinity if nothing
+ * is hit. `accept` can exclude triangles (e.g. the layer's own surface). Used to
+ * keep a pushed layer from being driven through other geometry. */
+export function clearanceAlong(
+  bvh: TriangleBVH, px: number, py: number, pz: number, nx: number, ny: number, nz: number, skipNear: number,
+  accept?: (tri: number) => boolean,
+): number {
+  let best = Infinity;
+  // a NARROW cone: wide ones graze the surface the ray starts from
+  for (const d of coneDirections(nx, ny, nz, 0.3)) {
+    bvh.raycastAll(px, py, pz, d[0], d[1], d[2], (tri, t) => { if (t >= skipNear && t < best && (!accept || accept(tri))) best = t; });
+  }
+  return best;
 }
 
 function mostCommon(values: number[]): number {
@@ -404,12 +422,16 @@ function mostCommon(values: number[]): number {
 /** Generalized winding number at a point (positive inside a closed,
  * outward-oriented surface): the signed number of surface crossings of a ray
  * leaving the point, taken as the consensus of several jittered rays heading
- * roughly along `(nx,ny,nz)`. */
-export function windingNumber(bvh: TriangleBVH, px: number, py: number, pz: number, nx: number, ny: number, nz: number): number {
+ * roughly along `(nx,ny,nz)`. `weight(tri)` can scale (e.g. flip, or exclude with 0)
+ * each triangle's contribution. */
+export function windingNumber(
+  bvh: TriangleBVH, px: number, py: number, pz: number, nx: number, ny: number, nz: number,
+  weight?: (tri: number) => number,
+): number {
   const results: number[] = [];
   for (const d of coneDirections(nx, ny, nz)) {
     let w = 0;
-    bvh.raycastAll(px, py, pz, d[0], d[1], d[2], (_t, _tt, sign) => { w += sign; });
+    bvh.raycastAll(px, py, pz, d[0], d[1], d[2], (tri, _tt, sign) => { w += weight ? sign * weight(tri) : sign; });
     results.push(w);
   }
   return mostCommon(results);
