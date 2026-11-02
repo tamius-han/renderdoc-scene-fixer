@@ -116,6 +116,13 @@ export interface AppConfiguration {
        * 0 = both by the same amount; -1 = only the side facing the model's
        * inside moves; +1 = only the side facing the outside moves. */
       pushBias: number;
+      /** How far the push fades out over the surrounding surface, as a multiple of
+       * the push distance (0 = no fade). Keeps the model's shape smooth. */
+      pushFalloff: number;
+      /** Bridge narrow gaps between open edges (seams, cracks, slits) with new triangles. */
+      bridgeNarrowGaps: boolean;
+      /** Widest gap to bridge, in export units. */
+      narrowGapDistance: number;
     };
     resizeExportedObject: boolean;
     approximateHeight: number;
@@ -226,7 +233,7 @@ export class Config {
       fillHoles: true,
       weldGeometry: false,
       fixSelfIntersections: false,
-      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true, pushBias: 0 },
+      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true, pushBias: 0, pushFalloff: 8, bridgeNarrowGaps: true, narrowGapDistance: 0.05 },
       resizeExportedObject: true,
       approximateHeight: 100,
       moveToOrigin: true,
