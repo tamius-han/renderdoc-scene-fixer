@@ -22,6 +22,14 @@ export interface SoupMesh {
   owner: number[];
 }
 
+/** A plug may meet the rim of its hole at most this sharply (angle between the plug
+ * triangle's normal and the normal of the mesh triangle it attaches to). A box's
+ * open top is 90 degrees, a capped tube end ~100; a plug folding back over the
+ * surface (130+ degrees) isn't closing a hole, it's pressing a thin sheet flat
+ * into a zero-volume bag - and to the weld such a fold is indistinguishable from
+ * two back-to-back layers, so it would never be welded to its rim anyway. */
+export const PLUG_MAX_FOLD_DEGREES = 120;
+
 export interface HoleFillStats {
   /** Boundary loops found. */
   loops: number;
@@ -209,6 +217,17 @@ export function fillHoles(mesh: SoupMesh, tol: number): { mesh: SoupMesh; stats:
   const baseIds = live.map((t) => ids(t));
   const bvh = new TriangleBVH(baseTris);
   const plugs: { coords: number[]; ids: number[] }[] = [];
+  const foldMinDot = Math.cos((PLUG_MAX_FOLD_DEGREES * Math.PI) / 180);
+  const rimOf = new Map<number, number>(); // directed rim edge a->b (key a*C+b) -> half-edge id
+  half.forEach((h, i) => rimOf.set(h.a * C + h.b, i));
+  const liveNormal = (t: number): number[] => {
+    const [a, b, c] = ids(t);
+    const A = P(a), B = P(b), Cc = P(c);
+    const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2], vx = Cc[0] - A[0], vy = Cc[1] - A[1], vz = Cc[2] - A[2];
+    const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+    const l = Math.hypot(n[0], n[1], n[2]) || 1;
+    return [n[0] / l, n[1] / l, n[2] / l];
+  };
   let extraId = C; // ids for centroid vertices
 
   const coordsOf = (tri: number[], positions: (id: number) => number[]): number[] => [...positions(tri[0]), ...positions(tri[1]), ...positions(tri[2])];
@@ -241,6 +260,19 @@ export function fillHoles(mesh: SoupMesh, tol: number): { mesh: SoupMesh; stats:
       const coords = tris.map((t) => coordsOf(t, posOf));
       // non-degenerate
       if (coords.some((c) => areaOf([c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]) <= minArea)) continue;
+      // the plug must continue the surface, not fold back over it
+      let folds = false;
+      tris.forEach((tri, i) => {
+        const c = coords[i];
+        const pn = (() => { const ux = c[3] - c[0], uy = c[4] - c[1], uz = c[5] - c[2], vx = c[6] - c[0], vy = c[7] - c[1], vz = c[8] - c[2]; const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx]; const l = Math.hypot(n[0], n[1], n[2]) || 1; return [n[0] / l, n[1] / l, n[2] / l]; })();
+        for (let k = 0; k < 3; k++) {
+          const rim = rimOf.get(tri[(k + 1) % 3] * C + tri[k]); // the rim edge this plug edge cancels
+          if (rim === undefined) continue;
+          const rn = liveNormal(half[rim].tri);
+          if (pn[0] * rn[0] + pn[1] * rn[1] + pn[2] * rn[2] < foldMinDot) folds = true;
+        }
+      });
+      if (folds) continue;
       let ok = true;
       for (let i = 0; i < tris.length && ok; i++) {
         const c = coords[i];
