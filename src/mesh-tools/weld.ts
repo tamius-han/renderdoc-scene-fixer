@@ -76,7 +76,8 @@
  * weldEntries() below runs all of this over SEVERAL meshes (draw calls) at
  * once, so meshes that share an edge are welded to each other too. */
 
-import { TriangleBVH, crossingParity, pointTriangleDistSq } from "./spatial.ts";
+import { TriangleBVH, clearanceAlong, crossingParity, pointTriangleDistSq } from "./spatial.ts";
+import { splitTJunctions } from "./tjunctions.ts";
 
 export interface WeldInput {
   positions: number[];
@@ -110,6 +111,20 @@ export interface WeldOptions {
    * owner is pushed along its normal, even with no coincident partner vertex
    * (used for whole draw calls detected as the opposing layer of another). */
   ownerPush?: Uint8Array;
+  /** How far the push fades out over the surrounding surface, as a multiple of
+   * the push distance (default 8). Larger = smoother, but disturbs more of the
+   * neighbouring surface; 0 = no fade (vertices just stop, which can leave spikes). */
+  pushFalloff?: number;
+  /** Skip the push stage entirely (used when re-welding geometry that has already
+   * been pushed apart and repaired: that pass only rebuilds shared vertices). */
+  noPush?: boolean;
+  /** Merge coincident, consistently wound edges even when the two triangles face opposite
+   * ways (a sharp fold). For re-welding already-repaired geometry: there, two pieces
+   * sharing an edge are connected by construction, and the opposing-layer logic
+   * (which exists to push coincident layers apart) has already done its job. */
+  mergeOpposed?: boolean;
+  /** Split triangles at T-junctions so differently tessellated boundaries weld (default true). */
+  fixTJunctions?: boolean;
 }
 
 export interface WeldStats {
@@ -134,6 +149,14 @@ export interface WeldStats {
   seamBridgeTriangles: number;
   /** Triangles added to close the gap between pushed-apart open edges. */
   gapBridgeTriangles: number;
+  /** Triangles split to remove T-junctions (a vertex in the middle of another triangle's open edge). */
+  tJunctionSplits: number;
+  /** Zero-area triangles added to close rings of zero-length edges around multi-UV vertices. */
+  ringCapTriangles: number;
+  /** Vertices next to pushed ones that moved a fading share of the push. */
+  smoothedVertices: number;
+  /** Pushed vertices whose push was shortened to stay clear of other geometry. */
+  limitedVertices: number;
 }
 
 export interface WeldResult {
@@ -157,6 +180,8 @@ export interface WeldResult {
 export const DEFAULT_WELD_UV_TOLERANCE = 1e-4;
 export const DEFAULT_WELD_OPPOSING_ANGLE = 162;
 export const DEFAULT_WELD_SEPARATION = 0.1;
+/** Falloff radius of the push, as a multiple of the push distance. */
+export const DEFAULT_WELD_FALLOFF = 8;
 
 const MAX_EDGE_GROUP = 12; // coincident edge instances considered per place-pair
 
@@ -166,9 +191,10 @@ function hasUVMap(uvs: number[]): boolean {
 }
 
 export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangleOwners?: Int32Array): WeldResult {
-  const { positions, normals, uvs } = data;
-  const cornerCount = Math.floor(positions.length / 3);
-  const triCount = Math.floor(cornerCount / 3);
+  let { positions, normals, uvs } = data;
+  const inputCorners = Math.floor(positions.length / 3);
+  let cornerCount = inputCorners;
+  let triCount = Math.floor(cornerCount / 3);
 
   const stats: WeldStats = {
     inputTriangles: triCount,
@@ -183,6 +209,10 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
     layeredPlaces: 0,
     seamBridgeTriangles: 0,
     gapBridgeTriangles: 0,
+    smoothedVertices: 0,
+    limitedVertices: 0,
+    ringCapTriangles: 0,
+    tJunctionSplits: 0,
   };
   if (triCount === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), triangleOwner: [], ownerLinks: [], stats };
 
@@ -204,6 +234,24 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
   // Never closer than 8x the tolerance, or pushed-apart copies could be
   // mistaken for "the same place" by a later pass.
   const separation = Math.max(options.separationDistance ?? DEFAULT_WELD_SEPARATION, tol * 8);
+
+  // ---- 0. T-junctions -----------------------------------------------------------
+  // Differently tessellated boundaries (one side has a vertex in the middle of the
+  // other's edge) have no coinciding edges to merge or bridge; split the triangles
+  // so they do. Originals are flagged dead, replacements appended.
+  let deadTri: Uint8Array | null = null;
+  if (options.fixTJunctions !== false) {
+    const tj = splitTJunctions(positions, normals, uvs, triangleOwners, tol);
+    if (tj) {
+      positions = tj.positions; normals = tj.normals; uvs = tj.uvs;
+      triangleOwners = tj.owners;
+      cornerCount = Math.floor(positions.length / 3);
+      triCount = Math.floor(cornerCount / 3);
+      deadTri = new Uint8Array(triCount);
+      deadTri.set(tj.dead);
+      stats.tJunctionSplits = tj.splitTriangles;
+    }
+  }
 
   // ---- 1. position clusters ---------------------------------------------------
   // Spatial hash, cell size 2*tol: a match within `tol` lives in the point's
@@ -256,9 +304,10 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
   const liveTris: number[] = [];
   for (let t = 0; t < triCount; t++) {
     const a = clusterOfCorner[t * 3], b = clusterOfCorner[t * 3 + 1], c = clusterOfCorner[t * 3 + 2];
+    if (deadTri && deadTri[t]) continue;
     if (a !== b && b !== c && a !== c) liveTris.push(t);
   }
-  stats.collapsedTriangles = triCount - liveTris.length;
+  stats.collapsedTriangles = triCount - liveTris.length - (deadTri ? deadTri.reduce((s2, v) => s2 + v, 0) : 0);
   if (liveTris.length === 0) return { positions: [], normals: [], uvs: [], indices: [], vertexOfCorner: new Int32Array(cornerCount).fill(-1), triangleOwner: [], ownerLinks: [], stats };
 
   // ---- face directions -----------------------------------------------------------
@@ -476,7 +525,7 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
       for (let j = i + 1; j < group.length; j++) {
         const x = group[i], y = group[j];
         const tx = (x / 3) | 0, ty = (y / 3) | 0;
-        if (pairOpposed(x, y, thr)) {
+        if (!options.mergeOpposed && pairOpposed(x, y, thr)) {
           stats.rejectedOpposing++;
           cutFlag[x] = cutFlag[endCorner(x)] = cutFlag[y] = cutFlag[endCorner(y)] = 1;
           continue;
@@ -607,10 +656,88 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
     }
   }
 
-  // Push bias: which side of the model does each pushed vertex face?
+  if (options.noPush) pushed.fill(0);
+
+  // Keeping the model's shape while pushing:
+  //  - LAYERS: coincident vertices facing the same way (one surface that merely
+  //    stayed unmerged, e.g. after a refused merge) form a layer and always move
+  //    TOGETHER, so pushing never tears a crack along a former seam. Vertices of
+  //    a place where something is pushed that face no pushed layer's opposite
+  //    follow the nearest-facing pushed layer for the same reason.
+  //  - CLEARANCE: a layer is never pushed further than 45% of the free distance
+  //    in front of it, so it can't be driven through other geometry.
+  //  - FALLOFF: the displacement fades out over the neighbouring surface (see
+  //    below) instead of stopping abruptly, which would leave spikes.
   const bias = Math.min(1, Math.max(-1, options.pushBias ?? 0));
-  const bvFactor = new Float64Array(bvCount).fill(1);
-  if (bias !== 0) {
+  interface Layer { members: number[]; dir: number[]; cluster: number; pushed: boolean; vec: number[] | null; follow: Layer | null }
+  const bvDir: number[][] = new Array(bvCount);
+  for (let bv = 0; bv < bvCount; bv++) {
+    let d = unit(bvGeoSum, bv);
+    if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, bv);
+    bvDir[bv] = d;
+  }
+  const layers: Layer[] = [];
+  const layersOfCluster: Layer[][] = [];
+  for (const [cl, list] of bvsOfCluster) {
+    if (!list.some((bv) => pushed[bv])) continue; // nothing is pushed at this place
+    const par = list.map((_, i) => i);
+    const find = (i: number): number => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = bvDir[list[i]], b = bvDir[list[j]];
+        if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] >= 0.5) par[find(i)] = find(j);
+      }
+    }
+    const byRoot = new Map<number, Layer>();
+    list.forEach((bv, i) => {
+      const r = find(i);
+      let layer = byRoot.get(r);
+      if (!layer) byRoot.set(r, (layer = { members: [], dir: [0, 0, 0], cluster: cl, pushed: false, vec: null, follow: null }));
+      layer.members.push(bv);
+      if (pushed[bv]) layer.pushed = true;
+    });
+    const here = [...byRoot.values()];
+    for (const layer of here) {
+      let x = 0, y = 0, z = 0;
+      for (const bv of layer.members) { x += bvGeoSum[bv * 3]; y += bvGeoSum[bv * 3 + 1]; z += bvGeoSum[bv * 3 + 2]; }
+      let len = Math.hypot(x, y, z);
+      if (len < 1e-9) { x = y = z = 0; for (const bv of layer.members) { x += bvFaceSum[bv * 3]; y += bvFaceSum[bv * 3 + 1]; z += bvFaceSum[bv * 3 + 2]; } len = Math.hypot(x, y, z); }
+      layer.dir = len > 1e-9 ? [x / len, y / len, z / len] : [0, 0, 0];
+    }
+    const pushedHere = here.filter((l) => l.pushed && (l.dir[0] !== 0 || l.dir[1] !== 0 || l.dir[2] !== 0));
+    for (const layer of here) {
+      if (layer.pushed) continue;
+      let best: Layer | null = null, bestDot = 0;
+      for (const p of pushedHere) {
+        const d = layer.dir[0] * p.dir[0] + layer.dir[1] * p.dir[1] + layer.dir[2] * p.dir[2];
+        if (d > bestDot) { bestDot = d; best = p; }
+      }
+      layer.follow = best;
+    }
+    layers.push(...here);
+    layersOfCluster.push(here);
+  }
+
+  const bvOffset = new Float64Array(bvCount * 3);
+  let smoothed = 0, limited = 0;
+
+  // Surface adjacency between welded vertices (shared by the amount smoothing and the falloff).
+  const degree = new Int32Array(bvCount + 1);
+  for (const t of liveTris) for (let k = 0; k < 3; k++) { degree[bvOfCorner[t * 3 + k] + 1]++; degree[bvOfCorner[t * 3 + (k + 1) % 3] + 1]++; }
+  for (let i = 0; i < bvCount; i++) degree[i + 1] += degree[i];
+  const adj = new Int32Array(degree[bvCount]);
+  {
+    const fillAt = degree.slice(0, bvCount);
+    for (const t of liveTris) for (let k = 0; k < 3; k++) {
+      const a = bvOfCorner[t * 3 + k], b = bvOfCorner[t * 3 + (k + 1) % 3];
+      adj[fillAt[a]++] = b; adj[fillAt[b]++] = a;
+    }
+  }
+  const posOfBv = (bv: number, ax: number): number => clusterPos[bvCluster[bv] * 3 + ax];
+  const bvDistance = (a: number, b: number): number => Math.hypot(posOfBv(a, 0) - posOfBv(b, 0), posOfBv(a, 1) - posOfBv(b, 1), posOfBv(a, 2) - posOfBv(b, 2));
+
+  const pushedLayers = layers.filter((l) => l.pushed && (l.dir[0] !== 0 || l.dir[1] !== 0 || l.dir[2] !== 0));
+  if (pushedLayers.length > 0) {
     const soup = new Float64Array(liveTris.length * 9);
     liveTris.forEach((t, i) => {
       for (let k = 0; k < 9; k++) soup[i * 9 + k] = positions[t * 9 + k];
@@ -618,33 +745,176 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
     const bvh = new TriangleBVH(soup);
     const off = Math.max(tol * 4, separation * 0.02);
     const near = Math.max(tol * 4, separation * 1.01); // a partner layer this close doesn't count as part of the model
-    for (let bv = 0; bv < bvCount; bv++) {
-      if (!pushed[bv]) continue;
-      let d = unit(bvGeoSum, bv);
-      if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, bv);
-      if (d[0] === 0 && d[1] === 0 && d[2] === 0) continue;
-      const cl = bvCluster[bv];
+    const floor = tol * 3;
+
+    // Which pushed layers form one connected surface? (union over shared surface edges)
+    const layerAt = new Map<number, number>(); // bv -> index into pushedLayers
+    pushedLayers.forEach((l, i) => l.members.forEach((bv) => layerAt.set(bv, i)));
+    const lpar = pushedLayers.map((_, i) => i);
+    const lfind = (i: number): number => { while (lpar[i] !== i) { lpar[i] = lpar[lpar[i]]; i = lpar[i]; } return i; };
+    pushedLayers.forEach((l, i) => {
+      for (const bv of l.members) for (let e = degree[bv]; e < degree[bv + 1]; e++) {
+        const j = layerAt.get(adj[e]);
+        if (j !== undefined && j !== i) lpar[lfind(i)] = lfind(j);
+      }
+    });
+
+    // Per layer: does it face the model's outside (+1), inside (-1), or can't we tell (0)?
+    const vote: number[] = new Array(pushedLayers.length).fill(0);
+    const cap: number[] = new Array(pushedLayers.length).fill(Infinity);
+    pushedLayers.forEach((layer, li) => {
+      const d = layer.dir;
+      const cl = layer.cluster;
       const px = clusterPos[cl * 3], py = clusterPos[cl * 3 + 1], pz = clusterPos[cl * 3 + 2];
-      const front = crossingParity(bvh, px + d[0] * off, py + d[1] * off, pz + d[2] * off, d[0], d[1], d[2], near, near);
-      const back = crossingParity(bvh, px - d[0] * off, py - d[1] * off, pz - d[2] * off, -d[0], -d[1], -d[2], near, near);
-      // outside = even crossings, inside = odd; undecidable (both alike) stays symmetric
-      if (front === 0 && back === 1) bvFactor[bv] = 1 + bias; // faces the outside
-      else if (front === 1 && back === 0) bvFactor[bv] = 1 - bias; // faces the inside
+      if (bias !== 0) {
+        const front = crossingParity(bvh, px + d[0] * off, py + d[1] * off, pz + d[2] * off, d[0], d[1], d[2], near, near);
+        const back = crossingParity(bvh, px - d[0] * off, py - d[1] * off, pz - d[2] * off, -d[0], -d[1], -d[2], near, near);
+        // outside = even crossings, inside = odd; undecidable (both alike) abstains
+        if (front === 0 && back === 1) vote[li] = 1;
+        else if (front === 1 && back === 0) vote[li] = -1;
+      }
+      // triangles touching this layer (its own surface right at the vertex) don't count as obstacles
+      const memberSet = new Set(layer.members);
+      const touchesLayer = (soupTri: number): boolean => {
+        const t = liveTris[soupTri];
+        return memberSet.has(bvOfCorner[t * 3]) || memberSet.has(bvOfCorner[t * 3 + 1]) || memberSet.has(bvOfCorner[t * 3 + 2]);
+      };
+      cap[li] = clearanceAlong(bvh, px + d[0] * off, py + d[1] * off, pz + d[2] * off, d[0], d[1], d[2], Math.max(tol * 4, off * 2), (tri) => !touchesLayer(tri));
+    });
+    // The inside/outside decision is made per connected surface by majority, so
+    // neighbouring vertices never get different pushes from a noisy ray test.
+    const tally = new Map<number, [number, number]>();
+    pushedLayers.forEach((_, li) => {
+      const r = lfind(li);
+      const t = tally.get(r) ?? tally.set(r, [0, 0]).get(r)!;
+      if (vote[li] > 0) t[0]++; else if (vote[li] < 0) t[1]++;
+    });
+    const amounts: number[] = pushedLayers.map((_, li) => {
+      let factor = 1;
+      if (bias !== 0) {
+        const [out, inn] = tally.get(lfind(li))!;
+        if (out + inn > 0 && Math.abs(out - inn) / (out + inn) >= 0.5) factor = out > inn ? 1 + bias : 1 - bias;
+      }
+      const wanted = separation * factor;
+      if (!Number.isFinite(cap[li])) return wanted;
+      const capped = Math.max(Math.min(wanted, cap[li] * 0.45), Math.min(wanted, floor));
+      if (capped < wanted) limited += pushedLayers[li].members.length;
+      return capped;
+    });
+    // Amounts may differ between neighbouring layers by at most half their distance
+    // (a Lipschitz bound), so a clearance cap in one spot can't leave a step in the surface.
+    for (let pass = 0; pass < 6; pass++) {
+      let changed = false;
+      pushedLayers.forEach((layer, li) => {
+        let lim = amounts[li];
+        for (const bv of layer.members) for (let e = degree[bv]; e < degree[bv + 1]; e++) {
+          const j = layerAt.get(adj[e]);
+          if (j === undefined || j === li || lfind(j) !== lfind(li)) continue;
+          lim = Math.min(lim, amounts[j] + 0.5 * bvDistance(bv, adj[e]));
+        }
+        if (lim < amounts[li] - 1e-12) { amounts[li] = lim; changed = true; }
+      });
+      if (!changed) break;
+    }
+    pushedLayers.forEach((layer, li) => {
+      layer.vec = [layer.dir[0] * amounts[li], layer.dir[1] * amounts[li], layer.dir[2] * amounts[li]];
+    });
+  }
+  for (const layer of layers) {
+    const vec = layer.pushed ? layer.vec : layer.follow?.vec ?? null;
+    if (!vec) continue;
+    for (const bv of layer.members) {
+      bvOffset[bv * 3] = vec[0]; bvOffset[bv * 3 + 1] = vec[1]; bvOffset[bv * 3 + 2] = vec[2];
+      if (pushed[bv]) stats.pushedVertices++;
     }
   }
 
-  const bvOffset = new Float64Array(bvCount * 3);
+  // FALLOFF: vertices next to the moved ones follow with a smoothly decaying
+  // share of the nearest moved vertex's displacement (geodesic distance over the
+  // surface), then a couple of relaxation passes, so the shape blends back to
+  // the original instead of ending in a step.
+  let maxAmount = 0;
+  const isSource = new Uint8Array(bvCount);
   for (let bv = 0; bv < bvCount; bv++) {
-    if (!pushed[bv]) continue;
-    let d = unit(bvGeoSum, bv);
-    if (d[0] === 0 && d[1] === 0 && d[2] === 0) d = unit(bvFaceSum, bv);
-    if (d[0] === 0 && d[1] === 0 && d[2] === 0) continue;
-    const amount = separation * bvFactor[bv];
-    bvOffset[bv * 3] = d[0] * amount;
-    bvOffset[bv * 3 + 1] = d[1] * amount;
-    bvOffset[bv * 3 + 2] = d[2] * amount;
-    stats.pushedVertices++;
+    const m = Math.hypot(bvOffset[bv * 3], bvOffset[bv * 3 + 1], bvOffset[bv * 3 + 2]);
+    if (m > 0) { isSource[bv] = 1; if (m > maxAmount) maxAmount = m; }
   }
+  const radius = (options.pushFalloff ?? DEFAULT_WELD_FALLOFF) * maxAmount;
+  if (maxAmount > 0 && radius > 0) {
+    const dist = new Float64Array(bvCount).fill(Infinity);
+    const src = new Int32Array(bvCount).fill(-1);
+    const heap: { d: number; v: number }[] = [];
+    const push = (d: number, v: number): void => {
+      heap.push({ d, v });
+      let i = heap.length - 1;
+      while (i > 0) { const p = (i - 1) >> 1; if (heap[p].d <= heap[i].d) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; }
+    };
+    const pop = (): { d: number; v: number } => {
+      const top = heap[0], last = heap.pop()!;
+      if (heap.length) {
+        heap[0] = last;
+        let i = 0;
+        for (;;) {
+          const l = 2 * i + 1, r = l + 1; let m = i;
+          if (l < heap.length && heap[l].d < heap[m].d) m = l;
+          if (r < heap.length && heap[r].d < heap[m].d) m = r;
+          if (m === i) break;
+          [heap[m], heap[i]] = [heap[i], heap[m]]; i = m;
+        }
+      }
+      return top;
+    };
+    for (let bv = 0; bv < bvCount; bv++) if (isSource[bv]) { dist[bv] = 0; src[bv] = bv; push(0, bv); }
+    while (heap.length) {
+      const { d, v } = pop();
+      if (d > dist[v]) continue;
+      for (let e = degree[v]; e < degree[v + 1]; e++) {
+        const n = adj[e];
+        const nd = d + bvDistance(v, n);
+        if (nd < dist[n] && nd < radius) { dist[n] = nd; src[n] = src[v]; push(nd, n); }
+      }
+    }
+    const band: number[] = [];
+    for (let bv = 0; bv < bvCount; bv++) {
+      if (isSource[bv] || src[bv] < 0) continue;
+      const w = 0.5 * (1 + Math.cos((Math.PI * dist[bv]) / radius)); // cosine: no kink where it meets the moved vertices
+      const s0 = src[bv];
+      bvOffset[bv * 3] = bvOffset[s0 * 3] * w; bvOffset[bv * 3 + 1] = bvOffset[s0 * 3 + 1] * w; bvOffset[bv * 3 + 2] = bvOffset[s0 * 3 + 2] * w;
+      band.push(bv);
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      const next = new Map<number, number[]>();
+      for (const bv of band) {
+        let sx = 0, sy = 0, sz = 0, n = 0;
+        for (let e = degree[bv]; e < degree[bv + 1]; e++) { const o = adj[e]; sx += bvOffset[o * 3]; sy += bvOffset[o * 3 + 1]; sz += bvOffset[o * 3 + 2]; n++; }
+        if (n === 0) continue;
+        next.set(bv, [0.5 * bvOffset[bv * 3] + 0.5 * sx / n, 0.5 * bvOffset[bv * 3 + 1] + 0.5 * sy / n, 0.5 * bvOffset[bv * 3 + 2] + 0.5 * sz / n]);
+      }
+      for (const [bv, v] of next) { bvOffset[bv * 3] = v[0]; bvOffset[bv * 3 + 1] = v[1]; bvOffset[bv * 3 + 2] = v[2]; }
+    }
+    // Coincident, same-facing vertices of one place (a surface that stayed unmerged)
+    // must keep sharing a position, so they share the average of their offsets.
+    for (const list of bvsOfCluster.values()) {
+      if (list.length < 2 || !list.some((bv) => !isSource[bv] && src[bv] >= 0)) continue;
+      const par = list.map((_, i) => i);
+      const find = (i: number): number => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+      for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+        const a = bvDir[list[i]], b = bvDir[list[j]];
+        if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] >= 0.5) par[find(i)] = find(j);
+      }
+      const groups = new Map<number, number[]>();
+      list.forEach((bv, i) => { const r = find(i); (groups.get(r) ?? groups.set(r, []).get(r)!).push(bv); });
+      for (const members of groups.values()) {
+        if (members.length < 2 || members.some((bv) => isSource[bv])) continue;
+        let sx = 0, sy = 0, sz = 0;
+        for (const bv of members) { sx += bvOffset[bv * 3]; sy += bvOffset[bv * 3 + 1]; sz += bvOffset[bv * 3 + 2]; }
+        for (const bv of members) { bvOffset[bv * 3] = sx / members.length; bvOffset[bv * 3 + 1] = sy / members.length; bvOffset[bv * 3 + 2] = sz / members.length; }
+      }
+    }
+    smoothed = band.length;
+  }
+  stats.smoothedVertices = smoothed;
+  stats.limitedVertices = limited;
 
   // ---- 4. UV variants -> output vertices ------------------------------------------------
   // Corners of one merged vertex share an OUTPUT vertex only if their UVs match
@@ -872,9 +1142,69 @@ export function weldGeometry(data: WeldInput, options: WeldOptions = {}, triangl
     }
   }
 
+  // ---- 7. cap rings of zero-length edges ----------------------------------------------------
+  // A vertex whose fan is closed but carries three or more UV variants (a pole, a
+  // cone tip...) is bridged edge by edge, which leaves a ring of zero-length edges
+  // around it - an open hole to anything reading the index topology. Close each
+  // such ring with a fan of zero-area triangles among the variants.
+  {
+    const dk = (a: number, b: number): number => a * ovCount + b;
+    const undUse = new Map<number, number>();
+    const ownerOfEdge = new Map<number, number>();
+    const undK = (a: number, b: number): number => (a < b ? a * ovCount + b : b * ovCount + a);
+    for (let i = 0; i < indices.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const a = indices[i + k], b = indices[i + (k + 1) % 3];
+        undUse.set(undK(a, b), (undUse.get(undK(a, b)) ?? 0) + 1);
+        ownerOfEdge.set(dk(a, b), triangleOwner[i / 3]);
+      }
+    }
+    const outgoing = new Map<number, number[]>(); // boundary half-edges between variants of one vertex
+    for (let i = 0; i < indices.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const a = indices[i + k], b = indices[i + (k + 1) % 3];
+        if (a === b || ovBv[a] !== ovBv[b] || undUse.get(undK(a, b)) !== 1) continue;
+        const list = outgoing.get(a);
+        if (list) list.push(b);
+        else outgoing.set(a, [b]);
+      }
+    }
+    const visited = new Set<number>();
+    for (const [start, firsts] of outgoing) {
+      for (const first of firsts) {
+        if (visited.has(dk(start, first))) continue;
+        const loop: number[] = [start];
+        let cur = start, nxt = first, closed = false;
+        for (let guard = 0; guard < 100000; guard++) {
+          visited.add(dk(cur, nxt));
+          if (nxt === start) { closed = true; break; }
+          loop.push(nxt);
+          const cands = (outgoing.get(nxt) ?? []).filter((c) => !visited.has(dk(nxt, c)));
+          if (cands.length === 0) break;
+          cur = nxt;
+          nxt = cands[0];
+        }
+        if (!closed || loop.length < 3) continue;
+        // fan from an apex whose diagonals aren't edges already
+        for (let apexAt = 0; apexAt < loop.length; apexAt++) {
+          const apex = loop[apexAt];
+          if (loop.some((v, i) => i !== apexAt && v !== apex && (undUse.get(undK(apex, v)) ?? 0) > 0 && Math.abs(i - apexAt) > 1 && Math.abs(i - apexAt) < loop.length - 1)) continue;
+          for (let i = 0; i < loop.length; i++) {
+            const a = loop[i], b = loop[(i + 1) % loop.length];
+            if (a === apex || b === apex) continue;
+            indices.push(b, a, apex);
+            triangleOwner.push(ownerOfEdge.get(dk(a, b)) ?? 0);
+            stats.ringCapTriangles++;
+          }
+          break;
+        }
+      }
+    }
+  }
+
   stats.outputTriangles = indices.length / 3;
   stats.outputVertices = ovCount;
-  return { positions: outPositions, normals: outNormals, uvs: outUvs, indices, vertexOfCorner: ovOfCorner, triangleOwner, ownerLinks, stats };
+  return { positions: outPositions, normals: outNormals, uvs: outUvs, indices, vertexOfCorner: ovOfCorner.subarray(0, inputCorners), triangleOwner, ownerLinks, stats };
 }
 
 
@@ -907,7 +1237,8 @@ export interface WeldEntriesResult {
  * pairs where MOST of each one's triangle area lies within `dist` of a
  * triangle of the other that faces the opposite way (normals more than 120
  * degrees apart) - e.g. a double-sided material drawn as a front-face pass and
- * a back-face pass, whose vertices needn't coincide at all. Returns a flag per
+ * a back-face pass, whose vertices needn't coincide at all. Only BACK-TO-BACK
+ * pairs count (normals pointing away from each other), never pairs facing each other. Returns a flag per
  * entry. */
 function detectOpposingEntries(entries: WeldInput[], dist: number): Uint8Array {
   const flags = new Uint8Array(entries.length);
@@ -953,6 +1284,9 @@ function detectOpposingEntries(entries: WeldInput[], dist: number): Uint8Array {
         if (hit) return;
         if (A.nrm[t * 3] * B.nrm[u * 3] + A.nrm[t * 3 + 1] * B.nrm[u * 3 + 1] + A.nrm[t * 3 + 2] * B.nrm[u * 3 + 2] >= -0.5) return;
         const q = u * 9, T = B.tris;
+        // back-to-back only: A's centroid must not lie on B's front side, or the two
+        // face TOWARD each other and pushing along their normals would cross them
+        if (B.nrm[u * 3] * (cx - T[q]) + B.nrm[u * 3 + 1] * (cy - T[q + 1]) + B.nrm[u * 3 + 2] * (cz - T[q + 2]) > dist * 0.1) return;
         if (pointTriangleDistSq(cx, cy, cz, T[q], T[q + 1], T[q + 2], T[q + 3], T[q + 4], T[q + 5], T[q + 6], T[q + 7], T[q + 8]) <= dist2) hit = true;
       });
       if (hit) covered += A.area[t];
@@ -995,6 +1329,10 @@ export function weldEntries(entries: WeldInput[], options: WeldOptions & { acros
     layeredPlaces: a.layeredPlaces + b.layeredPlaces,
     seamBridgeTriangles: a.seamBridgeTriangles + b.seamBridgeTriangles,
     gapBridgeTriangles: a.gapBridgeTriangles + b.gapBridgeTriangles,
+    smoothedVertices: a.smoothedVertices + b.smoothedVertices,
+    limitedVertices: a.limitedVertices + b.limitedVertices,
+    ringCapTriangles: a.ringCapTriangles + b.ringCapTriangles,
+    tJunctionSplits: a.tJunctionSplits + b.tJunctionSplits,
   });
 
   // Whole draw calls that are the opposing layer of another draw call get pushed
