@@ -39,6 +39,10 @@ export interface ResolveStats {
 
 type V2 = [number, number];
 
+function edgeKeyOf(a: number, b: number, count: number): number {
+  return a < b ? a * count + b : b * count + a;
+}
+
 // ---------------------------------------------------------------------------------------
 // Constrained triangulation of one triangle (2D)
 // ---------------------------------------------------------------------------------------
@@ -254,6 +258,78 @@ export function resolveSelfIntersections(mesh: SoupMesh, tol: number): { mesh: S
   const coords = new Float64Array(L * 9);
   for (let i = 0; i < L; i++) for (let k = 0; k < 3; k++) for (let a = 0; a < 3; a++) coords[i * 9 + k * 3 + a] = cp[ids[i][k] * 3 + a];
   const bvh = new TriangleBVH(coords);
+
+  // ---- orientation of each connected component ------------------------------------------------
+  // Solids needn't all be wound the same way (mirrored meshes, flipped normals), and
+  // winding numbers of oppositely wound overlapping solids would cancel. So each
+  // CLOSED component is oriented by its signed volume: an inside-out solid counts
+  // as a solid, unless it lies inside another solid (then it's a cavity and its
+  // natural orientation is the right one).
+  const compOf = new Int32Array(L).fill(-1);
+  {
+    const par = Array.from({ length: L }, (_, i) => i);
+    const f = (i: number): number => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    const first = new Map<number, number>();
+    for (let t = 0; t < L; t++) for (let k = 0; k < 3; k++) {
+      const key = edgeKeyOf(ids[t][k], ids[t][(k + 1) % 3], C);
+      const o = first.get(key);
+      if (o === undefined) first.set(key, t);
+      else par[f(t)] = f(o);
+    }
+    const label = new Map<number, number>();
+    for (let t = 0; t < L; t++) { const r = f(t); let c = label.get(r); if (c === undefined) { c = label.size; label.set(r, c); } compOf[t] = c; }
+  }
+  let compCount = 0; // (a loop, not Math.max(...array): spreading a big array overflows the call stack)
+  for (let t = 0; t < L; t++) if (compOf[t] + 1 > compCount) compCount = compOf[t] + 1;
+  const compSign = new Int8Array(compCount).fill(1);
+  const compFlip = new Uint8Array(compCount); // pieces of these components are re-wound to match the rest
+  const compOpen = new Uint8Array(compCount); // open surfaces (they don't define an inside)
+  {
+    const uses = new Map<number, number>();
+    for (let t = 0; t < L; t++) for (let k = 0; k < 3; k++) {
+      const key = edgeKeyOf(ids[t][k], ids[t][(k + 1) % 3], C);
+      uses.set(key, (uses.get(key) ?? 0) + 1);
+    }
+    const open = compOpen, volume = new Float64Array(compCount);
+    const trisOfComp: number[][] = Array.from({ length: compCount }, () => []);
+    for (let t = 0; t < L; t++) {
+      const c = compOf[t], b = t * 9;
+      trisOfComp[c].push(t);
+      for (let k = 0; k < 3; k++) if (uses.get(edgeKeyOf(ids[t][k], ids[t][(k + 1) % 3], C)) === 1) open[c] = 1;
+      const ax = coords[b], ay = coords[b + 1], az = coords[b + 2], bx = coords[b + 3], by = coords[b + 4], bz = coords[b + 5], cx = coords[b + 6], cy = coords[b + 7], cz = coords[b + 8];
+      volume[c] += (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6;
+    }
+    const weightOf = (skip: number) => (tri: number): number => (compOf[tri] === skip || compOpen[compOf[tri]] ? 0 : compSign[compOf[tri]]);
+    for (let c = 0; c < compCount; c++) {
+      if (open[c] || volume[c] >= 0) continue; // only closed, inside-out components
+      // A real cavity lies inside other solids EVERYWHERE; sample its surface (on the
+      // side its normals point to) and call it a cavity only if every sample is inside.
+      const list = trisOfComp[c];
+      const step = Math.max(1, Math.floor(list.length / 40));
+      let allInside = true;
+      for (let i = 0; i < list.length && allInside; i += step) {
+        const b = list[i] * 9;
+        const ux = coords[b + 3] - coords[b], uy = coords[b + 4] - coords[b + 1], uz = coords[b + 5] - coords[b + 2];
+        const vx = coords[b + 6] - coords[b], vy = coords[b + 7] - coords[b + 1], vz = coords[b + 8] - coords[b + 2];
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const nl = Math.hypot(nx, ny, nz);
+        if (nl < 1e-18) continue;
+        nx /= nl; ny /= nl; nz /= nl;
+        const off = Math.max(tol * 8, 1e-9);
+        const px = (coords[b] + coords[b + 3] + coords[b + 6]) / 3 + nx * off, py = (coords[b + 1] + coords[b + 4] + coords[b + 7]) / 3 + ny * off, pz = (coords[b + 2] + coords[b + 5] + coords[b + 8]) / 3 + nz * off;
+        if (windingNumber(bvh, px, py, pz, nx, ny, nz, weightOf(c)) === 0) allInside = false;
+      }
+      if (!allInside) compSign[c] = -1; // a standalone inside-out solid: treat as the solid it encloses
+    }
+    // all (non-cavity) solids should come out wound the same way as the biggest one
+    let ref = -1, refVol = 0;
+    for (let c = 0; c < compCount; c++) if (!open[c] && Math.abs(volume[c]) > refVol) { refVol = Math.abs(volume[c]); ref = c; }
+    const refSign = ref >= 0 ? compSign[ref] : 1;
+    for (let c = 0; c < compCount; c++) compFlip[c] = compSign[c] !== refSign ? 1 : 0;
+  }
+  // Only CLOSED components define what is inside; an open surface has no inside, so it
+  // contributes nothing to the winding field (and is kept unless buried in a solid).
+  const triWeight = (tri: number): number => (compOpen[compOf[tri]] ? 0 : compSign[compOf[tri]]);
 
   // ---- 1. crossing pairs -> segments ------------------------------------------------------
   const store = new PointStore(tol, cp);
@@ -542,8 +618,8 @@ export function resolveSelfIntersections(mesh: SoupMesh, tol: number): { mesh: S
     if (nl < 1e-18) { keepPatch.set(r, true); continue; }
     nx /= nl; ny /= nl; nz /= nl;
     const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
-    const wFront = windingNumber(bvh, cx + nx * off, cy + ny * off, cz + nz * off, nx, ny, nz);
-    const wBack = windingNumber(bvh, cx - nx * off, cy - ny * off, cz - nz * off, -nx, -ny, -nz);
+    const wFront = windingNumber(bvh, cx + nx * off, cy + ny * off, cz + nz * off, nx, ny, nz, triWeight);
+    const wBack = windingNumber(bvh, cx - nx * off, cy - ny * off, cz - nz * off, -nx, -ny, -nz, triWeight);
     const frontInside = wFront !== 0, backInside = wBack !== 0;
     keepPatch.set(r, !(frontInside && backInside)); // interior on both sides -> remove
   }
@@ -557,7 +633,9 @@ export function resolveSelfIntersections(mesh: SoupMesh, tol: number): { mesh: S
     const v0x = p1[0] - p0[0], v0y = p1[1] - p0[1], v0z = p1[2] - p0[2], v1x = p2[0] - p0[0], v1y = p2[1] - p0[1], v1z = p2[2] - p0[2];
     const d00 = v0x * v0x + v0y * v0y + v0z * v0z, d01 = v0x * v1x + v0y * v1y + v0z * v1z, d11 = v1x * v1x + v1y * v1y + v1z * v1z;
     const denom = d00 * d11 - d01 * d01 || 1;
-    for (let k = 0; k < 3; k++) {
+    const flip = compFlip[compOf[subParent[s]]] === 1;
+    for (let kk = 0; kk < 3; kk++) {
+      const k = flip ? (kk === 0 ? 0 : kk === 1 ? 2 : 1) : kk; // re-wound pieces: corners 1 and 2 swapped
       const q = P(subTri[s * 3 + k], store);
       const v2x = q[0] - p0[0], v2y = q[1] - p0[1], v2z = q[2] - p0[2];
       const d20 = v2x * v0x + v2y * v0y + v2z * v0z, d21 = v2x * v1x + v2y * v1y + v2z * v1z;
@@ -571,6 +649,7 @@ export function resolveSelfIntersections(mesh: SoupMesh, tol: number): { mesh: S
       let nz = bu * (mesh.normals[c0 * 3 + 2] ?? 0) + bv * (mesh.normals[c1 * 3 + 2] ?? 0) + bw * (mesh.normals[c2 * 3 + 2] ?? 0);
       const nl = Math.hypot(nx, ny, nz) || 1;
       nx /= nl; ny /= nl; nz /= nl;
+      if (flip) { nx = -nx; ny = -ny; nz = -nz; }
       out.positions.push(q[0], q[1], q[2]);
       out.normals.push(nx, ny, nz);
       out.uvs.push(
