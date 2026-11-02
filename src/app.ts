@@ -3805,17 +3805,29 @@ export class SceneViewerApp {
         opposingAngleDegrees: options.opposingAngle,
         separationDistance: options.pushDistance * rawPerUnit,
         pushBias: options.pushBias,
+        pushFalloff: options.pushFalloff,
         bridgePushedGaps: options.bridgePushedGaps,
         acrossEntries: options.weldAcrossDrawCalls,
       },
       fillHoles,
       fixSelfIntersections,
+      // gaps to bridge, in raw units: narrow seams/cracks, and (back-to-back layers pushed
+      // apart by up to 2 x the push distance) the rims of pushed-apart layers
+      narrowGap: options.bridgeNarrowGaps ? options.narrowGapDistance * rawPerUnit : 0,
+      shellGap: options.bridgePushedGaps ? options.pushDistance * rawPerUnit * 2.5 : 0,
     });
     console.info(
       `[weld] ${entries.length} mesh(es) -> ${result.groups.length} group(s), ${result.crossEntryGroups} spanning several draw calls, ${result.opposingEntries.length} draw call(s) pushed apart as opposing layers:`,
       result.stats,
     );
-    if (fillHoles || fixSelfIntersections) console.info(`[weld] repair (${result.repair.groupsRepaired} group(s) changed):`, result.repair);
+    console.info(`[weld] repair (${result.repair.groupsRepaired} group(s) changed):`, result.repair);
+    if (result.repair.coincidentOpenEdges > 0) {
+      console.warn(
+        `[weld] ${result.repair.coincidentOpenEdges} open edge(s) coincide with another open edge but are neither welded nor bridged ` +
+          `(typically back-to-back layers, or edges whose merge would have been non-manifold). Stats of the first weld:`,
+        result.stats,
+      );
+    }
     for (const group of result.groups) {
       const bounds = computeBounds(group.positions);
       const weldGroup = group.entryIndices.length > 1 ? {} : undefined;
