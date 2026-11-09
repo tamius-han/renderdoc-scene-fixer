@@ -371,6 +371,7 @@ export function buildGlbBlob(
   const imageIndexByElement = new Map<unknown, number>();
   const textureIndexByMap = new Map<THREE.Texture, number>();
   const materialIndexByMaterial = new Map<THREE.Material, number>();
+  const materialIndexByContent = new Map<string, number>();
 
   const addBufferView = (bytes: Uint8Array, target?: number): number => {
     const { byteOffset, byteLength } = buffer.push(bytes);
@@ -431,8 +432,7 @@ export function buildGlbBlob(
 
     const basic = material instanceof THREE.MeshBasicMaterial ? material : null;
     const color = basic?.color ?? new THREE.Color(0xffffff);
-    const materialIndex = materials.length;
-    materials.push({
+    const materialJson: GltfJson["materials"][number] = {
       name: material.name || fallbackName,
       pbrMetallicRoughness: {
         baseColorFactor: [color.r, color.g, color.b, basic?.opacity ?? 1],
@@ -472,7 +472,25 @@ export function buildGlbBlob(
       // shading in Blender rather than being ignored per the
       // KHR_materials_unlit spec.
       ...(litShading ? {} : { extensions: { KHR_materials_unlit: {} } }),
-    });
+    };
+
+    // Welded entries (see mergeWeldGroupPrimitives()) are only merged into one
+    // primitive when they resolve to the SAME glTF material, and two draw calls
+    // practically always have materials that differ by name alone. So for those,
+    // reuse an existing material whose content (everything except the name) is
+    // identical instead of emitting a look-alike duplicate.
+    const dedupeKey = entry.weldGroup ? JSON.stringify({ ...materialJson, name: undefined }) : undefined;
+    if (dedupeKey !== undefined) {
+      const existing = materialIndexByContent.get(dedupeKey);
+      if (existing !== undefined) {
+        if (cacheable) materialIndexByMaterial.set(material, existing);
+        return existing;
+      }
+    }
+
+    const materialIndex = materials.length;
+    materials.push(materialJson);
+    if (dedupeKey !== undefined) materialIndexByContent.set(dedupeKey, materialIndex);
     if (cacheable) materialIndexByMaterial.set(material, materialIndex);
     return materialIndex;
   };
@@ -481,9 +499,44 @@ export function buildGlbBlob(
   // accessors and become primitives of a single mesh/node.
   const sharedVertexData = new Map<object, { position: number; normal: number; uv: number; meshIndex: number }>();
 
-  meshes.forEach((entry) => {
-    // A mesh whose triangles all collapsed while welding has nothing to export.
-    if (entry.indices && entry.indices.length === 0) return;
+  // glTF importers (Blender's included) only share vertices WITHIN a primitive:
+  // every primitive of a mesh gets its own copy of the vertices it uses, even
+  // when several primitives point at the very same accessors. Welded entries
+  // that end up with the same material therefore have to be written as ONE
+  // primitive, or the weld between them exists in the file but is lost on
+  // import (the edges of one entry's triangles no longer meet the other's).
+  const materialOfEntry = new Map<ExportMeshEntry, number>();
+  const exportEntries: ExportMeshEntry[] = [];
+  {
+    const mergedByKey = new Map<string, ExportMeshEntry>();
+    const groupIds = new Map<object, number>();
+    for (const entry of meshes) {
+      if (entry.indices && entry.indices.length === 0) continue;
+      const materialIndex = getOrCreateMaterial(entry, entry.name);
+      if (!entry.weldGroup || !entry.indices) {
+        materialOfEntry.set(entry, materialIndex);
+        exportEntries.push(entry);
+        continue;
+      }
+      let groupId = groupIds.get(entry.weldGroup);
+      if (groupId === undefined) groupIds.set(entry.weldGroup, (groupId = groupIds.size));
+      const key = `${groupId}:${materialIndex}`;
+      const target = mergedByKey.get(key);
+      if (target) {
+        // appended in a loop, never push(...bigArray) (call-stack overflow on large meshes)
+        const merged = target.indices!;
+        for (let i = 0; i < entry.indices.length; i++) merged.push(entry.indices[i]);
+      } else {
+        // copy: the entry's own index array belongs to the caller
+        const copy: ExportMeshEntry = { ...entry, indices: entry.indices.slice() };
+        mergedByKey.set(key, copy);
+        materialOfEntry.set(copy, materialIndex);
+        exportEntries.push(copy);
+      }
+    }
+  }
+
+  exportEntries.forEach((entry) => {
 
     const welded = entry.indices
       ? { positions: entry.positions, normals: entry.normals, uvs: entry.uvs, indices: entry.indices }
@@ -525,7 +578,7 @@ export function buildGlbBlob(
     const indexAccessor = accessors.length;
     accessors.push({ bufferView: indexView, componentType: indexComponentType, count: welded.indices.length, type: "SCALAR" });
 
-    const materialIndex = getOrCreateMaterial(entry, entry.name);
+    const materialIndex = materialOfEntry.get(entry)!;
     const primitive = {
       attributes: { POSITION: positionAccessor, NORMAL: normalAccessor, TEXCOORD_0: uvAccessor },
       indices: indexAccessor,
