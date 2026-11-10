@@ -28,7 +28,7 @@ export interface ExportTextureCategoryOptions {
  *    of the normal map it was made from.
  *  - 'zip-script': downloads a .zip (PNGs + a Blender script that wires them
  *    up as displacement) alongside the normal .glb. */
-export type HeightMapMode = 'none' | 'occlusion' | 'replace-normal' | 'zip-script';
+export type HeightMapMode = 'occlusion' | 'replace-normal' | 'zip-script';
 
 /** How the viewport lights geometry. 'none' leaves textures unlit (only
  * available when the loaded scene actually has textures); 'flat' shades per
@@ -95,6 +95,11 @@ export interface AppConfiguration {
      * in FINAL export units - i.e. after "Resize exported object" (same
      * units as "Approximate height") - not raw capture units. */
     weldOptions: {
+      /** Push triangles with opposing normals (double-sided geometry) apart
+       * along their normals. When off, they are still kept unwelded but stay
+       * where they are, and the push distance/bias/falloff and the bridging of
+       * pushed-apart rims do nothing. */
+      pushOpposing: boolean;
       /** How far triangles with opposing normals (double-sided geometry) are
        * pushed apart along their normals. */
       pushDistance: number;
@@ -124,6 +129,10 @@ export interface AppConfiguration {
       /** Widest gap to bridge, in export units. */
       narrowGapDistance: number;
     };
+    /** Master switch for everything texture-related: when off, no base color,
+     * normal or metalness/roughness textures are exported and no height maps
+     * are generated (the per-category settings are kept, just ignored). */
+    exportTextures: boolean;
     resizeExportedObject: boolean;
     approximateHeight: number;
     moveToOrigin: boolean;
@@ -162,6 +171,9 @@ export interface AppConfiguration {
      * `enabled` checkbox - so height maps can be made without also
      * embedding the normal maps. */
     heightMaps: {
+      /** Whether height maps are generated at all (the "Generate height maps"
+       * checkbox); `mode` only matters while this is on. */
+      enabled: boolean;
       mode: HeightMapMode;
       /** Green-channel orientation of the SOURCE normal maps. */
       greenConvention: 'opengl' | 'directx';
@@ -233,13 +245,14 @@ export class Config {
       fillHoles: true,
       weldGeometry: false,
       fixSelfIntersections: false,
-      weldOptions: { pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true, pushBias: 0, pushFalloff: 8, bridgeNarrowGaps: true, narrowGapDistance: 0.05 },
-      resizeExportedObject: true,
+      weldOptions: { pushOpposing: true, pushDistance: 0.1, mergeDistance: 0.001, uvTolerance: 0.0001, opposingAngle: 162, weldAcrossDrawCalls: true, bridgePushedGaps: true, pushBias: 0, pushFalloff: 8, bridgeNarrowGaps: true, narrowGapDistance: 0.05 },
+      resizeExportedObject: false,
       approximateHeight: 100,
       moveToOrigin: true,
       exportType: 'output',
       litShading: false,
 
+      exportTextures: true,
       baseColorTextures: { enabled: true, excludedPaths: [] },
       normalTextures: { enabled: true, excludedPaths: [] },
       metallicRoughnessTextures: { enabled: true, excludedPaths: [] },
@@ -247,7 +260,7 @@ export class Config {
       metallicFactor: 0,
       roughnessFactor: 1,
 
-      heightMaps: { mode: 'none', greenConvention: 'opengl', maxSize: 1024 },
+      heightMaps: { enabled: false, mode: 'occlusion', greenConvention: 'opengl', maxSize: 1024 },
     },
 
     objectFiltering: {
@@ -369,6 +382,19 @@ export class Config {
    * there's no object there to read `.enabled` off of). Merging onto a
    * fresh copy of defaultConfig, field by field for every nested object,
    * means new fields silently pick up their default instead. */
+  /** Older saved configs have a `mode` that could be 'none' and no `enabled`
+   * flag: 'none' becomes enabled=false (keeping the default mode), any other
+   * mode becomes enabled=true so the old behaviour is preserved. */
+  private static migrateHeightMaps(
+    defaults: AppConfiguration['exportOptions']['heightMaps'],
+    saved: any,
+  ): AppConfiguration['exportOptions']['heightMaps'] {
+    const merged = { ...defaults, ...saved };
+    if (saved && typeof saved.enabled !== 'boolean') merged.enabled = saved.mode !== undefined && saved.mode !== 'none';
+    if (!['occlusion', 'replace-normal', 'zip-script'].includes(merged.mode)) merged.mode = defaults.mode;
+    return merged;
+  }
+
   private static mergeWithDefaults(saved: AppConfiguration): AppConfiguration {
     const defaults: AppConfiguration = JSON.parse(JSON.stringify(Config.defaultConfig));
     return {
@@ -391,7 +417,7 @@ export class Config {
           ...defaults.exportOptions.metallicRoughnessTextures,
           ...saved.exportOptions?.metallicRoughnessTextures,
         },
-        heightMaps: { ...defaults.exportOptions.heightMaps, ...saved.exportOptions?.heightMaps },
+        heightMaps: Config.migrateHeightMaps(defaults.exportOptions.heightMaps, saved.exportOptions?.heightMaps),
         weldOptions: { ...defaults.exportOptions.weldOptions, ...saved.exportOptions?.weldOptions },
       },
       objectFiltering: {

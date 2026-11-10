@@ -32,7 +32,7 @@ import { CaptureImporter } from './components/capture-importer/cmp.capture-impor
 import { LoadingScreen } from './components/loading-screen/cmp.loading-screen';
 import { Overlay } from './components/common/overlay/cmp.overlay';
 import { ExportMesh, type ExportTextureCategories, type ExportTextureCategoryEntry } from './components/export-mesh/cmp.export-mesh';
-import { Config, DEFAULT_VIEW_OPTIONS, type AppConfiguration, type ExportTextureCategoryOptions, type ViewShading } from './config/cls.config';
+import { Config, DEFAULT_VIEW_OPTIONS, type AppConfiguration, type ExportTextureCategoryOptions, type HeightMapMode, type ViewShading } from './config/cls.config';
 import { createViewMaterial, createViewUniforms, ViewLights } from './scene/view-material';
 import { UNIT_CONVERSION } from './util/const.unit-conversion';
 import { remapObjOrientation } from './util/axis-orientation';
@@ -3366,7 +3366,7 @@ export class SceneViewerApp {
     }
 
     const posed = exportOptions.exportType === "output";
-    const heightMode = exportOptions.heightMaps.mode;
+    const heightMode = this.effectiveHeightMode(exportOptions);
 
     this.elements.overlays.loadingScreen.show();
     this.elements.overlays.loadingScreen.log("Preparing export...");
@@ -3426,6 +3426,12 @@ export class SceneViewerApp {
       .finally(() => {
         this.elements.overlays.loadingScreen.hide();
       });
+  }
+
+  /** The height map mode that actually applies: "none" unless textures are
+   * exported at all AND "Generate height maps" is checked. */
+  private effectiveHeightMode(exportOptions: AppConfiguration["exportOptions"]): HeightMapMode | "none" {
+    return exportOptions.exportTextures && exportOptions.heightMaps.enabled ? exportOptions.heightMaps.mode : "none";
   }
 
   /** Distinct normal-map files (as resolved virtual-filesystem paths)
@@ -3605,7 +3611,7 @@ export class SceneViewerApp {
    * be wrong for a given capture, and this per-texture override is how
    * the user corrects that without losing every texture of that kind. */
   private shouldExportTexture(path: string | null, category: ExportTextureCategoryOptions): boolean {
-    return !!path && category.enabled && !category.excludedPaths.includes(path);
+    return !!path && this.appConfig.config.exportOptions.exportTextures && category.enabled && !category.excludedPaths.includes(path);
   }
 
   /** Loads (via the same cached TextureManager the diffuse map uses) the
@@ -3672,7 +3678,7 @@ export class SceneViewerApp {
     // normal slot in place of the normal map (the exporter lets normalImage
     // win over normalTexture), or - zip mode - nowhere in the .glb, just
     // remembered by file name for the zip's height_maps.json.
-    const heightMode = exportOptions.heightMaps.mode;
+    const heightMode = this.effectiveHeightMode(exportOptions);
     const normalSourceBinding = this.findDrawTextureBinding(draw, "normal map");
     const normalSourcePath = normalSourceBinding
       ? this.resolveTexturePath(draw, normalSourceBinding.textureFile, this.exportVfs())
@@ -3804,6 +3810,8 @@ export class SceneViewerApp {
         uvTolerance: options.uvTolerance,
         opposingAngleDegrees: options.opposingAngle,
         separationDistance: options.pushDistance * rawPerUnit,
+        noPush: !options.pushOpposing,
+        detectOpposingDraws: options.pushOpposing,
         pushBias: options.pushBias,
         pushFalloff: options.pushFalloff,
         bridgePushedGaps: options.bridgePushedGaps,
@@ -3814,7 +3822,7 @@ export class SceneViewerApp {
       // gaps to bridge, in raw units: narrow seams/cracks, and (back-to-back layers pushed
       // apart by up to 2 x the push distance) the rims of pushed-apart layers
       narrowGap: options.bridgeNarrowGaps ? options.narrowGapDistance * rawPerUnit : 0,
-      shellGap: options.bridgePushedGaps ? options.pushDistance * rawPerUnit * 2.5 : 0,
+      shellGap: options.pushOpposing && options.bridgePushedGaps ? options.pushDistance * rawPerUnit * 2.5 : 0,
     });
     console.info(
       `[weld] ${entries.length} mesh(es) -> ${result.groups.length} group(s), ${result.crossEntryGroups} spanning several draw calls, ${result.opposingEntries.length} draw call(s) pushed apart as opposing layers:`,
@@ -4177,7 +4185,7 @@ export class SceneViewerApp {
     this.activeExportPreviewDispose = this.attachMultiMeshPreview(host, draws, {
       interactive: true,
       poseMode: exportOptions.exportType === "output" ? "posed" : "non-posed",
-      textured: exportOptions.baseColorTextures.enabled,
+      textured: exportOptions.exportTextures && exportOptions.baseColorTextures.enabled,
       // Saved items are already posed in world space (see buildSavedExportSource()).
       sceneRotation: this.exportSource ? new THREE.Quaternion() : this.getActiveSceneRotation(),
     });

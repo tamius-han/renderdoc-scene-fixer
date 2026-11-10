@@ -62,6 +62,7 @@ export class ExportMesh extends Overlay {
     fillHolesCheckbox: HTMLInputElement;
     weldGeometryCheckbox: HTMLInputElement;
     weldOptionsContainer: HTMLElement;
+    weldPushOpposingCheckbox: HTMLInputElement;
     weldPushInput: HTMLInputElement;
     weldMergeInput: HTMLInputElement;
     weldUvInput: HTMLInputElement;
@@ -89,6 +90,8 @@ export class ExportMesh extends Overlay {
     roughnessFactorSlider: HTMLInputElement;
     roughnessFactorValue: HTMLElement;
 
+    exportTexturesCheckbox: HTMLInputElement;
+    heightEnabledCheckbox: HTMLInputElement;
     heightModeSelect: HTMLSelectElement;
     heightGreenSelect: HTMLSelectElement;
     heightSizeSelect: HTMLSelectElement;
@@ -129,6 +132,7 @@ export class ExportMesh extends Overlay {
     this.elements.fillHolesCheckbox = this.element.querySelector('#export-options-fill-holes') as HTMLInputElement;
     this.elements.weldGeometryCheckbox = this.element.querySelector('#export-options-weld-geometry') as HTMLInputElement;
     this.elements.weldOptionsContainer = this.element.querySelector('#export-options-weld-options') as HTMLElement;
+    this.elements.weldPushOpposingCheckbox = this.element.querySelector('#export-options-weld-push-opposing') as HTMLInputElement;
     this.elements.weldPushInput = this.element.querySelector('#export-options-weld-push') as HTMLInputElement;
     this.elements.weldMergeInput = this.element.querySelector('#export-options-weld-merge') as HTMLInputElement;
     this.elements.weldUvInput = this.element.querySelector('#export-options-weld-uv') as HTMLInputElement;
@@ -163,6 +167,8 @@ export class ExportMesh extends Overlay {
     this.elements.roughnessFactorSlider = this.element.querySelector('#export-options-roughness-factor') as HTMLInputElement;
     this.elements.roughnessFactorValue = this.element.querySelector('#export-options-roughness-factor-value') as HTMLElement;
 
+    this.elements.exportTexturesCheckbox = this.element.querySelector('#export-options-export-textures') as HTMLInputElement;
+    this.elements.heightEnabledCheckbox = this.element.querySelector('#export-options-height-enabled') as HTMLInputElement;
     this.elements.heightModeSelect = this.element.querySelector('#export-options-height-mode') as HTMLSelectElement;
     this.elements.heightGreenSelect = this.element.querySelector('#export-options-height-green') as HTMLSelectElement;
     this.elements.heightSizeSelect = this.element.querySelector('#export-options-height-size') as HTMLSelectElement;
@@ -183,6 +189,7 @@ export class ExportMesh extends Overlay {
     this.elements.fillHolesCheckbox.checked = this.appConfig.config.exportOptions.fillHoles;
     this.elements.weldGeometryCheckbox.checked = this.appConfig.config.exportOptions.weldGeometry;
     const weldOptions = this.appConfig.config.exportOptions.weldOptions;
+    this.elements.weldPushOpposingCheckbox.checked = weldOptions.pushOpposing;
     this.elements.weldPushInput.value = weldOptions.pushDistance.toString();
     this.elements.weldMergeInput.value = weldOptions.mergeDistance.toString();
     this.elements.weldUvInput.value = weldOptions.uvTolerance.toString();
@@ -194,13 +201,13 @@ export class ExportMesh extends Overlay {
     this.elements.fixSelfIntersectionsCheckbox.checked = this.appConfig.config.exportOptions.fixSelfIntersections;
     this.elements.weldAcrossDrawsCheckbox.checked = weldOptions.weldAcrossDrawCalls;
     this.elements.weldBridgeGapsCheckbox.checked = weldOptions.bridgePushedGaps;
-    this.elements.resizeExportedCheckbox.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
     this.elements.resizeExportedCheckbox.checked = this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.value = this.appConfig.config.exportOptions.approximateHeight.toString();
     this.elements.approximateHeightInput.disabled = !this.appConfig.config.exportOptions.resizeExportedObject;
     this.elements.approximateHeightInput.classList.toggle('disabled', !this.appConfig.config.exportOptions.resizeExportedObject);
     this.elements.moveToOriginCheckbox.checked = this.appConfig.config.exportOptions.moveToOrigin;
 
+    this.elements.exportTexturesCheckbox.checked = this.appConfig.config.exportOptions.exportTextures;
     this.elements.textureCategoryCheckboxes.baseColor.checked = this.appConfig.config.exportOptions.baseColorTextures.enabled;
     this.elements.textureCategoryCheckboxes.normal.checked = this.appConfig.config.exportOptions.normalTextures.enabled;
     this.elements.textureCategoryCheckboxes.metallicRoughness.checked = this.appConfig.config.exportOptions.metallicRoughnessTextures.enabled;
@@ -210,8 +217,9 @@ export class ExportMesh extends Overlay {
     this.refreshFactorReadouts();
 
     const heightOptions = this.appConfig.config.exportOptions.heightMaps;
+    this.elements.heightEnabledCheckbox.checked = heightOptions.enabled;
     this.elements.heightModeSelect.value = heightOptions.mode;
-    if (this.elements.heightModeSelect.value !== heightOptions.mode) this.elements.heightModeSelect.value = 'none'; // unknown/stale saved value
+    if (this.elements.heightModeSelect.value !== heightOptions.mode) this.elements.heightModeSelect.selectedIndex = 0; // unknown/stale saved value
     this.elements.heightGreenSelect.value = heightOptions.greenConvention;
     this.elements.heightSizeSelect.value = heightOptions.maxSize.toString();
     if (this.elements.heightSizeSelect.value !== heightOptions.maxSize.toString()) this.elements.heightSizeSelect.value = '1024';
@@ -226,6 +234,9 @@ export class ExportMesh extends Overlay {
     this.elements.splitLoosePartsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fillHolesCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.weldGeometryCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.weldPushOpposingCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.exportTexturesCheckbox.addEventListener('change', () => this.updateExportOptions());
+    this.elements.heightEnabledCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.fixSelfIntersectionsCheckbox.addEventListener('change', () => this.updateExportOptions());
     this.elements.weldBiasSlider.addEventListener('input', () => this.updateExportOptions());
     this.elements.weldNarrowGapsCheckbox.addEventListener('change', () => this.updateExportOptions());
@@ -295,6 +306,18 @@ export class ExportMesh extends Overlay {
     this.elements.fixSelfIntersectionsCheckbox.disabled = !weldEnabled;
     this.elements.fixSelfIntersectionsCheckbox.classList.toggle('disabled', !weldEnabled);
 
+    // Everything that only matters while opposing triangles are pushed apart.
+    const pushEnabled = this.elements.weldPushOpposingCheckbox.checked;
+    for (const control of [
+      this.elements.weldPushInput,
+      this.elements.weldBiasSlider,
+      this.elements.weldFalloffInput,
+      this.elements.weldBridgeGapsCheckbox,
+    ]) {
+      control.disabled = !pushEnabled;
+      control.classList.toggle('disabled', !pushEnabled);
+    }
+
     // The weld tunables only show while "Weld geometry" is checked.
     this.elements.weldOptionsContainer.classList.toggle('hidden', !this.elements.weldGeometryCheckbox.checked);
 
@@ -302,10 +325,22 @@ export class ExportMesh extends Overlay {
     this.elements.approximateHeightInput.disabled = !resizeEnabled;
     this.elements.approximateHeightInput.classList.toggle('disabled', !resizeEnabled);
 
-    // Height map size/green channel only matter once a mode other than
-    // "None" is picked.
-    const heightEnabled = this.elements.heightModeSelect.value !== 'none';
-    for (const control of [this.elements.heightGreenSelect, this.elements.heightSizeSelect]) {
+    // "Export textures" is the master switch for every texture option: the
+    // category checkboxes and pickers, and the height map controls.
+    const texturesEnabled = this.elements.exportTexturesCheckbox.checked;
+    for (const key of Object.keys(this.elements.textureCategoryCheckboxes) as TextureCategoryKey[]) {
+      for (const control of [this.elements.textureCategoryCheckboxes[key], this.elements.textureCategoryFields[key]]) {
+        control.disabled = !texturesEnabled;
+        control.classList.toggle('disabled', !texturesEnabled);
+      }
+    }
+    this.elements.heightEnabledCheckbox.disabled = !texturesEnabled;
+    this.elements.heightEnabledCheckbox.classList.toggle('disabled', !texturesEnabled);
+
+    // Height map mode/size/green channel only matter while height maps are
+    // being generated (which also needs textures to be exported).
+    const heightEnabled = texturesEnabled && this.elements.heightEnabledCheckbox.checked;
+    for (const control of [this.elements.heightModeSelect, this.elements.heightGreenSelect, this.elements.heightSizeSelect]) {
       control.disabled = !heightEnabled;
       control.classList.toggle('disabled', !heightEnabled);
     }
@@ -387,7 +422,7 @@ export class ExportMesh extends Overlay {
     const statusEl = this.elements.heightStatus;
     if (!statusEl) return;
     const mode = this.elements.heightModeSelect.value as HeightMapMode;
-    if (mode === 'none') {
+    if (!this.elements.exportTexturesCheckbox.checked || !this.elements.heightEnabledCheckbox.checked) {
       statusEl.textContent = '';
       return;
     }
@@ -549,6 +584,7 @@ export class ExportMesh extends Overlay {
       const value = parseFloat(input.value);
       return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
     };
+    weldOptions.pushOpposing = this.elements.weldPushOpposingCheckbox.checked;
     weldOptions.pushDistance = readNumber(this.elements.weldPushInput, 0, Infinity, weldOptions.pushDistance);
     weldOptions.mergeDistance = readNumber(this.elements.weldMergeInput, 0, Infinity, weldOptions.mergeDistance);
     weldOptions.uvTolerance = readNumber(this.elements.weldUvInput, 0, 1, weldOptions.uvTolerance);
@@ -564,6 +600,7 @@ export class ExportMesh extends Overlay {
     this.appConfig.config.exportOptions.moveToOrigin = this.elements.moveToOriginCheckbox.checked;
     this.appConfig.config.exportOptions.litShading = this.elements.litShadingCheckbox.checked;
 
+    this.appConfig.config.exportOptions.exportTextures = this.elements.exportTexturesCheckbox.checked;
     this.appConfig.config.exportOptions.baseColorTextures.enabled = this.elements.textureCategoryCheckboxes.baseColor.checked;
     this.appConfig.config.exportOptions.normalTextures.enabled = this.elements.textureCategoryCheckboxes.normal.checked;
     this.appConfig.config.exportOptions.metallicRoughnessTextures.enabled = this.elements.textureCategoryCheckboxes.metallicRoughness.checked;
@@ -573,6 +610,7 @@ export class ExportMesh extends Overlay {
     this.refreshFactorReadouts();
 
     const heightOptions = this.appConfig.config.exportOptions.heightMaps;
+    heightOptions.enabled = this.elements.heightEnabledCheckbox.checked;
     heightOptions.mode = this.elements.heightModeSelect.value as HeightMapMode;
     heightOptions.greenConvention = this.elements.heightGreenSelect.value === 'directx' ? 'directx' : 'opengl';
     heightOptions.maxSize = Number(this.elements.heightSizeSelect.value) || 1024;
